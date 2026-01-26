@@ -358,7 +358,8 @@ class TokenizerManager:
                 input_ids=input_ids,
                 sampling_params=sampling_params,
                 return_logprob=True,
-                logprob_start_len=logprob_start_len
+                logprob_start_len=logprob_start_len,
+                top_logprobs_num=0,
             )
             state = self._send_one_request(
                 dummy_obj,
