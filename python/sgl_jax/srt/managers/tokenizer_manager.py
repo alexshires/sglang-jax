@@ -289,124 +289,221 @@ class TokenizerManager:
 
     async def score_request(
         self,
-        query: str,
-        items: list[str],
+        query: str | list[int] | None = None,
+        items: str | list[str] | list[list[int]] | None = None,
         label_token_ids: list[int] = None,
         apply_softmax: bool = False,
         item_first: bool = False,
         request: fastapi.Request | None = None,
     ):
-        """Handle a scoring request."""
-        # TODO: Handle label_token_ids and apply_softmax (likely post-processing)
+        """Handle a scoring request.
         
+        Modes:
+        1. Sequence Scoring (label_token_ids is None):
+           Computes the log probability of the `items` given the `query` (or vice versa).
+           Returns a list of float scores (sum of logprobs).
+           
+        2. Next-Token Classification (label_token_ids is NOT None):
+           Computes the log probability of specific `label_token_ids` given the context (query + item).
+           Returns a list of list of float scores (logprobs for each label_token_id).
+        """
         created_time = time.time()
         async with self.is_pause_cond:
             await self.is_pause_cond.wait_for(lambda: not self.is_pause)
 
         self.auto_create_handle_loop()
 
-        # Tokenize query once
-        query_ids = self.tokenizer.encode(query)
-
-        # Tokenize all items
-        # TODO: This can be optimized with batch tokenization if needed
-        item_ids_list = [self.tokenizer.encode(item) for item in items]
-
-        futures = []
-        
-        for item_ids in item_ids_list:
-            if item_first:
-                input_ids = item_ids + query_ids
-                logprob_start_len = 0 # Return all logprobs? Or just item? Usually query is the context.
-                # If item_first, maybe we want P(Query|Item)? 
-                # Let's assume we want logprobs for the whole sequence or just the "target" part.
-                # In standard scoring P(completion|prompt), we want logprobs of completion.
-                # If item_first (Prompt|Completion)?? Unlikely.
-                # Let's assume standard behavior: return logprobs for the *second* part or specific part.
-                # For now, let's just stick to logprob_start_len logic.
-                # If item_first, input is item + query. 
-                pass
+        if label_token_ids is None:
+            # --- Mode 1: Sequence Scoring (New Implementation) ---
+            
+            # Tokenize query once if string
+            if isinstance(query, str):
+                query_ids = self.tokenizer.encode(query)
+            elif isinstance(query, list) and len(query) > 0 and isinstance(query[0], int):
+                 query_ids = query
             else:
-                input_ids = query_ids + item_ids
-                logprob_start_len = len(query_ids)
+                 # fallback/error handling or assume empty
+                 query_ids = []
 
-            # Create a unique request ID
-            rid = f"score-{uuid.uuid4().hex}"
+            # Tokenize all items
+            item_ids_list = []
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, str):
+                        item_ids_list.append(self.tokenizer.encode(item))
+                    elif isinstance(item, list):
+                        item_ids_list.append(item)
+            elif isinstance(items, str):
+                item_ids_list.append(self.tokenizer.encode(items))
+
+            futures = []
             
-            # Construct sampling params for prefill-only (max_new_tokens=0)
-            sampling_params = SamplingParams(
-                max_new_tokens=0,
-                temperature=0.0,
-            )
-            sampling_params.normalize(self.tokenizer)
-
-            tokenized_obj = TokenizedGenerateReqInput(
-                rid=rid,
-                text="", # We don't need text for internal processing
-                input_ids=input_ids,
-                sampling_params=sampling_params,
-                return_logprob=True,
-                return_output_logprob_only=False, # We want specific range
-                logprob_start_len=logprob_start_len,
-                top_logprobs_num=0,
-                token_ids_logprob=None,
-                stream=False,
-            )
-
-            dummy_obj = GenerateReqInput(
-                rid=rid,
-                input_ids=input_ids,
-                sampling_params=sampling_params,
-                return_logprob=True,
-                logprob_start_len=logprob_start_len,
-                top_logprobs_num=0,
-            )
-            state = self._send_one_request(
-                dummy_obj,
-                tokenized_obj, 
-                created_time
-            )
-            
-            futures.append(self._wait_one_response(state.obj, state, request))
-
-        # Wait for all results
-        results = []
-        # Gather results similar to _handle_batch_request logic but simplified since it's not streaming
-        # Actually _wait_one_response yields dictionaries. We want to list(gen) or await anext.
-        
-        for gen in futures:
-            try:
-                res = await gen.__anext__()
-                # Extract logprobs from res
-                meta_info = res["meta_info"]
-                
-                if "input_token_logprobs" in meta_info and meta_info["input_token_logprobs"]:
-                    token_logprobs = meta_info["input_token_logprobs"]
-                    # Filter out None values which might represent padding or non-computed tokens
-                    # token_logprobs is list of (logprob, token_id, token_str)
-                    valid_logprobs = [x[0] for x in token_logprobs if x is not None and x[0] is not None]
-                    score = sum(valid_logprobs)
-                elif "output_token_logprobs" in meta_info:
-                     # Fallback check (unlikely for max_new_tokens=0)
-                    token_logprobs = meta_info["output_token_logprobs"]
-                    score = sum(x[0] for x in token_logprobs)
+            for item_ids in item_ids_list:
+                if item_first:
+                    input_ids = item_ids + query_ids
+                    # For item_first, we probably want P(Query|Item).
+                    # logprob_start_len should start after item.
+                    logprob_start_len = len(item_ids)
                 else:
-                    score = -1e9 # Error?
-                    
-                results.append(score)
+                    input_ids = query_ids + item_ids
+                    # Standard: P(Item|Query)
+                    logprob_start_len = len(query_ids)
+
+                # Create a unique request ID
+                rid = f"score-{uuid.uuid4().hex}"
                 
-            except StopAsyncIteration:
-                 # Should not happen for non-streaming single result
-                 results.append(-1e9)
-            except Exception as e:
-                logger.error(f"Error processing score request: {e}")
-                raise e
+                # Construct sampling params for prefill-only (max_new_tokens=0)
+                sampling_params = SamplingParams(
+                    max_new_tokens=0,
+                    temperature=0.0,
+                )
+                sampling_params.normalize(self.tokenizer)
 
-        if apply_softmax:
-            # TODO: Implement softmax if needed, or let client handle it
-            pass
+                tokenized_obj = TokenizedGenerateReqInput(
+                    rid=rid,
+                    text="", # We don't need text for internal processing
+                    input_ids=input_ids,
+                    sampling_params=sampling_params,
+                    return_logprob=True,
+                    return_output_logprob_only=False, # We want specific range
+                    logprob_start_len=logprob_start_len,
+                    top_logprobs_num=0,
+                    token_ids_logprob=None,
+                    stream=False,
+                )
 
-        return results
+                dummy_obj = GenerateReqInput(
+                    rid=rid,
+                    input_ids=input_ids,
+                    sampling_params=sampling_params,
+                    return_logprob=True,
+                    logprob_start_len=logprob_start_len,
+                    top_logprobs_num=0,
+                )
+                state = self._send_one_request(
+                    dummy_obj,
+                    tokenized_obj, 
+                    created_time
+                )
+                
+                futures.append(self._wait_one_response(state.obj, state, request))
+
+            # Wait for all results
+            results = []
+            for gen in futures:
+                try:
+                    res = await gen.__anext__()
+                    # Extract logprobs from res
+                    meta_info = res["meta_info"]
+                    
+                    # We look for input_token_logprobs because we are scoring the input (prefill)
+                    if "input_token_logprobs" in meta_info and meta_info["input_token_logprobs"]:
+                        token_logprobs = meta_info["input_token_logprobs"]
+                        # Filter out None values
+                        valid_logprobs = [x[0] for x in token_logprobs if x is not None and x[0] is not None]
+                        score = sum(valid_logprobs)
+                    elif "output_token_logprobs" in meta_info and meta_info["output_token_logprobs"]:
+                         # Fallback
+                        token_logprobs = meta_info["output_token_logprobs"]
+                        score = sum(x[0] for x in token_logprobs if x is not None and x[0] is not None)
+                    else:
+                        score = -1e9 # Error?
+                        
+                    results.append(score)
+                    
+                except StopAsyncIteration:
+                     results.append(-1e9)
+                except Exception as e:
+                    logger.error(f"Error processing score request: {e}")
+                    raise e
+            
+            return results
+
+        else:
+            # --- Mode 2: Next-Token Classification (Old Implementation) ---
+            
+            if self.tokenizer is not None:
+                vocab_size = self.tokenizer.vocab_size
+                for token_id in label_token_ids:
+                    if token_id >= vocab_size:
+                        raise ValueError(
+                            f"Token ID {token_id} is out of vocabulary (vocab size: {vocab_size})"
+                        )
+
+            # Handle string or tokenized query/items
+            if isinstance(query, str) and (
+                isinstance(items, str)
+                or (isinstance(items, list) and (not items or isinstance(items[0], str)))
+            ):
+                # Both query and items are text
+                items_list = [items] if isinstance(items, str) else items
+                if item_first:
+                    prompts = [f"{item}{query}" for item in items_list]
+                else:
+                    prompts = [f"{query}{item}" for item in items_list]
+                batch_request = GenerateReqInput(
+                    text=prompts,
+                    return_logprob=True,
+                    token_ids_logprob=label_token_ids,
+                    stream=False,
+                    sampling_params={"max_new_tokens": 1},
+                )
+            elif (
+                isinstance(query, list)
+                and isinstance(items, list)
+                and items
+                and isinstance(items[0], list)
+            ):
+                # Both query and items are token IDs
+                if item_first:
+                    input_ids_list = [item + query for item in items]
+                else:
+                    input_ids_list = [query + item for item in items]
+                batch_request = GenerateReqInput(
+                    input_ids=input_ids_list,
+                    return_logprob=True,
+                    token_ids_logprob=label_token_ids,
+                    stream=False,
+                    sampling_params={"max_new_tokens": 1},
+                )
+            else:
+                raise ValueError("Invalid combination of query/items types for score_request.")
+
+            # Reuse generate_request
+            results_gen = await self.generate_request(batch_request, request).__anext__()
+            scores = []
+
+            for result in results_gen:
+                # Get logprobs for each token
+                logprobs = {}
+                # "output_token_ids_logprobs" contains the logprobs for the specific token_ids we requested
+                # Structure: [[(logprob, token_id, token_str), ...], ...] for each position.
+                # max_new_tokens=1 means we check position 0 of the output.
+                
+                output_logprobs = result["meta_info"].get("output_token_ids_logprobs", [])
+                if output_logprobs and len(output_logprobs) > 0:
+                     for logprob, token_id, _ in output_logprobs[0]:
+                        if token_id in label_token_ids:
+                            logprobs[token_id] = logprob
+
+                # Get scores in order of label_token_ids
+                score_list = [logprobs.get(token_id, float("-inf")) for token_id in label_token_ids]
+
+                # Apply softmax to logprobs if needed
+                if apply_softmax:
+                    score_list = jax.nn.softmax(jnp.asarray(score_list), axis=0).tolist()
+                else:
+                    # Convert logprobs to probabilities if not using softmax? 
+                    # The old code did: [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
+                    # IF apply_softmax is False.
+                    # Wait, usually score API returns LOGPROBS if apply_softmax is False?
+                    # The old code returned PROBABILITIES (exp(logprob)) if apply_softmax=False?
+                    # "Convert logprobs to probabilities if not using softmax"
+                    score_list = [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
+
+                scores.append(score_list)
+
+            return scores
 
     async def _tokenize_one_request(
         self,

@@ -72,5 +72,58 @@ class TestScoreAPI(unittest.TestCase):
             items=items,
         )
 
+    def test_score_request_with_labels(self):
+        # Test the "Old Mode" - Next Token Classification
+        query = "The color of the sky is"
+        # We want to check prob of " blue" vs " green"
+        items = [""] # Items are empty because we are just checking next token of query? 
+        # Or items are the candidates...
+        # In old API: query="The color of the sky is", items=[" blue", " green"], item_first=False
+        # prompts = ["The color of the sky is blue", "The color of the sky is green"]
+        # Wait, if I want to check just the next token, I should use items as candidates.
+        
+        # Le's try the exact usage from the old docstring if available, or just standard usage.
+        # If I want to classify "blue" vs "green":
+        # query = "The color of the sky is"
+        # items = [""]
+        # label_token_ids = [token_id_blue, token_id_green]
+        
+        # Actually proper usage for classification with labels often implies we just want to know 
+        # probability of specific tokens at the end of the prompt.
+        
+        # Let's rely on how `score_request` constructs prompts:
+        # prompts = [f"{query}{item}" for item in items_list] (if item_first=False)
+        # If items=[""], then prompt is just query.
+        
+        query = "The color of the sky is"
+        items = [""]
+        tokenizer = self.engine.tokenizer_manager.tokenizer
+        blue_id = tokenizer.encode(" blue")[0]
+        green_id = tokenizer.encode(" green")[0]
+        label_token_ids = [blue_id, green_id]
+        
+        loop = asyncio.get_event_loop()
+        results = loop.run_until_complete(
+            self.engine.tokenizer_manager.score_request(
+                query=query,
+                items=items,
+                label_token_ids=label_token_ids,
+                apply_softmax=True
+            )
+        )
+        
+        print(f"Label Scoring results: {results}")
+        
+        # Results should be a list of lists: [[score_blue, score_green]]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results[0]), 2)
+        
+        blue_score = results[0][0]
+        green_score = results[0][1]
+        
+        # Blue should be higher than green for "The color of the sky is"
+        self.assertGreater(blue_score, green_score)
+
+
 if __name__ == "__main__":
     unittest.main()
