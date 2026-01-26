@@ -827,7 +827,7 @@ class ScheduleBatch:
             self.top_logprobs_nums = [r.top_logprobs_num for r in reqs]
             self.token_ids_logprobs = [r.token_ids_logprob for r in reqs]
 
-        self.extend_logprob_start_lens = [r.extend_logprob_start_len for r in reqs]
+        self.extend_logprob_start_lens = np.array([r.extend_logprob_start_len for r in reqs], dtype=np.int32)
         self.extend_num_tokens = extend_num_tokens
         self.prefix_lens = prefix_lens
         self.extend_lens = extend_lens
