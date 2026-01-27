@@ -22,6 +22,7 @@ from typing import Any
 import fastapi
 import jax
 import jax.numpy as jnp
+import numpy as np
 import uvloop
 import zmq
 import zmq.asyncio
@@ -491,7 +492,11 @@ class TokenizerManager:
 
                 # Apply softmax to logprobs if needed
                 if apply_softmax:
-                    score_list = jax.nn.softmax(jnp.asarray(score_list), axis=0).tolist()
+                    # Use numpy for softmax to avoid JAX/TPU conflicts in this process
+                    # score_list is list of floats
+                    scores_arr = np.array(score_list)
+                    exp_scores = np.exp(scores_arr - np.max(scores_arr))
+                    score_list = (exp_scores / exp_scores.sum()).tolist()
                 else:
                     # Convert logprobs to probabilities if not using softmax? 
                     # The old code did: [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
