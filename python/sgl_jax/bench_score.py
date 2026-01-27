@@ -66,6 +66,7 @@ async def run_benchmark(args):
                  "model": args.model,
                  "query": query_ids,
                  "label_token_ids": [100] + [101] * (args.num_items - 1) if args.num_items > 0 else [100],
+                 "items": [""],
                  "apply_softmax": True,
              }
         else:
