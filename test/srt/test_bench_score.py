@@ -26,11 +26,14 @@ class TestBenchScore(CustomTestCase):
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
             # Use configurations suitable for v5e or generic
             other_args=[
-                "--precompile-bs-paddings", "1", "32", "128",
+                "--precompile-bs-paddings", "1", "32", "128", "1024",
                 "--precompile-token-paddings", "256", "1024", "2048", 
                 "--page-size", "128",
                 "--mem-fraction-static", "0.8",
                 "--chunked-prefill-size", "32768",
+                "--schedule-conservativeness", "1.0",
+                "--max-running-requests", "1024",
+                "--max-concurrency", "1024",
             ],
             check_cache_miss=False
         )
@@ -40,12 +43,12 @@ class TestBenchScore(CustomTestCase):
             args = SimpleNamespace(
                 base_url=base_url,
                 model=model,
-                num_prompts=1000,
+                num_prompts=2000,
                 query_len=128,
                 mode="classification",
                 num_items=2,
                 item_len=1,
-                max_concurrency=128
+                max_concurrency=1024
             )
             args.no_logprobs = True
             
