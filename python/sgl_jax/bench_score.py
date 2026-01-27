@@ -35,7 +35,7 @@ async def async_request_score(
                     output.success = True
                     output.latency = time.perf_counter() - st
                 else:
-                    output.error = response.reason or ""
+                    output.error = f"{response.reason}: {await response.text()}"
                     output.success = False
         except Exception:
             output.success = False
