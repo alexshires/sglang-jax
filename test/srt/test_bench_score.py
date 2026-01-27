@@ -23,7 +23,7 @@ class TestBenchScore(CustomTestCase):
         process = popen_launch_server(
             model,
             base_url,
-            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            timeout=600,
             # Use configurations suitable for v5e or generic
             other_args=[
                 "--precompile-bs-paddings", "1", "32", "128", "1024",
