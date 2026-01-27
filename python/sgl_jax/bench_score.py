@@ -83,6 +83,16 @@ async def run_benchmark(args):
 
     if requests:
         print(f"Sample Payload (0): {json.dumps(requests[0])}")
+        
+        # Warmup
+        print("Warmup: Sending 1 request to trigger compilation...")
+        try:
+             async with aiohttp.ClientSession() as session:
+                async with session.post(url=api_url, json=requests[0]) as response:
+                    await response.text()
+        except Exception as e:
+            print(f"Warmup failed (ignored): {e}")
+        print("Warmup done.")
 
     pbar = tqdm(total=args.num_prompts)
     tasks = []
