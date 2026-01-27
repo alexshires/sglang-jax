@@ -40,7 +40,7 @@ class TestBenchScore(CustomTestCase):
             args = SimpleNamespace(
                 base_url=base_url,
                 model=model,
-                num_prompts=100,
+                num_prompts=1000,
                 query_len=128,
                 mode="classification",
                 num_items=2,
