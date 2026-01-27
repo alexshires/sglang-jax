@@ -423,7 +423,7 @@ class TokenizerManager:
             # --- Mode 2: Next-Token Classification (Old Implementation) ---
             
             if self.tokenizer is not None:
-                vocab_size = self.tokenizer.vocab_size
+                vocab_size = len(self.tokenizer)
                 for token_id in label_token_ids:
                     if token_id >= vocab_size:
                         raise ValueError(
