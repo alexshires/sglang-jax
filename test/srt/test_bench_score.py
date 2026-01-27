@@ -33,7 +33,6 @@ class TestBenchScore(CustomTestCase):
                 "--mem-fraction-static", "0.8",
                 "--schedule-conservativeness", "1.0",
                 "--max-running-requests", "1024",
-                "--max-concurrency", "1024",
                 "--enable-mixed-chunk",
                 "--context-length", "4096",
                 "--disable-radix-cache",
