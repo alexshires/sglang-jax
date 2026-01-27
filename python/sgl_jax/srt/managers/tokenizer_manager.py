@@ -489,9 +489,6 @@ class TokenizerManager:
 
                 # Get scores in order of label_token_ids
                 score_list = [logprobs.get(token_id, float("-inf")) for token_id in label_token_ids]
-                print(f"DEBUG: label_token_ids={label_token_ids}")
-                print(f"DEBUG: extracted logprobs={logprobs}")
-                print(f"DEBUG: score_list pre-softmax={score_list}")
 
                 # Apply softmax to logprobs if needed
                 if apply_softmax:
