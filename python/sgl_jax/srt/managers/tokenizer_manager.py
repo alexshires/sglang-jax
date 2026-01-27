@@ -169,6 +169,8 @@ class TokenizerManager:
                 revision=server_args.revision,
                 sub_dir="tokenizer" if server_args.multimodal else "",
             )
+            self.vocab_size = len(self.tokenizer)
+
 
         # Store states
         self.no_create_loop = False
@@ -424,7 +426,7 @@ class TokenizerManager:
             # --- Mode 2: Next-Token Classification (Old Implementation) ---
             
             if self.tokenizer is not None:
-                vocab_size = len(self.tokenizer)
+                vocab_size = self.vocab_size
                 for token_id in label_token_ids:
                     if token_id >= vocab_size:
                         raise ValueError(
