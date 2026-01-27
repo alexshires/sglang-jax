@@ -98,8 +98,8 @@ class TestScoreAPI(unittest.TestCase):
         query = "The color of the sky is"
         items = [""]
         tokenizer = self.engine.tokenizer_manager.tokenizer
-        blue_id = tokenizer.encode(" blue")[0]
-        green_id = tokenizer.encode(" green")[0]
+        blue_id = tokenizer.encode(" blue")[-1]
+        green_id = tokenizer.encode(" green")[-1]
         label_token_ids = [blue_id, green_id]
         
         loop = asyncio.get_event_loop()
