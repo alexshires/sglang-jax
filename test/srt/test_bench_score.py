@@ -36,6 +36,8 @@ class TestBenchScore(CustomTestCase):
                 "--max-concurrency", "1024",
                 "--enable-mixed-chunk",
                 "--context-length", "4096",
+                "--disable-radix-cache",
+                "--disable-overlap-schedule",
             ],
             check_cache_miss=False
         )
