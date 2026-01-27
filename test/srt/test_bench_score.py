@@ -28,7 +28,7 @@ class TestBenchScore(CustomTestCase):
             other_args=[
                 "--precompile-token-paddings", "2048", 
                 "--precompile-bs-paddings", "1", 
-                "--page-size", "1",
+                "--page-size", "128",
                 "--mem-fraction-static", "0.8",
                 "--chunked-prefill-size", "2048",
             ],
