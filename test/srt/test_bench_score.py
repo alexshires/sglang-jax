@@ -26,8 +26,8 @@ class TestBenchScore(CustomTestCase):
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
             # Use configurations suitable for v5e or generic
             other_args=[
-                "--precompile-token-paddings", "2048", 
-                "--precompile-bs-paddings", "1", "32", "128", 
+                "--precompile-bs-paddings", "1", "32", "128",
+                "--precompile-token-paddings", "128", "1024", "2048", 
                 "--page-size", "128",
                 "--mem-fraction-static", "0.8",
                 "--chunked-prefill-size", "32768",
