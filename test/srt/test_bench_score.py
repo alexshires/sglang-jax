@@ -30,7 +30,7 @@ class TestBenchScore(CustomTestCase):
                 "--precompile-token-paddings", "256", "1024", "2048", "4096", "8192", 
                 "--chunked-prefill-size", "4096",
                 "--page-size", "128",
-                "--mem-fraction-static", "0.8",
+                "--mem-fraction-static", "0.7",
                 "--schedule-conservativeness", "1.0",
                 "--max-running-requests", "1024",
                 "--enable-mixed-chunk",
