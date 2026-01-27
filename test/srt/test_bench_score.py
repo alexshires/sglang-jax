@@ -27,12 +27,14 @@ class TestBenchScore(CustomTestCase):
             # Use configurations suitable for v5e or generic
             other_args=[
                 "--precompile-bs-paddings", "1", "32", "128", "1024",
-                "--precompile-token-paddings", "256", 
+                "--precompile-token-paddings", "256", "1024", "2048", "4096", "8192", 
+                "--chunked-prefill-size", "4096",
                 "--page-size", "128",
                 "--mem-fraction-static", "0.8",
-                "--chunked-prefill-size", "32768",
                 "--schedule-conservativeness", "1.0",
                 "--max-running-requests", "1024",
+                "--max-concurrency", "1024",
+                "--enable-mixed-chunk",
                 "--context-length", "4096",
             ],
             check_cache_miss=False
@@ -51,7 +53,7 @@ class TestBenchScore(CustomTestCase):
                 max_concurrency=1024
             )
             args.no_logprobs = True
-            
+            args.enable_flashinfer = False            
             print(f"Running benchmark on {model}...")
             res = asyncio.run(run_benchmark(args))
             print(f"Benchmark Result: {res}")
