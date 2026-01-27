@@ -27,10 +27,10 @@ class TestBenchScore(CustomTestCase):
             # Use configurations suitable for v5e or generic
             other_args=[
                 "--precompile-token-paddings", "2048", 
-                "--precompile-bs-paddings", "32", 
+                "--precompile-bs-paddings", "1,32,128", 
                 "--page-size", "128",
                 "--mem-fraction-static", "0.8",
-                "--chunked-prefill-size", "2048",
+                "--chunked-prefill-size", "32768",
             ],
             check_cache_miss=False
         )
@@ -45,7 +45,7 @@ class TestBenchScore(CustomTestCase):
                 mode="classification",
                 num_items=2,
                 item_len=1,
-                max_concurrency=32
+                max_concurrency=128
             )
             
             print(f"Running benchmark on {model}...")
