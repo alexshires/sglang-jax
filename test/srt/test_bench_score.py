@@ -27,7 +27,7 @@ class TestBenchScore(CustomTestCase):
             # Use configurations suitable for v5e or generic
             other_args=[
                 "--precompile-bs-paddings", "1", "32", "128", "1024",
-                "--precompile-token-paddings", "256", "1024", "2048", 
+                "--precompile-token-paddings", "256", 
                 "--page-size", "128",
                 "--mem-fraction-static", "0.8",
                 "--chunked-prefill-size", "32768",
