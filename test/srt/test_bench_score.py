@@ -33,6 +33,7 @@ class TestBenchScore(CustomTestCase):
                 "--chunked-prefill-size", "32768",
                 "--schedule-conservativeness", "1.0",
                 "--max-running-requests", "1024",
+                "--context-length", "4096",
             ],
             check_cache_miss=False
         )
