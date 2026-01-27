@@ -104,6 +104,12 @@ async def run_benchmark(args):
         print(f"Avg Latency: {np.mean(latencies)*1000:.2f} ms")
         print(f"P50 Latency: {np.percentile(latencies, 50)*1000:.2f} ms")
         print(f"P99 Latency: {np.percentile(latencies, 99)*1000:.2f} ms")
+    else:
+        print("No successful requests.")
+        failed_outputs = [out for out in outputs if not out.success]
+        if failed_outputs:
+             print(f"First error: {failed_outputs[0].error}")
+             print(f"Total failures: {len(failed_outputs)}")
 
     return {
         "throughput": success_count / total_time if total_time > 0 else 0,
