@@ -49,9 +49,11 @@ async def async_request_score(
 async def run_benchmark(args):
     print(f"Benchmarking with {args.num_prompts} requests...")
     api_url = f"{args.base_url}/v1/score"
+    print(f"Target API URL: {api_url}")
     
     # Generate requests
     requests = []
+    # ... (rest of generation)
     for _ in range(args.num_prompts):
         # random query
         query_len = args.query_len
@@ -77,6 +79,9 @@ async def run_benchmark(args):
                  "items": items,
              }
         requests.append(payload)
+
+    if requests:
+        print(f"Sample Payload (0): {json.dumps(requests[0])}")
 
     pbar = tqdm(total=args.num_prompts)
     tasks = []
