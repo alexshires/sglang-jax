@@ -67,8 +67,10 @@ async def run_benchmark(args):
                  "query": query_ids,
                  "label_token_ids": [100] + [101] * (args.num_items - 1) if args.num_items > 0 else [100],
                  "items": [[]],
-                 "apply_softmax": True,
              }
+             if not args.no_logprobs:
+                 payload["label_token_ids"] = [100] + [101] * (args.num_items - 1) if args.num_items > 0 else [100]
+                 payload["apply_softmax"] = True
         else:
              # use items
              num_items = args.num_items
@@ -144,6 +146,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-items", type=int, default=2)
     parser.add_argument("--item-len", type=int, default=1)
     parser.add_argument("--max-concurrency", type=int, default=64)
+    parser.add_argument("--no-logprobs", action="store_true", help="Disable logprobs to test transfer overhead")
     args = parser.parse_args()
     
     asyncio.run(run_benchmark(args))

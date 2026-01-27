@@ -47,6 +47,7 @@ class TestBenchScore(CustomTestCase):
                 item_len=1,
                 max_concurrency=128
             )
+            args.no_logprobs = True
             
             print(f"Running benchmark on {model}...")
             res = asyncio.run(run_benchmark(args))
