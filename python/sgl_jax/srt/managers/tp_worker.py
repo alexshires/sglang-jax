@@ -247,12 +247,11 @@ class ModelWorker:
         start_time = time.perf_counter()
         logger.info(
             "[EXTEND] Begin to precompile bs_paddings=%s token_paddings=%s",
-            self.precompile_bs_paddings[-1:],
+            self.precompile_bs_paddings,
             self.precompile_token_paddings,
         )
 
-        bs, _ = self.get_max_padded_size()
-        pairs = list(itertools.product([bs], self.precompile_token_paddings))
+        pairs = list(itertools.product(self.precompile_bs_paddings, self.precompile_token_paddings))
 
         with tqdm(pairs, desc="[EXTEND] PRECOMPILE", leave=False) as pbar:
             for pair in pbar:

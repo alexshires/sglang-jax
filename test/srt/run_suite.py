@@ -92,7 +92,7 @@ def run_unittest_files(files: List[TestFile], timeout_per_file: float):
                     print(f"Running: python3 -m unittest {test_path}\n", flush=True)
 
                     process = subprocess.Popen(
-                        ["uv", "run", "python3", "-m", "unittest", test_path],
+                        [sys.executable, "-m", "unittest", test_path],
                         stdout=sys.stdout,
                         stderr=sys.stderr,
                         env=os.environ,
@@ -116,7 +116,7 @@ def run_unittest_files(files: List[TestFile], timeout_per_file: float):
                 )
 
                 process = subprocess.Popen(
-                    ["uv", "run", "python3", filename],
+                    [sys.executable, filename],
                     stdout=sys.stdout,
                     stderr=sys.stderr,
                     env=os.environ,
@@ -409,6 +409,23 @@ suites = {
     ],
     "sglang_dependency_test": [],
     "unit-test-tpu-v6e-1": [
+        TestFile("python/sgl_jax/test/test_flashattention.py", 20),
+        TestFile("python/sgl_jax/test/test_moe_topk.py", 1),
+        TestFile("python/sgl_jax/test/kernels/fused_moe_v1_test.py", 10),
+        TestFile("python/sgl_jax/test/test_sampler.py", 0.2),
+        TestFile("python/sgl_jax/test/test_utils.py", 0.2),
+        TestFile("python/sgl_jax/test/test_kernel_utils.py", 0.1),
+        TestFile("python/sgl_jax/test/mem_cache/test_kv_cache.py", 20),
+        TestFile("python/sgl_jax/test/mem_cache/test_radix_cache.py", 0.2),
+        TestFile("python/sgl_jax/test/mem_cache/test_swa_radix_cache.py", 0.2),
+        TestFile("python/sgl_jax/test/speculative/test_eagle_tree_build.py", 1),
+        TestFile("python/sgl_jax/test/speculative/test_eagle_utils.py", 1),
+        TestFile("python/sgl_jax/test/multimodal/test_wan_vae_precision.py", 1),
+        TestFile("python/sgl_jax/test/multimodal/test_vae_scheduler.py", 2),
+        TestFile("test/srt/lora/test_bgmv_backend.py", 5),
+        TestFile("test/srt/lora/test_align_lora_accuracy.py", 10),
+    ],
+    "unit-test-tpu-v5e-1": [
         TestFile("python/sgl_jax/test/test_flashattention.py", 20),
         TestFile("python/sgl_jax/test/test_moe_topk.py", 1),
         TestFile("python/sgl_jax/test/kernels/fused_moe_v1_test.py", 10),
