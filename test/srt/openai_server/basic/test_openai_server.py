@@ -371,5 +371,232 @@ class TestOpenAIServer(CustomTestCase):
             client.models.retrieve("non-existent-model")
 
 
+class TestOpenAIV1Score(CustomTestCase):
+    """Test the /v1/score HTTP endpoint.
+
+    This test class validates the scoring API at the HTTP layer, ensuring that:
+    1. The endpoint accepts properly formatted requests
+    2. Returns correct HTTP status codes
+    3. Response format matches OpenAI-style API conventions
+    4. Scores are computed correctly end-to-end (HTTP → Engine → HTTP)
+
+    **API Endpoint:** POST /v1/score
+
+    **Request Format:**
+    {
+        "model": "model-name",
+        "query": "Is this true? ",
+        "items": ["Yes", "No", "Maybe"],
+        "label_token_ids": [9454, 2753],
+        "apply_softmax": true,
+        "item_first": false
+    }
+
+    **Response Format:**
+    {
+        "object": "scoring",
+        "model": "model-name",
+        "scores": [[0.9, 0.1], [0.1, 0.9], [0.5, 0.5]],
+        "usage": {
+            "prompt_tokens": 15,
+            "completion_tokens": 0,
+            "total_tokens": 15
+        }
+    }
+
+    **Differences from Engine-Level Tests:**
+    - Tests HTTP transport layer (requests/responses)
+    - Validates JSON serialization/deserialization
+    - Checks HTTP status codes and error handling
+    - Tests authentication (API key header)
+    - Validates OpenAI-compatible response format
+
+    **Why This Matters:**
+    Many users interact with SGLang via HTTP, not Python API. This ensures
+    the scoring endpoint works correctly in production deployments.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = DEFAULT_MODEL_NAME_FOR_TEST
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.api_key = "sk-123456"
+        cls.process = popen_launch_server(
+            cls.model,
+            cls.base_url,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            api_key=cls.api_key,
+            other_args=[
+                "--trust-remote-code",
+                "--skip-server-warmup",
+                "--random-seed",
+                "3",
+                "--mem-fraction-static",
+                "0.8",
+                "--chunked-prefill-size",
+                "2048",
+                "--download-dir",
+                "/dev/shm",
+                "--dtype",
+                "bfloat16",
+                "--precompile-bs-paddings",
+                "16",
+                "--precompile-token-paddings",
+                "16384",
+                "--max-running-requests",
+                "16",
+                "--page-size",
+                "64",
+            ],
+            env={
+                "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
+            },
+        )
+        cls.score_url = cls.base_url + "/v1/score"
+        cls.tokenizer = get_tokenizer(DEFAULT_MODEL_NAME_FOR_TEST, trust_remote_code=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+    def run_score(
+        self, query, items, label_token_ids, apply_softmax=False, item_first=False
+    ):
+        """Helper method to send scoring requests to the HTTP endpoint.
+
+        Constructs and sends a POST request to /v1/score with proper headers
+        and JSON payload. Handles authentication via Bearer token.
+
+        Args:
+            query: Query text or token IDs
+            items: List of item texts or token ID lists
+            label_token_ids: Token IDs to compute probabilities for
+            apply_softmax: Whether to normalize probabilities
+            item_first: Whether to prepend items to query
+
+        Returns:
+            requests.Response object containing status code, headers, and JSON body
+        """
+        response = requests.post(
+            self.score_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "query": query,
+                "items": items,
+                "label_token_ids": label_token_ids,
+                "apply_softmax": apply_softmax,
+                "item_first": item_first,
+            },
+        )
+        return response
+
+    def test_score_text_input(self):
+        """Test scoring with text input via HTTP endpoint.
+
+        **Purpose:**
+        Validates the most common use case: sending text strings to /v1/score
+        and receiving probability scores. This is the primary way users interact
+        with the scoring API in production.
+
+        **Test Flow:**
+        1. Prepare text inputs (query + items)
+        2. Get token IDs for scoring (using tokenizer)
+        3. Send POST request to /v1/score
+        4. Validate HTTP 200 response
+        5. Validate response structure and format
+        6. Validate score properties (types, ranges, normalization)
+
+        **Validated Response Properties:**
+        - HTTP status code = 200 (success)
+        - Response has "scores" field (list of lists)
+        - Response has "object" field = "scoring" (OpenAI convention)
+        - Number of score lists matches number of items
+        - Each score list length matches number of label_token_ids
+        - All scores are numeric (float or int)
+        - Scores sum to 1.0 when apply_softmax=True (probability validation)
+
+        **What This Catches:**
+        - HTTP routing errors (404)
+        - Authentication failures (401)
+        - Request validation errors (400, 422)
+        - JSON serialization bugs
+        - Response format inconsistencies
+        - Incorrect score computation at HTTP layer
+
+        **Production Importance:**
+        This test ensures that users can successfully call the API from:
+        - curl commands
+        - Python requests library
+        - OpenAI client libraries
+        - Any HTTP client in any language
+        """
+        query = "The capital of France is"
+        items = ["Paris", "London", "Berlin"]
+
+        # Get valid token IDs from the tokenizer
+        label_token_ids = []
+        for item in items:
+            token_ids = self.tokenizer.encode(item, add_special_tokens=False)
+            if not token_ids:
+                self.fail(f"Failed to encode item: {item}")
+            label_token_ids.append(token_ids[0])
+
+        response = self.run_score(query, items, label_token_ids, apply_softmax=True)
+
+        # Verify HTTP status code
+        self.assertEqual(
+            response.status_code,
+            200,
+            f"Expected 200, got {response.status_code}. Response: {response.text}",
+        )
+
+        # Parse response
+        response_data = response.json()
+
+        # Handle error responses
+        if response_data.get("type") == "BadRequestError":
+            self.fail(f"Score request failed with error: {response_data['message']}")
+
+        # Verify response structure
+        self.assertIn("scores", response_data, "Response should have a 'scores' field")
+        self.assertIn("object", response_data, "Response should have an 'object' field")
+        self.assertEqual(
+            response_data["object"],
+            "scoring",
+            "Object field should be 'scoring'",
+        )
+
+        scores = response_data["scores"]
+        self.assertIsInstance(scores, list, "scores should be a list")
+        self.assertEqual(
+            len(scores),
+            len(items),
+            "Number of scores should match number of items",
+        )
+
+        # Each score should be a list of floats in the order of label_token_ids
+        for i, score_list in enumerate(scores):
+            self.assertIsInstance(score_list, list, f"Score {i} should be a list")
+            self.assertEqual(
+                len(score_list),
+                len(label_token_ids),
+                f"Score {i} length should match label_token_ids",
+            )
+            self.assertTrue(
+                all(isinstance(v, (int, float)) for v in score_list),
+                f"Score {i} values should be numeric",
+            )
+            self.assertAlmostEqual(
+                sum(score_list),
+                1.0,
+                places=6,
+                msg=f"Score {i} probabilities should sum to 1",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,8 +19,6 @@ from http import HTTPStatus
 from typing import Any
 
 import fastapi
-import jax
-import jax.numpy as jnp
 import uvloop
 import zmq
 import zmq.asyncio
@@ -1241,7 +1239,7 @@ class TokenizerManager:
                 return_logprob=True,
                 token_ids_logprob=label_token_ids,
                 stream=False,
-                sampling_params={"max_new_tokens": 1},
+                sampling_params={"max_new_tokens": 0},
             )
         elif (
             isinstance(query, list)
@@ -1259,7 +1257,7 @@ class TokenizerManager:
                 return_logprob=True,
                 token_ids_logprob=label_token_ids,
                 stream=False,
-                sampling_params={"max_new_tokens": 1},
+                sampling_params={"max_new_tokens": 0},
             )
         else:
             raise ValueError("Invalid combination of query/items types for score_request.")
@@ -1268,9 +1266,17 @@ class TokenizerManager:
         scores = []
 
         for result in results:
+            # Validate output_token_ids_logprobs exists and is not empty
+            output_logprobs = result["meta_info"].get("output_token_ids_logprobs", [])
+            if not output_logprobs or len(output_logprobs) == 0:
+                raise RuntimeError(
+                    f"output_token_ids_logprobs is empty for request {result['meta_info'].get('id', '<unknown>')}. "
+                    "This indicates token_ids_logprobs were not computed properly."
+                )
+
             # Get logprobs for each token
             logprobs = {}
-            for logprob, token_id, _ in result["meta_info"].get("output_token_ids_logprobs", [])[0]:
+            for logprob, token_id, _ in output_logprobs[0]:
                 if token_id in label_token_ids:
                     logprobs[token_id] = logprob
 
@@ -1279,7 +1285,13 @@ class TokenizerManager:
 
             # Apply softmax to logprobs if needed
             if apply_softmax:
-                score_list = jax.nn.softmax(jnp.asarray(score_list), axis=0).tolist()
+                # Implement softmax using pure Python to avoid JAX device conflicts
+                # softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
+                max_logprob = max(score_list)
+                exp_scores = [math.exp(x - max_logprob) if x != float("-inf") else 0.0
+                              for x in score_list]
+                sum_exp = sum(exp_scores)
+                score_list = [x / sum_exp if sum_exp > 0 else 0.0 for x in exp_scores]
             else:
                 # Convert logprobs to probabilities if not using softmax
                 score_list = [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
