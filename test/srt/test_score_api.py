@@ -147,7 +147,7 @@ class TestScoreAPI(CustomTestCase):
         if cls.engine is not None:
             cls.engine.shutdown()
         # JAX doesn't require CUDA cache clearing, but we can clear compilation cache if needed
-        jax.clear_backends()
+        jax.clear_caches()
 
     def compute_hf_scores(
         self, query, items, label_token_ids, apply_softmax=False, item_first=False
