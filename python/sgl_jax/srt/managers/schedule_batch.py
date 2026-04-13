@@ -2153,20 +2153,37 @@ class ModelWorkerBatch:
 
 
 def get_last_loc(
+    req_to_token: jax.Array | np.ndarray,
+    req_pool_indices: np.ndarray,
+    prefix_lens: np.ndarray,
+) -> np.ndarray:
+    if isinstance(req_to_token, np.ndarray):
+        return get_last_loc_np(req_to_token, req_pool_indices, prefix_lens)
+    return get_last_loc_jax(req_to_token, req_pool_indices, prefix_lens)
+
+
+def get_last_loc_np(
     req_to_token: np.ndarray,
     req_pool_indices: np.ndarray,
     prefix_lens: np.ndarray,
 ) -> np.ndarray:
-    impl = get_last_loc_jax
-
-    return impl(req_to_token, req_pool_indices, prefix_lens)
+    """CPU implementation using numpy indexing."""
+    res = []
+    for i in range(len(req_pool_indices)):
+        idx = req_pool_indices[i]
+        plen = prefix_lens[i]
+        if plen > 0:
+            res.append(req_to_token[idx, plen - 1])
+        else:
+            res.append(-1)
+    return np.array(res, dtype=np.int32)
 
 
 def get_last_loc_jax(
-    req_to_token: np.ndarray,
+    req_to_token: jax.Array,
     req_pool_indices: np.ndarray,
     prefix_lens: np.ndarray,
-) -> np.ndarray:
+) -> jax.Array:
     def _get_single_last_loc(req_pool_idx, prefix_len):
         return jax.lax.cond(
             prefix_len > 0,

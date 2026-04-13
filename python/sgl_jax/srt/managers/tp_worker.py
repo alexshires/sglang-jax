@@ -444,6 +444,8 @@ class ModelWorker:
             top_logprobs_nums=None,
             token_ids_logprobs=None,
             extend_logprob_start_lens=None,
+            extend_start_loc=(np.zeros(bs, dtype=np.int32) if mode == ForwardMode.EXTEND else None),
+            temp_scaled_logprobs=False,
             capture_hidden_mode=capture_hidden_mode,
             apply_for_deepstack=(
                 mode == ForwardMode.EXTEND

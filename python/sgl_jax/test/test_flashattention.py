@@ -287,10 +287,10 @@ def create_test_data(
         token_ids_logprobs=None,
         extend_logprob_start_lens=None,
         extend_input_logprob_token_ids=None,
+        extend_start_loc=(np.zeros(seq_lens.shape[0], dtype=np.int32) if forward_mode == ForwardMode.EXTEND else None),
         real_bs=seq_lens.shape[0],
         spec_info=spec_info,
-    )
-
+        )
     fb = ForwardBatch(
         bid=1,
         forward_mode=forward_mode,

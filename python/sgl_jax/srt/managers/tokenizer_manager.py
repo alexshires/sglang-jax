@@ -1401,6 +1401,21 @@ class TokenizerManager:
             recv_obj.session_id if recv_obj.success else None
         )
 
+    def _notify_state_event(self, state: ReqState) -> None:
+        """Thread-safe wrapper around state.event.set().
+
+        If enable_engine_loop_run_forever_daemon was enabled, handle_loop would run on the daemon_loop thread, but the asyncio.Event's
+        internal Future belongs to the eval_loop (the loop that called
+        _send_one_request).  Calling fut.set_result() from the wrong thread
+        does not wake up eval_loop's selector.  call_soon_threadsafe writes to
+        the self-pipe so the selector returns from epoll_wait immediately.
+        """
+        loop = state.event_loop
+        if loop is not None:
+            loop.call_soon_threadsafe(state.event.set)
+        else:
+            state.event.set()
+
     async def score_request(
         self,
         query: str | list[int] | None = None,
@@ -1493,7 +1508,7 @@ class TokenizerManager:
                 token_ids_logprob=label_token_ids,
                 stream=False,
                 sampling_params={"max_new_tokens": 0},  # Prefill-only: no generation needed
-                is_multi_item_scoring=False,
+                
             )
             logger.debug(
                 "Scoring text prompts: num_items=%d, first_prompt_len=%d",
@@ -1517,7 +1532,7 @@ class TokenizerManager:
                 token_ids_logprob=label_token_ids,
                 stream=False,
                 sampling_params={"max_new_tokens": 0},  # Prefill-only: no generation needed
-                is_multi_item_scoring=False,
+                
             )
             logger.debug(
                 "Scoring token IDs: num_items=%d, first_ids_len=%d",

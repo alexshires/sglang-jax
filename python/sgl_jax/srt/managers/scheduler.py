@@ -39,6 +39,10 @@ from sgl_jax.srt.managers.io_struct import (
     GetInternalStateReqOutput,
     PauseGenerationReqInput,
     ProfileReq,
+    ReleaseScoringCacheReqInput,
+    ReleaseScoringCacheReqOutput,
+    ScoreFromCacheReqInput,
+    ScoreFromCacheReqOutput,
     SetInternalStateReq,
     SetInternalStateReqOutput,
     TokenizedGenerateReqInput,
@@ -422,6 +426,8 @@ class Scheduler(
                 (SetInternalStateReq, self.set_internal_state),
                 (PauseGenerationReqInput, self.pause_generation),
                 (ContinueGenerationReqInput, self.continue_generation),
+                (ScoreFromCacheReqInput, self.score_from_cache_v2),
+                (ReleaseScoringCacheReqInput, self.release_scoring_cache),
             ]
         )
 
@@ -452,9 +458,25 @@ class Scheduler(
         self.ingress_rpc_frames = 0
         self.ingress_tokenizer_messages = 0
         self.ingress_rpc_messages = 0
-        self.ingress_batch_size_histogram = {}
-        self.ingress_score_paths = {}
-        self.ingress_score_path_frames = {}
+        self.ingress_batch_size_histogram = {
+            "eq_0": 0,
+            "eq_1": 0,
+            "2_to_4": 0,
+            "5_to_16": 0,
+            "gt_16": 0,
+        }
+        self.ingress_score_paths = {
+            "tokenizer_cache_for_scoring": 0,
+            "tokenizer_extend_from_cache": 0,
+            "rpc_score_from_cache_v2": 0,
+            "rpc_release_scoring_cache": 0,
+        }
+        self.ingress_score_path_frames = {
+            "tokenizer_cache_for_scoring": 0,
+            "tokenizer_extend_from_cache": 0,
+            "rpc_score_from_cache_v2": 0,
+            "rpc_release_scoring_cache": 0,
+        }
 
         # Telemetry for scoring cache
         self.scoring_cache_lookups = 0

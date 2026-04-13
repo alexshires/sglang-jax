@@ -125,12 +125,12 @@ class TestScoreAPICore(CustomTestCase):
             device=cls.config.device,
             random_seed=3,
             node_rank=0,
-            mem_fraction_static=0.7,
+            mem_fraction_static=0.1,
             chunked_prefill_size=1024,
-            download_dir="/tmp",
+            download_dir="/tmp/models",
             dtype=cls.config.dtype,
             precompile_bs_paddings=cls.config.precompile_bs_paddings,
-            max_running_requests=8,
+            max_running_requests=4,
             skip_server_warmup=True,
             attention_backend="fa",
             precompile_token_paddings=[1024],
@@ -138,6 +138,7 @@ class TestScoreAPICore(CustomTestCase):
             log_requests=True,
             log_level="debug",
             enable_deterministic_sampling=True,
+            enable_scoring_cache=True,
         )
         cls.tokenizer = get_tokenizer(cls.model_path)
 
@@ -678,12 +679,12 @@ class TestScoreAPIHFReference(CustomTestCase):
             device=cls.config.device,
             random_seed=3,
             node_rank=0,
-            mem_fraction_static=0.7,
+            mem_fraction_static=0.1,
             chunked_prefill_size=1024,
-            download_dir="/tmp",
+            download_dir="/tmp/models",
             dtype=cls.config.dtype,
             precompile_bs_paddings=cls.config.precompile_bs_paddings,
-            max_running_requests=8,
+            max_running_requests=4,
             skip_server_warmup=True,
             attention_backend="fa",
             precompile_token_paddings=[1024],
@@ -691,6 +692,7 @@ class TestScoreAPIHFReference(CustomTestCase):
             log_requests=True,
             log_level="debug",
             enable_deterministic_sampling=True,
+            enable_scoring_cache=True,
         )
         cls.tokenizer = get_tokenizer(cls.model_path)
 
