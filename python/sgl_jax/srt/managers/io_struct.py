@@ -84,6 +84,11 @@ class BatchStrOut:
 
     # The routed experts for each output token
     output_routed_experts: list[str | None] = None
+    # Optional scheduler-side timings for request instrumentation.
+    scheduler_queue_wait_s: list[float] | None = None
+    scheduler_device_compute_s: list[float] | None = None
+    scheduler_host_overhead_s: list[float] | None = None
+    scheduler_dispatch_count: list[int] | None = None
 
 
 @dataclass
@@ -130,6 +135,11 @@ class BatchTokenIDOut:
 
     # The routed experts for each output token
     output_routed_experts: list[np.ndarray] = None
+    # Optional scheduler-side timings for request instrumentation.
+    scheduler_queue_wait_s: list[float] | None = None
+    scheduler_device_compute_s: list[float] | None = None
+    scheduler_host_overhead_s: list[float] | None = None
+    scheduler_dispatch_count: list[int] | None = None
 
 
 @dataclass
@@ -165,6 +175,18 @@ class TokenizedGenerateReqInput:
     return_hidden_states: bool = False
     # multimodal inputs (e.g., mrope positions, embeddings)
     mm_inputs: dict | None = None
+    # Multi-item scoring request marker.
+    is_multi_item_scoring: bool = False
+    # Delimiter token id used for multi-item scoring.
+    multi_item_scoring_delimiter: int | None = None
+    # Optional algorithm selector for multi-item scoring.
+    multi_item_algorithm: str | None = None
+    # Optional mask mode override for multi-item scoring.
+    multi_item_mask_mode: str | None = None
+    # Keep prefetched prefix KV cache for scoring.
+    cache_for_scoring: bool = False
+    # Request ID handle whose cached prefix should be extended.
+    extend_from_cache: str | None = None
 
 
 @dataclass
@@ -219,6 +241,47 @@ class FlushCacheReqOutput(BaseReq):
     success: bool
     flushed_items: int = 0
     error_msg: str = ""
+
+
+@dataclass
+class ReleaseScoringCacheReqInput(BaseReq):
+    pass
+
+
+@dataclass
+class ReleaseScoringCacheReqOutput(BaseReq):
+    success: bool = True
+    released_items: int = 0
+    error_msg: str = ""
+
+
+@dataclass
+class ScoreFromCacheReqInput(BaseReq):
+    cache_handle: str = ""
+    items_2d: list[list[int]] = field(default_factory=list)
+    label_token_ids: list[int] = field(default_factory=list)
+    apply_softmax: bool = False
+    items_per_step: int = 64
+    token_budget: int = 0
+    max_total_tokens: int = 0
+
+
+@dataclass
+class ScoreFromCacheReqOutput(BaseReq):
+    success: bool = True
+    scores: list[list[float]] = field(default_factory=list)
+    fallback_reason: str | None = None
+    error_msg: str = ""
+    dispatch_count: int = 0
+    lifecycle_requests_sent: int = 0
+    lifecycle_results_received: int = 0
+    queue_wait_s: float = 0.0
+    device_compute_s: float = 0.0
+    host_orchestration_s: float = 0.0
+    effective_items_per_step: int = 0
+    dispatch_token_budget: int = 0
+    replica_lane_count: int = 1
+    topology_name: str = ""
 
 
 # Type definitions for multimodal input data
@@ -304,6 +367,18 @@ class GenerateReqInput:
     extra_key: list[str] | str | None = None
 
     return_routed_experts: list[bool] | bool | None = None
+    # Multi-item scoring request marker.
+    is_multi_item_scoring: list[bool] | bool | None = None
+    # Delimiter token id used for multi-item scoring.
+    multi_item_scoring_delimiter: list[int | None] | int | None = None
+    # Optional algorithm selector for multi-item scoring.
+    multi_item_algorithm: list[str | None] | str | None = None
+    # Optional mask mode override for multi-item scoring.
+    multi_item_mask_mode: list[str | None] | str | None = None
+    # Keep prefetched prefix KV cache for scoring.
+    cache_for_scoring: list[bool] | bool | None = None
+    # Request ID handle whose cached prefix should be extended.
+    extend_from_cache: list[str | None] | str | None = None
 
     def contains_mm_input(self) -> bool:
         return (
@@ -368,6 +443,18 @@ class GenerateReqInput:
                 raise ValueError("Single request cannot have multiple lora_paths")
         if self.return_routed_experts is None:
             self.return_routed_experts = False
+        if self.is_multi_item_scoring is None:
+            self.is_multi_item_scoring = False
+        if self.multi_item_scoring_delimiter is None:
+            self.multi_item_scoring_delimiter = None
+        if self.multi_item_algorithm is None:
+            self.multi_item_algorithm = None
+        if self.multi_item_mask_mode is None:
+            self.multi_item_mask_mode = None
+        if self.cache_for_scoring is None:
+            self.cache_for_scoring = False
+        if self.extend_from_cache is None:
+            self.extend_from_cache = None
 
     def _handle_parallel_sampling(self):
         """Handle parallel sampling parameters and adjust batch size if needed."""
@@ -411,6 +498,7 @@ class GenerateReqInput:
         self._normalize_logprob_params(num)
         self._normalize_lora_paths(num)
         self._normalize_return_routed_experts(num)
+        self._normalize_multi_item_params(num)
 
     def _expand_inputs(self, num):
         """Expand the main inputs (text, input_ids, input_embeds) for parallel sampling."""
@@ -474,6 +562,26 @@ class GenerateReqInput:
     def _normalize_return_routed_experts(self, num):
         self.return_routed_experts = self._normalize_param(
             self.return_routed_experts, False, "return_routed_experts", num
+        )
+
+    def _normalize_multi_item_params(self, num):
+        self.is_multi_item_scoring = self._normalize_param(
+            self.is_multi_item_scoring, False, "is_multi_item_scoring", num
+        )
+        self.multi_item_scoring_delimiter = self._normalize_param(
+            self.multi_item_scoring_delimiter, None, "multi_item_scoring_delimiter", num
+        )
+        self.multi_item_algorithm = self._normalize_param(
+            self.multi_item_algorithm, None, "multi_item_algorithm", num
+        )
+        self.multi_item_mask_mode = self._normalize_param(
+            self.multi_item_mask_mode, None, "multi_item_mask_mode", num
+        )
+        self.cache_for_scoring = self._normalize_param(
+            self.cache_for_scoring, False, "cache_for_scoring", num
+        )
+        self.extend_from_cache = self._normalize_param(
+            self.extend_from_cache, None, "extend_from_cache", num
         )
 
     # Helper function to normalize a parameter
@@ -540,6 +648,12 @@ class GenerateReqInput:
             lora_path=self.lora_path[i] if self.lora_path is not None else None,
             lora_id=self.lora_id[i] if self.lora_id is not None else None,
             return_routed_experts=self.return_routed_experts[i],
+            is_multi_item_scoring=self.is_multi_item_scoring[i],
+            multi_item_scoring_delimiter=self.multi_item_scoring_delimiter[i],
+            multi_item_algorithm=self.multi_item_algorithm[i],
+            multi_item_mask_mode=self.multi_item_mask_mode[i],
+            cache_for_scoring=self.cache_for_scoring[i],
+            extend_from_cache=self.extend_from_cache[i],
         )
 
 
