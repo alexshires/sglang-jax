@@ -37,11 +37,7 @@ from sgl_jax.srt.kernels.fused_moe.v1.kernel import (
     FusedMoEBlockConfig,
     validate_fused_moe_block_config,
 )
-<<<<<<< HEAD
-from sgl_jax.srt.layers.moe import FusedEPMoE
-=======
 from sgl_jax.srt.layers.moe import FusedEPMoE, TopK
->>>>>>> main
 
 # Leave headroom for compiler padding/alignment and any unmodeled VMEM usage.
 DEFAULT_TPU_VMEM_BUDGET_MB = 60
@@ -132,11 +128,6 @@ def _estimate_vmem_bytes(
     b_gating = 2 * bt * padded_num_experts * router_bytes
     # t2e_routing_smem scratch is placed in SMEM (not VMEM).
     t2e_routing = 0
-<<<<<<< HEAD
-    # top_k_logits_vmem scratch: (bt, top_k) float32
-    top_k_logits = bt * top_k * 4
-=======
->>>>>>> main
 
     # See kernel scratch shapes: b_w1_x2_vmem/b_w3_x2_vmem/b_w2_x2_vmem.
     w1 = 2 * bd1 * bf * weight_bytes
@@ -166,30 +157,6 @@ def _estimate_vmem_bytes(
     a2a_s_acc_stage_b32 = 3 * bts * (bd2 // 2) * 4  # Approximation
 
     # Routing / top-k temporaries in kernel (best-effort conservative estimate):
-<<<<<<< HEAD
-    # - softmax + get_top_k use float32 work buffers and broadcasted iotas
-    # - top_k logits are materialized as `top_k` arrays of shape (bt, padded_top_k)
-    # This is separate from `t2e_routing_smem` above.
-    routing_work_f32 = bt * padded_num_experts * 4  # softmax result (approx)
-    get_top_k_input_f32 = bt * padded_num_experts * 4
-    get_top_k_t2e = bt * padded_num_experts * 4
-    get_top_k_iota = bt * padded_num_experts * 4
-    get_top_k_mask = bt * padded_num_experts * 4
-    get_top_k_padded_iota = bt * padded_top_k * 4
-    get_top_k_t2e_routing = bt * padded_top_k * 4
-    get_top_k_logits_sum = bt * padded_top_k * 4
-    get_top_k_logits_lst = top_k * bt * padded_top_k * 4
-    routing_temporaries = (
-        routing_work_f32
-        + get_top_k_input_f32
-        + get_top_k_t2e
-        + get_top_k_iota
-        + get_top_k_mask
-        + get_top_k_padded_iota
-        + get_top_k_t2e_routing
-        + get_top_k_logits_sum
-        + get_top_k_logits_lst
-=======
     b_topk_weights_x2_vmem = 2 * bt * padded_top_k * 4  # (2, bt, padded_top_k)
     b_topk_ids_x2_vmem = 2 * bt * padded_top_k * 4  # (2, bt, padded_top_k)
     expert_iota_vmem = 1 * 1 * padded_num_experts * 4  # (1, 1, padded_num_experts)
@@ -202,7 +169,6 @@ def _estimate_vmem_bytes(
         + expert_iota_vmem
         + routing_mask_vmem
         + expert_metadata_vmem
->>>>>>> main
     )
 
     total_bytes = (
@@ -210,10 +176,6 @@ def _estimate_vmem_bytes(
         + b_output
         + b_gating
         + t2e_routing
-<<<<<<< HEAD
-        + top_k_logits
-=======
->>>>>>> main
         + w1
         + w3
         + w2
@@ -865,26 +827,6 @@ def run_all(
             if quantization_config is not None:
                 fused_layer.quantize_weights()
 
-<<<<<<< HEAD
-            moe_def, moe_state = nnx.split(fused_layer)
-            moe_state_leaves, moe_state_def = jax.tree_util.tree_flatten(moe_state)
-
-            @partial(
-                jax.jit,
-                static_argnames=("moe_state_def", "block_config"),
-                compiler_options=_tpu_log_recorder_compiler_options(),
-            )
-            def run_no_mask(
-                tokens, router_logits, *, moe_state_def, moe_state_leaves, block_config
-            ):
-                moe_state = jax.tree_util.tree_unflatten(moe_state_def, moe_state_leaves)
-                moe = nnx.merge(moe_def, moe_state)
-                return moe(tokens, router_logits, block_config=block_config)
-
-            @partial(
-                jax.jit,
-                static_argnames=("moe_state_def", "block_config"),
-=======
             topk_module = TopK(
                 topk=case.top_k,
                 renormalize=case.renormalize_topk_logits,
@@ -926,7 +868,6 @@ def run_all(
             @partial(
                 jax.jit,
                 static_argnames=("moe_state_def", "topk_state_def", "block_config"),
->>>>>>> main
                 compiler_options=_tpu_log_recorder_compiler_options(),
             )
             def run_with_mask(
@@ -936,21 +877,12 @@ def run_all(
                 *,
                 moe_state_def,
                 moe_state_leaves,
-<<<<<<< HEAD
-=======
                 topk_state_def,
                 topk_state_leaves,
->>>>>>> main
                 block_config,
             ):
                 moe_state = jax.tree_util.tree_unflatten(moe_state_def, moe_state_leaves)
                 moe = nnx.merge(moe_def, moe_state)
-<<<<<<< HEAD
-                return moe(
-                    tokens,
-                    router_logits,
-                    token_valid_mask=token_valid_mask,
-=======
                 topk_state = jax.tree_util.tree_unflatten(topk_state_def, topk_state_leaves)
                 topk = nnx.merge(topk_def, topk_state)
 
@@ -960,7 +892,6 @@ def run_all(
                     tokens,
                     topk_weights,
                     topk_ids,
->>>>>>> main
                     block_config=block_config,
                 )
 
@@ -1000,11 +931,8 @@ def run_all(
                             data["router_logits"],
                             moe_state_def=moe_state_def,
                             moe_state_leaves=moe_state_leaves,
-<<<<<<< HEAD
-=======
                             topk_state_def=topk_state_def,
                             topk_state_leaves=topk_state_leaves,
->>>>>>> main
                             block_config=block_cfg,
                         )
                     return run_with_mask(
@@ -1013,11 +941,8 @@ def run_all(
                         token_valid_mask,
                         moe_state_def=moe_state_def,
                         moe_state_leaves=moe_state_leaves,
-<<<<<<< HEAD
-=======
                         topk_state_def=topk_state_def,
                         topk_state_leaves=topk_state_leaves,
->>>>>>> main
                         block_config=block_cfg,
                     )
 

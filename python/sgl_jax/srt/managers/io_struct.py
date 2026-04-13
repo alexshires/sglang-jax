@@ -9,10 +9,7 @@ import numpy as np
 
 from sgl_jax.srt.managers.schedule_batch import BaseFinishReason
 from sgl_jax.srt.multimodal.common.modality_enum import flatten_nested_list
-<<<<<<< HEAD
 from sgl_jax.srt.multimodal.common.multimodal_util import ImageData
-=======
->>>>>>> main
 
 # Handle serialization of Image for pydantic
 if TYPE_CHECKING:
@@ -31,15 +28,6 @@ def has_valid_data(data) -> bool:
 
 
 @dataclass
-<<<<<<< HEAD
-=======
-class ImageData:
-    url: str
-    detail: Literal["auto", "low", "high"] | None = "auto"
-
-
-@dataclass
->>>>>>> main
 class BaseReq:
     rid: str | list[str] | None = field(default=None, kw_only=True)
     http_worker_ipc: str | None = field(default=None, kw_only=True)
@@ -91,14 +79,12 @@ class BatchStrOut:
 
     # The routed experts for each output token
     output_routed_experts: list[str | None] = None
-<<<<<<< HEAD
+
     # Optional scheduler-side timings for request instrumentation.
     scheduler_queue_wait_s: list[float] | None = None
     scheduler_device_compute_s: list[float] | None = None
     scheduler_host_overhead_s: list[float] | None = None
     scheduler_dispatch_count: list[int] | None = None
-=======
->>>>>>> main
 
 
 @dataclass
@@ -145,14 +131,12 @@ class BatchTokenIDOut:
 
     # The routed experts for each output token
     output_routed_experts: list[np.ndarray] = None
-<<<<<<< HEAD
+
     # Optional scheduler-side timings for request instrumentation.
     scheduler_queue_wait_s: list[float] | None = None
     scheduler_device_compute_s: list[float] | None = None
     scheduler_host_overhead_s: list[float] | None = None
     scheduler_dispatch_count: list[int] | None = None
-=======
->>>>>>> main
 
 
 @dataclass
@@ -188,13 +172,10 @@ class TokenizedGenerateReqInput:
     return_hidden_states: bool = False
     # multimodal inputs (e.g., mrope positions, embeddings)
     mm_inputs: dict | None = None
-<<<<<<< HEAD
     # Keep prefetched prefix KV cache for scoring.
     cache_for_scoring: bool = False
     # Request ID handle whose cached prefix should be extended.
     extend_from_cache: str | None = None
-=======
->>>>>>> main
 
 
 @dataclass
@@ -251,7 +232,6 @@ class FlushCacheReqOutput(BaseReq):
     error_msg: str = ""
 
 
-<<<<<<< HEAD
 @dataclass
 class ReleaseScoringCacheReqInput(BaseReq):
     pass
@@ -287,8 +267,6 @@ class ScoreFromCacheReqOutput(BaseReq):
     host_orchestration_s: float = 0.0
 
 
-=======
->>>>>>> main
 # Type definitions for multimodal input data
 # Individual data item types for each modality
 ImageDataInputItem = Image | str | ImageData | dict
@@ -372,13 +350,10 @@ class GenerateReqInput:
     extra_key: list[str] | str | None = None
 
     return_routed_experts: list[bool] | bool | None = None
-<<<<<<< HEAD
     # Keep prefetched prefix KV cache for scoring.
     cache_for_scoring: list[bool] | bool | None = None
     # Request ID handle whose cached prefix should be extended.
     extend_from_cache: list[str | None] | str | None = None
-=======
->>>>>>> main
 
     def contains_mm_input(self) -> bool:
         return (
@@ -443,13 +418,10 @@ class GenerateReqInput:
                 raise ValueError("Single request cannot have multiple lora_paths")
         if self.return_routed_experts is None:
             self.return_routed_experts = False
-<<<<<<< HEAD
         if self.cache_for_scoring is None:
             self.cache_for_scoring = False
         if self.extend_from_cache is None:
             self.extend_from_cache = None
-=======
->>>>>>> main
 
     def _handle_parallel_sampling(self):
         """Handle parallel sampling parameters and adjust batch size if needed."""
@@ -493,10 +465,7 @@ class GenerateReqInput:
         self._normalize_logprob_params(num)
         self._normalize_lora_paths(num)
         self._normalize_return_routed_experts(num)
-<<<<<<< HEAD
         self._normalize_multi_item_params(num)
-=======
->>>>>>> main
 
     def _expand_inputs(self, num):
         """Expand the main inputs (text, input_ids, input_embeds) for parallel sampling."""
@@ -562,7 +531,6 @@ class GenerateReqInput:
             self.return_routed_experts, False, "return_routed_experts", num
         )
 
-<<<<<<< HEAD
     def _normalize_multi_item_params(self, num):
         self.cache_for_scoring = self._normalize_param(
             self.cache_for_scoring, False, "cache_for_scoring", num
@@ -571,8 +539,6 @@ class GenerateReqInput:
             self.extend_from_cache, None, "extend_from_cache", num
         )
 
-=======
->>>>>>> main
     # Helper function to normalize a parameter
     def _normalize_param(self, param, default_value, param_name, num):
         if param is None:
@@ -637,11 +603,8 @@ class GenerateReqInput:
             lora_path=self.lora_path[i] if self.lora_path is not None else None,
             lora_id=self.lora_id[i] if self.lora_id is not None else None,
             return_routed_experts=self.return_routed_experts[i],
-<<<<<<< HEAD
             cache_for_scoring=self.cache_for_scoring[i],
             extend_from_cache=self.extend_from_cache[i],
-=======
->>>>>>> main
         )
 
 
@@ -755,12 +718,9 @@ class ProfileReqInput:
     # 0: Disables Python function call tracing.
     # 1: Enables Python tracing (this is the default).
     python_tracer_level: int | None = None
-<<<<<<< HEAD
-=======
     stage_id: int | None = None  # Which stage to count steps for (multimodal only)
     profile_by_stage: bool = False  # Whether to profile prefill/decode separately
     profile_stages: list[str] | None = None  # Stages to profile, e.g. ["prefill", "decode"]
->>>>>>> main
 
 
 class ProfileReqType(Enum):
@@ -777,12 +737,9 @@ class ProfileReq:
     host_tracer_level: int | None = None
     python_tracer_level: int | None = None
     profile_id: str | None = None
-<<<<<<< HEAD
-=======
     stage_id: int | None = None
     profile_by_stage: bool = False
     profile_stages: list[str] | None = None
->>>>>>> main
 
 
 @dataclass

@@ -53,10 +53,7 @@ class ModelWorker:
         req_to_token_pool: ReqToTokenPool | None = None,
         is_draft_worker: bool = False,
         model_class=None,
-<<<<<<< HEAD
-=======
         precompile_params: dict | None = None,
->>>>>>> main
     ):
         # Parse args
         self.tp_size = server_args.tp_size
@@ -67,12 +64,9 @@ class ModelWorker:
         )
         self.server_args = server_args
 
-<<<<<<< HEAD
-=======
         # pre_precompile
         self.precompile_params = precompile_params
 
->>>>>>> main
         # LoRA configurations
         self.lora_paths = server_args.lora_paths
         self.max_loras_per_batch = server_args.max_loras_per_batch
@@ -405,8 +399,6 @@ class ModelWorker:
         valid_cache_loc = np.arange(bs)
         invalid_cache_loc = np.array([0] * (invalid_cache_loc_size), dtype=jnp.int32)
         lora_ids = ["0"] * bs
-<<<<<<< HEAD
-=======
         capture_hidden_mode = CaptureHiddenMode.NULL
         has_input_embedding = False
         has_deepstack_visual_embedding = False
@@ -419,7 +411,6 @@ class ModelWorker:
                 "deepstack_visual_embedding", False
             )
             is_mrope_position = self.precompile_params.get("mrope", False)
->>>>>>> main
 
         return ModelWorkerBatch(
             bid=1,
@@ -432,10 +423,7 @@ class ModelWorker:
             out_cache_loc=np.concat([valid_out_cache_loc, invalid_out_cache_loc], axis=0),
             return_logprob=False,
             return_output_logprob_only=True,
-<<<<<<< HEAD
             is_prefill_only=(mode == ForwardMode.EXTEND),
-=======
->>>>>>> main
             sampling_info=(
                 SamplingBatchInfo.generate_for_precompile(bs, self.model_config.vocab_size)
                 if speculative_algotithm is None
@@ -445,29 +433,18 @@ class ModelWorker:
             ),
             extend_input_logprob_token_ids=None,
             positions=np.concat([valid_positions, invalid_positions], axis=0),
-<<<<<<< HEAD
-            mrope_positions=None,
-            extend_start_loc=np.arange(bs, dtype=np.int64),
-=======
             mrope_positions=(
                 np.broadcast_to(np.arange(num_tokens, dtype=np.int32), (3, num_tokens))
                 if is_mrope_position
                 else None
             ),
->>>>>>> main
             cache_loc=np.concat([valid_cache_loc, invalid_cache_loc], axis=0),
             extend_prefix_lens=(np.array([0] * bs) if mode == ForwardMode.EXTEND else None),
             extend_seq_lens=np.array([1] * bs) if mode == ForwardMode.EXTEND else None,
             top_logprobs_nums=None,
             token_ids_logprobs=None,
             extend_logprob_start_lens=None,
-<<<<<<< HEAD
-            capture_hidden_mode=(
-                CaptureHiddenMode.FULL if self.server_args.multimodal else CaptureHiddenMode.NULL
-=======
             capture_hidden_mode=capture_hidden_mode,
-            spec_algorithm=speculative_algotithm,
-            lora_ids=lora_ids,  # Already set to [None] * bs above
             apply_for_deepstack=(
                 mode == ForwardMode.EXTEND
                 and self.server_args.multimodal
@@ -486,7 +463,6 @@ class ModelWorker:
                 and self.server_args.multimodal
                 and has_deepstack_visual_embedding
                 else None
->>>>>>> main
             ),
             spec_algorithm=speculative_algotithm,
             lora_ids=lora_ids,  # Already set to [None] * bs above
@@ -574,8 +550,6 @@ class ModelWorker:
             forward_batch = model_worker_batch.forward_batch
         else:
             forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
-<<<<<<< HEAD
-=======
 
         if forward_metadata is None:
             forward_metadata = self.worker.model_runner.attn_backend.get_forward_metadata(
@@ -597,7 +571,6 @@ class ModelWorker:
         )
 
         self.dump_topk_ids(layers_topk_ids, model_worker_batch)
->>>>>>> main
 
         if forward_metadata is None:
             forward_metadata = self.worker.model_runner.attn_backend.get_forward_metadata(
@@ -644,8 +617,6 @@ class ModelWorker:
         if launch_done is not None:
             launch_done.set()
 
-<<<<<<< HEAD
-=======
         self.sync_queue.put(
             (
                 layers_topk_ids,
@@ -653,7 +624,6 @@ class ModelWorker:
             )
         )
 
->>>>>>> main
         # SAVE last layer logits
         save_logits_file_info = os.getenv("DUMP_LAST_LAYER_LOGITS_FILENAMES", None)
         if save_logits_file_info:
@@ -679,13 +649,9 @@ class ModelWorker:
                     sampling_metadata,
                 )
                 cache_miss_count += count()
-<<<<<<< HEAD
             if model_worker_batch.return_output_logprob_only and (
                 new_logits_output is None or new_logits_output.next_token_logprobs is None
             ):
-=======
-            if model_worker_batch.return_output_logprob_only:
->>>>>>> main
                 logprobs = self.model_runner.compute_logprobs(token_logprobs, next_token_ids_device)
                 logits_output.next_token_logprobs = logprobs[: model_worker_batch.real_bs]
         if new_logits_output is not None:
