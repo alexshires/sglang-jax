@@ -1,8 +1,5 @@
 import logging
-<<<<<<< HEAD
-=======
 import os
->>>>>>> main
 import signal
 from queue import Queue
 from typing import Any
@@ -15,13 +12,6 @@ from sgl_jax.srt.managers.scheduler import Scheduler as AutoRegressiveScheduler
 from sgl_jax.srt.models.qwen2 import Qwen2ForCausalLM
 from sgl_jax.srt.models.umt5 import UMT5EncoderModel
 from sgl_jax.srt.multimodal.manager.device_manager import DeviceManager
-<<<<<<< HEAD
-from sgl_jax.srt.multimodal.manager.scheduler.diffusion_scheduler import (
-    DiffusionScheduler,
-)
-from sgl_jax.srt.multimodal.manager.scheduler.vae_scheduler import VaeScheduler
-from sgl_jax.srt.multimodal.manager.scheduler.vit_scheduler import VitScheduler
-=======
 from sgl_jax.srt.multimodal.manager.scheduler.audio_backbone_scheduler import (
     AudioBackboneScheduler,
 )
@@ -38,30 +28,23 @@ from sgl_jax.srt.multimodal.models.mimo_audio.mimo_audio_backbone import (
 from sgl_jax.srt.multimodal.models.mimo_audio.mimo_audio_tokenizer import (
     MiMoAudioTokenizer,
 )
->>>>>>> main
 from sgl_jax.srt.multimodal.models.qwen2_5VL.qwen2_5_vit import Qwen2_5_VL_VisionModel
 from sgl_jax.srt.multimodal.models.qwen2_5VL.qwen2_5_vl_generation import (
     Qwen2_5_VL_Generation,
 )
-<<<<<<< HEAD
-=======
 from sgl_jax.srt.multimodal.models.qwen3_omni_moe.qwen3_omni_thinker import (
     Qwen3OmniMoeThinkerTextForConditionalGeneration,
 )
 from sgl_jax.srt.multimodal.models.qwen3_omni_moe.qwen3_omni_thinker_embedding import (
     Qwen3OmniMoeThinkerEmbedding,
 )
->>>>>>> main
 from sgl_jax.srt.multimodal.models.wan.diffusion.wan_dit import (
     WanDualTransformer3DModel,
     WanTransformer3DModel,
 )
 from sgl_jax.srt.multimodal.models.wan.vaes.wanvae import AutoencoderKLWan
 from sgl_jax.srt.server_args import ServerArgs
-<<<<<<< HEAD
-=======
 from sgl_jax.srt.utils import configure_logger
->>>>>>> main
 from sgl_jax.srt.utils.mesh_utils import create_device_mesh
 from sgl_jax.utils import get_exception_traceback
 
@@ -147,8 +130,6 @@ class Stage:
 
         parent_process = psutil.Process().parent()
         try:
-<<<<<<< HEAD
-=======
             # Ensure stage threads honor server log level/format.
             configure_logger(self.server_args)
             level = getattr(logging, self.server_args.log_level.upper(), logging.INFO)
@@ -164,7 +145,6 @@ class Stage:
                         )
                     )
 
->>>>>>> main
             logger.info(
                 "Stage-%d is initializing, Scheduler:%s, Params:%s",
                 self.stage_id,
@@ -176,14 +156,6 @@ class Stage:
             comm_backend = QueueBackend(in_queue=self._in_queue, out_queue=self._out_queue)
             model_class = get_model_class(self.stage_config.model_class)
             stage_sub_dir = getattr(self.stage_config, "stage_sub_dir", None)
-<<<<<<< HEAD
-            self._stage_scheduler = scheduler_class(
-                communication_backend=comm_backend,
-                mesh=self.mesh,
-                server_args=self.server_args,
-                model_class=model_class,
-                stage_sub_dir=stage_sub_dir,
-=======
             precompile_params = getattr(self.stage_config, "precompile_params", None)
 
             stage_model_path = getattr(self.stage_config, "model_path", None)
@@ -203,7 +175,6 @@ class Stage:
                 model_class=model_class,
                 stage_sub_dir=stage_sub_dir,
                 precompile_params=precompile_params,
->>>>>>> main
                 **self.stage_config.scheduler_params,
             )
             self._out_queue.put_nowait({"status": "ready"})
@@ -248,15 +219,12 @@ def get_scheduler_class(name: str):
         return VaeScheduler
     elif name == "vit":
         return VitScheduler
-<<<<<<< HEAD
-=======
     elif name == "embedding":
         return EmbedScheduler
     elif name in ["audio_encoder", "audio_decoder"]:
         return AudioScheduler
     elif name == "audio_backbone":
         return AudioBackboneScheduler
->>>>>>> main
     else:
         raise ValueError(f"Unknown scheduler name: {name}")
 
@@ -276,8 +244,6 @@ def get_model_class(name: str):
         return Qwen2_5_VL_VisionModel
     elif name == "Qwen2ForCausalLM":
         return Qwen2ForCausalLM
-<<<<<<< HEAD
-=======
     elif name == "Qwen3OmniMoeThinkerEmbedding":
         return Qwen3OmniMoeThinkerEmbedding
     elif name == "Qwen3OmniMoeThinkerTextForConditionalGeneration":
@@ -286,6 +252,5 @@ def get_model_class(name: str):
         return MiMoAudioTokenizer
     elif name == "MiMoAudioForCausalLM":
         return MiMoAudioForCausalLM
->>>>>>> main
     else:
         raise ValueError(f"Unknown model name: {name}")

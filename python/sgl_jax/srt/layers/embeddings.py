@@ -262,8 +262,6 @@ class RotaryEmbedding:
         return cache
 
 
-<<<<<<< HEAD
-=======
 def apply_interleaved_rope(x: jax.Array, mrope_section: list[int]) -> jax.Array:
     """Apply interleaved MRoPE to 3D rotary embeddings in JAX.
     Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
@@ -448,7 +446,6 @@ class MRotaryEmbedding(RotaryEmbedding):
         return query, key
 
 
->>>>>>> main
 class Llama3RotaryEmbedding(RotaryEmbedding):
     def __init__(
         self,

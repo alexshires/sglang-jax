@@ -7,10 +7,7 @@ Linear models will use linear rules only; MoE models will use both.
 
 import os
 from dataclasses import dataclass
-<<<<<<< HEAD
-=======
 from numbers import Integral
->>>>>>> main
 
 import jax.numpy as jnp
 import yaml
@@ -59,8 +56,6 @@ def _resolve_config_path(config_path: str) -> str:
     )
 
 
-<<<<<<< HEAD
-=======
 def normalize_weight_block_size(
     weight_block_size: list[int] | tuple[int, int] | None,
 ) -> tuple[int, int] | None:
@@ -91,7 +86,6 @@ def normalize_weight_block_size(
     return (block_n, block_k)
 
 
->>>>>>> main
 @dataclass
 class QuantizationConfig:
     """Quantization configuration with explicit settings (no fallbacks).
@@ -100,23 +94,17 @@ class QuantizationConfig:
         linear_rules: List of quantization rules for linear layers
         moe_weight_dtype: Dtype for MoE weight quantization (None = no quantization)
         moe_activation_dtype: Dtype for MoE activation quantization (None = no quantization)
-<<<<<<< HEAD
-=======
         is_static_checkpoint: Whether the checkpoint is static (true for checkpoints quantized offline, false for on-the-fly quantization)
         ignored_layers: Optional list of layer name patterns to exclude from quantization
         weight_block_size: Optional block sizes for block quantization (e.g., [128, 128])
->>>>>>> main
     """
 
     linear_rules: list[dict] | None = None
     moe_weight_dtype: jnp.dtype | None = None
     moe_activation_dtype: jnp.dtype | None = None
     is_static_checkpoint: bool = False
-<<<<<<< HEAD
-=======
     ignored_layers: list[str] | None = None
     weight_block_size: tuple[int, int] | None = None
->>>>>>> main
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "QuantizationConfig":
@@ -149,10 +137,7 @@ class QuantizationConfig:
             )
 
         quant = cfg["quantization"]
-<<<<<<< HEAD
-=======
         ignored_layers = quant.get("ignored_layers")
->>>>>>> main
 
         # Parse linear rules (required)
         linear_section = quant.get("linear", {})
@@ -173,21 +158,15 @@ class QuantizationConfig:
         moe_weight_dtype = _str_to_dtype(moe_section.get("weight_dtype"))
         moe_activation_dtype = _str_to_dtype(moe_section.get("activation_dtype"))
         is_static_checkpoint = quant.get("is_static_checkpoint", False)
-<<<<<<< HEAD
-=======
         weight_block_size = normalize_weight_block_size(quant.get("weight_block_size"))
->>>>>>> main
 
         return cls(
             linear_rules=linear_rules,
             moe_weight_dtype=moe_weight_dtype,
             moe_activation_dtype=moe_activation_dtype,
             is_static_checkpoint=is_static_checkpoint,
-<<<<<<< HEAD
-=======
             ignored_layers=ignored_layers,
             weight_block_size=weight_block_size,
->>>>>>> main
         )
 
     @classmethod

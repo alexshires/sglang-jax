@@ -5,14 +5,11 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
-<<<<<<< HEAD
-=======
 from sgl_jax.srt.kernels.quantized_matmul.blockwise_utils import (
     get_blockwise_kernel,
     get_safe_blockwise_tuned_value,
     should_use_blockwise_kernel,
 )
->>>>>>> main
 from sgl_jax.srt.utils.quantization.quantization_utils import quantize_tensor_simple
 
 
@@ -23,11 +20,8 @@ def xla_quantized_matmul_local(
     quantize_activation: bool = True,
     reduce_axis: str | None = None,
     compute_dtype: jnp.dtype | None = None,
-<<<<<<< HEAD
-=======
     weight_block_size: tuple[int, int] | None = None,
     activation_quant_dtype: jnp.dtype | None = None,
->>>>>>> main
 ) -> jax.Array:
     """
     Local quantized matmul for use inside shard_map.
@@ -38,51 +32,6 @@ def xla_quantized_matmul_local(
     Args:
         x: Activation tensor [batch, n_input_features] (local slice)
         w_q: Quantized weight tensor [n_output_features, n_input_features] (local slice)
-<<<<<<< HEAD
-        w_scale: Weight quantization scale [n_output_features]
-        quantize_activation: Whether to quantize activations
-        reduce_axis: Axis name for psum reduction (e.g., "tensor"). None skips reduction.
-
-    Returns:
-        Output of the quantized matmul.
-    """
-    out_dtype = x.dtype
-    compute_dtype = out_dtype if compute_dtype is None else compute_dtype
-
-    if quantize_activation:
-        # Local quantization - each device uses its local max
-        x_q, x_scale = quantize_tensor_simple(x, w_q.dtype, dim=-1)
-
-        # Local matmul
-        out = lax.dot_general(
-            x_q,
-            w_q,
-            dimension_numbers=(((1,), (1,)), ((), ())),
-            preferred_element_type=compute_dtype,
-        )
-
-        # Local dequantization
-        out = out.astype(compute_dtype)
-        out = (
-            out * x_scale.astype(compute_dtype) * jnp.expand_dims(w_scale, 0).astype(compute_dtype)
-        )
-    else:
-        # Local matmul without activation quantization
-        out = lax.dot_general(
-            x,
-            w_q,
-            dimension_numbers=(((1,), (1,)), ((), ())),
-            preferred_element_type=compute_dtype,
-        )
-        out = out.astype(compute_dtype)
-        out = out * jnp.expand_dims(w_scale, 0).astype(compute_dtype)
-
-    # Sum partial results across devices (single all-reduce)
-    if reduce_axis is not None:
-        out = lax.psum(out, reduce_axis)
-
-    return out.astype(out_dtype)
-=======
         w_scale: Weight quantization scale.  Per-channel: ``[n_output_features]``.
             Block-wise (pre-expanded): ``[in_blocks, 1, n_output_features]``.
         quantize_activation: Whether to quantize activations
@@ -178,4 +127,3 @@ def xla_quantized_matmul_local(
         out = lax.psum(out, axis_name=reduce_axis)
 
     return out
->>>>>>> main

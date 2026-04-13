@@ -1,7 +1,4 @@
-<<<<<<< HEAD
-=======
 import logging
->>>>>>> main
 from functools import partial
 
 import jax
@@ -13,11 +10,8 @@ from sgl_jax.srt.model_loader.loader import get_model_loader
 from sgl_jax.srt.multimodal.configs.config_registry import get_vae_config
 from sgl_jax.srt.server_args import ServerArgs
 
-<<<<<<< HEAD
-=======
 logger = logging.getLogger(__name__)
 
->>>>>>> main
 
 class VaeModelRunner(BaseModelRunner):
     def __init__(

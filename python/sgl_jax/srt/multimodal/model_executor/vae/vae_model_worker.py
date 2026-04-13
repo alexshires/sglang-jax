@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-from sgl_jax.srt.multimodal.manager.schedule_batch import Req
-from sgl_jax.srt.multimodal.model_executor.vae.vae_model_runner import VaeModelRunner
-from sgl_jax.srt.server_args import ServerArgs
-=======
 import logging
 import time
 
@@ -18,7 +13,6 @@ from sgl_jax.srt.server_args import ServerArgs
 from sgl_jax.srt.utils.jax_utils import device_array
 
 logger = logging.getLogger(__name__)
->>>>>>> main
 
 
 class VaeModelWorker:
@@ -33,21 +27,16 @@ class VaeModelWorker:
         self.model_runner = VaeModelRunner(
             server_args, mesh, model_class=model_class, stage_sub_dir=stage_sub_dir
         )
-<<<<<<< HEAD
-=======
         self.server_args = server_args
         self.precompile_width_heights = server_args.precompile_width_heights
         self.precompile_frame_paddings = server_args.precompile_frame_paddings
         self.model_config = get_vae_config(self.server_args.model_path)
->>>>>>> main
         # Initialize model here based on model_config
 
     def forward(self, batch: Req):
         # Implement the vae model inference logic here
         # return batch
         return self.model_runner.forward(batch.latents, "decode")
-<<<<<<< HEAD
-=======
 
     def run_precompile(self):
         self.decode_precompile()
@@ -86,4 +75,3 @@ class VaeModelWorker:
 
     def encode_precompile(self):
         pass
->>>>>>> main

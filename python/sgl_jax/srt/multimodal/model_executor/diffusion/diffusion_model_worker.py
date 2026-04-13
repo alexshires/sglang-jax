@@ -1,10 +1,3 @@
-<<<<<<< HEAD
-from collections.abc import Callable
-
-import jax
-
-from sgl_jax.srt.multimodal.common.ServerArgs import MultimodalServerArgs
-=======
 import logging
 import time
 from collections.abc import Callable
@@ -17,17 +10,13 @@ from tqdm import tqdm
 
 from sgl_jax.srt.multimodal.common.ServerArgs import MultimodalServerArgs
 from sgl_jax.srt.multimodal.configs.config_registry import get_diffusion_config
->>>>>>> main
 from sgl_jax.srt.multimodal.manager.schedule_batch import Req
 from sgl_jax.srt.multimodal.model_executor.diffusion.diffusion_model_runner import (
     DiffusionModelRunner,
 )
-<<<<<<< HEAD
-=======
 from sgl_jax.srt.utils.jax_utils import device_array
 
 logger = logging.getLogger(__name__)
->>>>>>> main
 
 
 class DiffusionModelWorker:
@@ -43,12 +32,9 @@ class DiffusionModelWorker:
             server_args, self.mesh, model_class=model_class, stage_sub_dir=stage_sub_dir
         )
         self.initialize()
-<<<<<<< HEAD
-=======
         self.precompile_width_heights = server_args.precompile_width_heights
         self.precompile_frame_paddings = server_args.precompile_frame_paddings
         self.model_config = get_diffusion_config(server_args.model_path)
->>>>>>> main
 
     def initialize(self):
         pass
@@ -61,10 +47,7 @@ class DiffusionModelWorker:
         batch: Req,
         mesh: jax.sharding.Mesh,
         abort_checker: Callable[[], bool] | None = None,
-<<<<<<< HEAD
-=======
         step_callback: Callable[[], None] | None = None,
->>>>>>> main
     ) -> bool:
         """Generate video from text embeddings using the diffusion model.
 
@@ -77,9 +60,6 @@ class DiffusionModelWorker:
         Returns:
             True if the request was aborted, False otherwise.
         """
-<<<<<<< HEAD
-        return self.model_runner.forward(batch, mesh, abort_checker=abort_checker)
-=======
         return self.model_runner.forward(
             batch, mesh, abort_checker=abort_checker, step_callback=step_callback
         )
@@ -118,4 +98,3 @@ class DiffusionModelWorker:
                     self.model_runner.forward(req, self.mesh)
         end_time = time.perf_counter()
         logger.info("[DIFFUSION] Precompile finished in %.0f secs", end_time - start_time)
->>>>>>> main

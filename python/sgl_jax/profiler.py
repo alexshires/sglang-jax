@@ -78,13 +78,9 @@ def run_profile(
     profile_stages: list[str] | None = None,
 ):
     # step based profile will self terminate on num_steps constraints
-<<<<<<< HEAD
-    link = _run_profile(url, num_steps, activities, output_dir, profile_name, profile_by_stage)
-=======
     link = _run_profile(
         url, num_steps, activities, output_dir, profile_name, profile_by_stage, profile_stages
     )
->>>>>>> main
     return link
 
 

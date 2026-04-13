@@ -7,11 +7,7 @@ import psutil
 import setproctitle
 
 from sgl_jax.srt.managers.detokenizer_manager import DetokenizerManager
-<<<<<<< HEAD
-from sgl_jax.srt.managers.io_struct import AbortReq, BatchTokenIDOut
-=======
 from sgl_jax.srt.managers.io_struct import AbortReq, BatchTokenIDOut, ProfileReqOutput
->>>>>>> main
 from sgl_jax.srt.multimodal.manager.io_struct import DataType
 from sgl_jax.srt.multimodal.manager.schedule_batch import Req
 from sgl_jax.srt.server_args import PortArgs, ServerArgs
@@ -50,11 +46,6 @@ class MultimodalDetokenizer(DetokenizerManager):
                 (BatchTokenIDOut, self.handle_batch_token_id_out),
                 (Req, self.save_result),
                 (AbortReq, self._handle_abort_req),
-<<<<<<< HEAD
-            ]
-        )
-
-=======
                 (ProfileReqOutput, self._forward_profile_output),
             ]
         )
@@ -63,7 +54,6 @@ class MultimodalDetokenizer(DetokenizerManager):
         """Forward ProfileReqOutput through to the tokenizer manager."""
         return output
 
->>>>>>> main
     def _handle_abort_req(self, abort_req: AbortReq):
         """Forward an AbortReq to the tokenizer manager.
 
@@ -92,13 +82,10 @@ class MultimodalDetokenizer(DetokenizerManager):
         if req.output is None or len(req.output) == 0:
             logger.warning("No output to save for request id: %s", req.rid)
             return [req]
-<<<<<<< HEAD
-=======
 
         if req.data_type == DataType.AUDIO:
             return [req]
 
->>>>>>> main
         sample = req.output[0]
         if sample.ndim == 3:
             # for images, dim t is missing

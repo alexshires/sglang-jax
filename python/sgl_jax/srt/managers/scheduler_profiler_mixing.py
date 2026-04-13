@@ -156,10 +156,7 @@ class SchedulerProfilerMixin:
         self.profile_in_progress: bool = False
         self.host_tracer_level: int | None = None
         self.python_tracer_level: int | None = None
-<<<<<<< HEAD
-=======
         self._profile_manager = _ProfileManager()
->>>>>>> main
 
     def start_profile(
         self,
@@ -303,8 +300,6 @@ class SchedulerProfilerMixin:
         return ProfileReqOutput(success=True, message="Succeeded.")
 
     def _profile_batch_predicate(self, batch):
-<<<<<<< HEAD
-=======
         # Stage-based profiling path
         if self._profile_manager.is_configured:
             self._profile_manager.step(batch.forward_mode)
@@ -314,7 +309,6 @@ class SchedulerProfilerMixin:
             return
 
         # Existing step-counting path
->>>>>>> main
         if self.profiler_target_forward_ct and self.profiler_target_forward_ct <= self.forward_ct:
             self.stop_profile()
         if self.profiler_start_forward_ct and self.profiler_start_forward_ct == self.forward_ct:

@@ -9,10 +9,7 @@ stage_args:
    scheduler: auto_regressive
    final_output: false
    scheduler_params: {}
-<<<<<<< HEAD
-=======
    precompile_params: {"capture_hidden_mode": 2}
->>>>>>> main
    model_class: UMT5EncoderModel
 
  - stage_id: 1
@@ -22,10 +19,7 @@ stage_args:
      max_batch_size: 1
    scheduler: diffusion
    scheduler_params: {}
-<<<<<<< HEAD
-=======
    precompile_params: {"input_embedding": False, "deepstack_visual_embedding": False}
->>>>>>> main
    model_class: WanTransformer3DModel
    final_output: false
 

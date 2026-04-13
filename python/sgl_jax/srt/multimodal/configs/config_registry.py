@@ -6,13 +6,10 @@ import logging
 import os
 
 from sgl_jax.srt.multimodal.configs.dits.wan_model_config import WanModelConfig
-<<<<<<< HEAD
-=======
 from sgl_jax.srt.multimodal.configs.mimo_audio.mimo_audio_backbone_config import (
     MiMoAudioBackboneConfig,
 )
 from sgl_jax.srt.multimodal.configs.mimo_audio.mimo_audio_config import MiMoAudioConfig
->>>>>>> main
 from sgl_jax.srt.multimodal.configs.qwen_vl.qwen_2_5_vl_config import (
     QwenVLModelVitConfig,
 )
@@ -459,10 +456,6 @@ def get_vae_config(model_path: str) -> WanVAEConfig:
 
 def get_qwen_vl_config(model_path: str) -> QwenVLModelVitConfig:
     """Convenience function to get Qwen vl config.
-<<<<<<< HEAD
-
-=======
->>>>>>> main
     Args:
         model_path: The model path from server args.
 
@@ -470,8 +463,6 @@ def get_qwen_vl_config(model_path: str) -> QwenVLModelVitConfig:
         A VAE config instance configured for the specified model.
     """
     return QwenVLConfigRegistry.get_config(model_path)
-<<<<<<< HEAD
-=======
 
 
 class AudioConfigRegistry:
@@ -598,4 +589,3 @@ class AudioBackboneConfigRegistry:
 def get_audio_backbone_config(model_path: str) -> MiMoAudioBackboneConfig:
     """Convenience function to get audio backbone config."""
     return AudioBackboneConfigRegistry.get_config(model_path)
->>>>>>> main

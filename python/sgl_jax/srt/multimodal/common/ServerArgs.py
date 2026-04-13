@@ -19,12 +19,9 @@ class MultimodalServerArgs(ServerArgs):
     text_encoder_precisions: tuple[str, ...] = field(default_factory=lambda: ("fp32",))
     image_encoder_precision: str = "bf16"
 
-<<<<<<< HEAD
-=======
     precompile_width_heights: list[str] | None = None
     precompile_frame_paddings: list[int] | None = None
 
->>>>>>> main
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
         prefix_with_dot = ""
@@ -97,8 +94,6 @@ class MultimodalServerArgs(ServerArgs):
             help="Precision for image encoder",
         )
 
-<<<<<<< HEAD
-=======
         parser.add_argument(
             "--precompile-width-heights",
             type=str,
@@ -132,7 +127,6 @@ class MultimodalServerArgs(ServerArgs):
             self.precompile_width_heights = ["480*832"]
             self.precompile_frame_paddings = [1]
 
->>>>>>> main
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         attrs = [attr.name for attr in dataclasses.fields(cls)]

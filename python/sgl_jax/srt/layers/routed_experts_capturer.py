@@ -4,16 +4,12 @@
 # 1. Remove _RoutedExpertsDeviceCache and _RoutedExpertsHostCache due to at.set error
 # 2. The following codes are modified to Jax version according to SGLang codes.
 
-<<<<<<< HEAD
-import logging
-=======
 import contextlib
 import csv
 import datetime
 import logging
 import os
 import threading
->>>>>>> main
 import time
 from abc import ABC, abstractmethod
 
@@ -42,10 +38,6 @@ class RoutedExpertsCapturer(ABC):
         model_config: ModelConfig,
         num_tokens: int,
         max_padding: int,
-<<<<<<< HEAD
-    ):
-        if enable:
-=======
         ep_size: int,
         *,
         enable_balance_debug: bool = False,
@@ -57,13 +49,10 @@ class RoutedExpertsCapturer(ABC):
         physical_expert_counts: int = 256,
     ):
         if enable or enable_balance_debug or enable_dist_recorder:
->>>>>>> main
             return _RoutedExpertsCapturerReal(
                 model_config,
                 num_tokens=num_tokens,
                 max_padding=max_padding,
-<<<<<<< HEAD
-=======
                 ep_size=ep_size,
                 enable_host_buffer=enable,
                 enable_balance_debug=enable_balance_debug,
@@ -73,7 +62,6 @@ class RoutedExpertsCapturer(ABC):
                 dist_recorder_buffer_size=dist_recorder_buffer_size,
                 dist_recorder_output_file=dist_recorder_output_file,
                 physical_expert_counts=physical_expert_counts,
->>>>>>> main
             )
         else:
             return _RoutedExpertsCapturerNoop()
@@ -81,11 +69,7 @@ class RoutedExpertsCapturer(ABC):
     @abstractmethod
     def _sync_fwd_experts_buffer_DtoH(
         self,
-<<<<<<< HEAD
-        topk_ids: list[jax.Array],
-=======
         topk_ids_cpu: list[np.ndarray],
->>>>>>> main
         model_worker_batch: ModelWorkerBatch,
     ):
         raise NotImplementedError
@@ -104,13 +88,10 @@ class RoutedExpertsCapturer(ABC):
     def on_forward_end(self, topk_ids: list[jax.Array], model_worker_batch: ModelWorkerBatch):
         raise NotImplementedError
 
-<<<<<<< HEAD
-=======
     @abstractmethod
     def reset(self):
         raise NotImplementedError
 
->>>>>>> main
 
 class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
     """Capturer for routed experts with host buffer"""
@@ -120,9 +101,6 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         model_config: ModelConfig,
         num_tokens: int,
         max_padding: int,
-<<<<<<< HEAD
-    ):
-=======
         ep_size: int,
         *,
         enable_host_buffer: bool,
@@ -135,38 +113,11 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         physical_expert_counts: int,
     ):
         self.enable_host_buffer = enable_host_buffer
->>>>>>> main
         self.num_hidden_layers = model_config.hf_text_config.num_hidden_layers
         self.num_experts_per_tok = model_config.hf_text_config.num_experts_per_tok
         self.num_tokens = num_tokens
         self.max_padding = max_padding
 
-<<<<<<< HEAD
-        self.host_buffer = np.zeros(
-            (
-                self.num_hidden_layers,
-                self.num_tokens,
-                self.num_experts_per_tok,
-            ),
-            dtype=np.int32,
-        )
-        # Note: self.dummy_expert_ids is used to models whose some of layers are not MoE, like inclusionAI/Ling-mini-2.0
-        self.dummy_experts_ids = np.full(
-            (self.max_padding, self.num_experts_per_tok), fill_value=-1, dtype=np.int32
-        )
-        self.bid = None
-
-        """Common logging and memory usage computation for captured experts buffers."""
-        buffer_size_GB = self.get_buffer_size_bytes() / _GB
-        logger.info(
-            "Routing experts host buffer allocated. #tokens: %d, size: %.2f GB",
-            self.num_tokens,
-            buffer_size_GB,
-        )
-
-    def get_buffer_size_bytes(self):
-        assert hasattr(self, "host_buffer")
-=======
         if self.enable_host_buffer:
             self.host_buffer = np.zeros(
                 (
@@ -237,19 +188,10 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
     def get_buffer_size_bytes(self):
         if self.host_buffer is None:
             return 0
->>>>>>> main
         return get_array_size_bytes(self.host_buffer)
 
     def _sync_fwd_experts_buffer_DtoH(
         self,
-<<<<<<< HEAD
-        topk_ids: list[jax.Array],  # padded topk_ids
-        model_worker_batch: ModelWorkerBatch,
-    ):
-        unpadded_input_len = model_worker_batch.get_original_input_len()
-        valid_out_cache_loc_cpu = model_worker_batch.out_cache_loc[:unpadded_input_len]
-        topk_ids_cpu = jax.device_get(topk_ids)
-=======
         topk_ids_cpu: list[np.ndarray],  # padded topk_ids
         model_worker_batch: ModelWorkerBatch,
     ):
@@ -257,7 +199,6 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             return
         unpadded_input_len = model_worker_batch.get_original_input_len()
         valid_out_cache_loc_cpu = model_worker_batch.out_cache_loc[:unpadded_input_len]
->>>>>>> main
         for layer_idx, ids_cpu in enumerate(topk_ids_cpu):
             if ids_cpu is None:
                 valid_ids = self.dummy_experts_ids[:unpadded_input_len]
@@ -274,11 +215,8 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         req_to_token_pool: ReqToTokenPool,
         bid: int,
     ):
-<<<<<<< HEAD
-=======
         if not self.enable_host_buffer:
             raise RuntimeError("Host buffer is disabled. enable_return_routed_experts is required.")
->>>>>>> main
         cache_pool_idx = req_to_token_pool.req_to_token[req_pool_idx][: seqlen - 1]
         while True:
             if self.bid >= bid:
@@ -287,12 +225,6 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                 time.sleep(0.001)
 
     def on_forward_end(self, topk_ids: list[jax.Array], model_worker_batch: ModelWorkerBatch):
-<<<<<<< HEAD
-        self._sync_fwd_experts_buffer_DtoH(
-            topk_ids=topk_ids,
-            model_worker_batch=model_worker_batch,
-        )
-=======
         if not self.enable_host_buffer and self._balance_analyzer is None:
             return
         topk_ids_cpu = jax.device_get(topk_ids)
@@ -328,7 +260,6 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             pass
         if self._dist_recorder is not None:
             self._dist_recorder.reset()
->>>>>>> main
 
 
 class _RoutedExpertsCapturerNoop(RoutedExpertsCapturer):
@@ -337,11 +268,7 @@ class _RoutedExpertsCapturerNoop(RoutedExpertsCapturer):
 
     def _sync_fwd_experts_buffer_DtoH(
         self,
-<<<<<<< HEAD
-        topk_ids: list[jax.Array],
-=======
         topk_ids_cpu: list[np.ndarray],
->>>>>>> main
         model_worker_batch: ModelWorkerBatch,
     ):
         pass
@@ -358,12 +285,9 @@ class _RoutedExpertsCapturerNoop(RoutedExpertsCapturer):
     def on_forward_end(self, topk_ids: list[jax.Array], model_worker_batch: ModelWorkerBatch):
         pass
 
-<<<<<<< HEAD
-=======
     def reset(self):
         pass
 
->>>>>>> main
 
 _global_expert_capturer: RoutedExpertsCapturer | None = _RoutedExpertsCapturerNoop()
 
@@ -388,8 +312,6 @@ def extract_routed_experts_from_meta_info(data):
         )
         return routed_experts
     return None
-<<<<<<< HEAD
-=======
 
 
 class _ExpertBalanceAnalyzer:
@@ -627,4 +549,3 @@ class _ExpertDistributionRecorder:
         }
         np.save(filename, output_data)
         logger.info("Expert distribution dumped to %s", filename)
->>>>>>> main

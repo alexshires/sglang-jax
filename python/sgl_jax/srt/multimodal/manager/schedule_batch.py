@@ -1,30 +1,18 @@
-<<<<<<< HEAD
-=======
 import logging
->>>>>>> main
 from dataclasses import dataclass, field
 from typing import Any
 
 import jax
-<<<<<<< HEAD
-import PIL.Image
-
-from sgl_jax.srt.managers.io_struct import BatchTokenIDOut, TokenizedGenerateReqInput
-from sgl_jax.srt.multimodal.manager.io_struct import DataType, VLMMInputs
-=======
 import jax.numpy as jnp
 import numpy as np
 import PIL.Image
 
 from sgl_jax.srt.managers.io_struct import BatchTokenIDOut, TokenizedGenerateReqInput
 from sgl_jax.srt.multimodal.manager.io_struct import DataType, OmniInputs
->>>>>>> main
 from sgl_jax.srt.sampling.sampling_params import SamplingParams
 
 NegativePromptSuffix = "_negative"
 
-<<<<<<< HEAD
-=======
 # MiMo Audio aggregation constants
 MIMO_AUDIO_GROUP_SIZE = 4
 MIMO_AUDIO_CHANNELS = 8
@@ -41,7 +29,6 @@ MIMO_TEXT_PADDING = -100
 
 logger = logging.getLogger(__name__)
 
->>>>>>> main
 
 @dataclass
 class Req:
@@ -97,16 +84,11 @@ class Req:
     prompt_template: dict[str, Any] | None = None
     do_classifier_free_guidance: bool = False
 
-<<<<<<< HEAD
-    # VLM inputs/outputs
-    vlm_inputs: VLMMInputs | None = None
-=======
     # Omni/VLM inputs/outputs
     omni_inputs: OmniInputs | None = None
     audio_features: jax.Array | np.ndarray | None = None
     pixel_values_images: jax.Array | np.ndarray | None = None
     pixel_values_videos: jax.Array | np.ndarray | None = None
->>>>>>> main
     vision_embeds: jax.Array | None = None
     input_embeds: jax.Array | None = None
     image_grid_thw: tuple | None = None
@@ -205,14 +187,6 @@ class Req:
     # results
     output: jax.Array | None = None
 
-<<<<<<< HEAD
-    def to_stage_reqs(self, scheduler: str):
-        if scheduler == "auto_regressive":
-            is_vlm_request = (
-                self.vlm_inputs is not None or self.extra.get("sampling_params") is not None
-            )
-            if is_vlm_request:
-=======
     # Audio inputs
     audio_input: jax.Array | None = None
     mel_input: jax.Array | None = None  # Preprocessed mel spectrogram [B, T, n_mels]
@@ -253,7 +227,6 @@ class Req:
                 self.omni_inputs is not None or self.extra.get("sampling_params") is not None
             )
             if is_omni_request:
->>>>>>> main
                 params = self.extra.get("sampling_params")
                 if isinstance(params, SamplingParams):
                     sampling_params = params
@@ -273,11 +246,7 @@ class Req:
                     sampling_params=sampling_params,
                     stream=bool(self.extra.get("stream", False)),
                 )
-<<<<<<< HEAD
-                tokenized_req.mm_inputs = self.vlm_inputs
-=======
                 tokenized_req.mm_inputs = self.omni_inputs
->>>>>>> main
                 return [tokenized_req]
             return [
                 TokenizedGenerateReqInput(
@@ -293,8 +262,6 @@ class Req:
                     return_hidden_states=True,
                 ),
             ]
-<<<<<<< HEAD
-=======
         elif scheduler == "audio_backbone":
             if self.output is not None and self.audio_codes is None:
                 self.audio_codes = self.output
@@ -325,7 +292,6 @@ class Req:
                 self.generated_audio_tokens = None
             self.audio_mode = "decode"
             return [self]
->>>>>>> main
         else:
             return [self]
 
@@ -368,8 +334,6 @@ class Req:
             return req
         else:
             return stage_result
-<<<<<<< HEAD
-=======
 
     def _build_backbone_input(self) -> jax.Array:
         """Build backbone input by aggregating text and audio into [1, 9, seq_len] format.
@@ -586,4 +550,3 @@ class Req:
                 rows.append(row)
 
         return jnp.stack(rows, axis=0)[None, :, :]
->>>>>>> main

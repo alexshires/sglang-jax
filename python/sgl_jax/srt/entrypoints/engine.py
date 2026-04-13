@@ -6,7 +6,6 @@ This file implements python APIs for the inference engine.
 
 import asyncio
 import atexit
-import contextlib
 import dataclasses
 import json
 import logging
@@ -111,10 +110,6 @@ class Engine(EngineBase):
 
         # Allocate ports for inter-process communications
         self.port_args = PortArgs.init_new(server_args)
-<<<<<<< HEAD
-        self.server_args = server_args
-=======
->>>>>>> main
         logger.info("server_args=%s", server_args)
 
         # Launch subprocesses or threads
@@ -122,6 +117,7 @@ class Engine(EngineBase):
             server_args=server_args,
             port_args=self.port_args,
         )
+        self.server_args = server_args
         self.tokenizer_manager = tokenizer_manager
         self.template_manager = template_manager
         self.scheduler_info = scheduler_info
@@ -301,22 +297,9 @@ class Engine(EngineBase):
 
     def shutdown(self):
         """Shutdown the engine"""
-        with contextlib.suppress(ValueError, RuntimeError):
-            logger.debug("Shutting down engine (pid=%d)...", os.getpid())
-
         kill_process_tree(os.getpid(), include_parent=False)
         if self.server_args.enable_single_process:
             self.send_to_rpc.close()
-
-        if (
-            hasattr(self, "server_args")
-            and self.server_args.enable_single_process
-            and hasattr(self, "send_to_rpc")
-        ):
-            self.send_to_rpc.close()
-
-        with contextlib.suppress(ValueError, RuntimeError):
-            logger.debug("Engine shutdown complete.")
 
     def __enter__(self):
         return self
@@ -637,9 +620,6 @@ def _launch_subprocesses(
 
     # Launch tokenizer process
     tokenizer_manager = TokenizerManager(server_args, port_args)
-    tokenizer_manager.scheduler_pids = [
-        proc.pid for proc in scheduler_procs if getattr(proc, "pid", None) is not None
-    ]
 
     # Initialize templates
     template_manager = TemplateManager()
@@ -667,8 +647,6 @@ def _launch_subprocesses(
 
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
-    if tokenizer_manager.scheduler_pids:
-        scheduler_info["scheduler_pids"] = list(tokenizer_manager.scheduler_pids)
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
     return tokenizer_manager, template_manager, scheduler_info
 
@@ -685,10 +663,6 @@ def _launch_threads(
     if port_args is None:
         port_args = PortArgs.init_new(server_args)
         logger.info("server_args=%s", server_args)
-<<<<<<< HEAD
-
-=======
->>>>>>> main
     # If using model from www.modelscope.cn, first download the model.
     server_args.model_path, server_args.tokenizer_path = prepare_model_and_tokenizer(
         server_args.model_path, server_args.tokenizer_path
@@ -735,10 +709,6 @@ def _launch_threads(
 
     # Launch tokenizer process
     tokenizer_manager = TokenizerManager(server_args, port_args)
-<<<<<<< HEAD
-    tokenizer_manager.scheduler_pids = []
-=======
->>>>>>> main
 
     # Initialize templates
     template_manager = TemplateManager()

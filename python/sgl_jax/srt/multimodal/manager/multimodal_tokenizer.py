@@ -4,22 +4,13 @@ import dataclasses
 import hashlib
 import io
 import logging
-<<<<<<< HEAD
-=======
 import math
->>>>>>> main
 import os
 import signal
 import tempfile
 import time
 import uuid
 from http import HTTPStatus
-<<<<<<< HEAD
-from typing import Any
-
-import fastapi
-import imageio.v3 as iio
-=======
 from io import BytesIO
 from typing import Any
 from urllib.request import urlopen
@@ -27,7 +18,6 @@ from urllib.request import urlopen
 import fastapi
 import imageio.v3 as iio
 import librosa
->>>>>>> main
 import numpy as np
 import psutil
 import requests
@@ -40,23 +30,11 @@ from sgl_jax.srt.managers.io_struct import (
     BatchEmbeddingOut,
     BatchStrOut,
     BatchTokenIDOut,
-<<<<<<< HEAD
-=======
     ProfileReqOutput,
->>>>>>> main
 )
 from sgl_jax.srt.managers.tokenizer_manager import ReqState, TokenizerManager
 from sgl_jax.srt.multimodal.common.modality_enum import Modality, MultimodalDataItem
 from sgl_jax.srt.multimodal.manager.io_struct import (
-<<<<<<< HEAD
-    DataType,
-    GenerateMMReqInput,
-    GenerateVLMReqInput,
-    TokenizedGenerateMMReqInput,
-    TokenizedGenerateVLMReqInput,
-)
-from sgl_jax.srt.multimodal.manager.mrope_utils import compute_mrope_positions
-=======
     AudioSpeechRequest,
     AudioTranscriptionRequest,
     AudioTranscriptionResponse,
@@ -68,7 +46,6 @@ from sgl_jax.srt.multimodal.manager.mrope_utils import compute_mrope_positions
 )
 from sgl_jax.srt.multimodal.manager.mrope_utils import compute_mrope_positions
 from sgl_jax.srt.multimodal.manager.prompt_builder import MultimodalPromptBuilder
->>>>>>> main
 from sgl_jax.srt.server_args import PortArgs, ServerArgs
 from sgl_jax.srt.utils import (
     configure_logger,
@@ -80,8 +57,6 @@ from sgl_jax.utils import TypeBasedDispatcher, get_exception_traceback
 logger = logging.getLogger(__name__)
 
 
-<<<<<<< HEAD
-=======
 # Qwen video preprocessing (ported from sglang).
 _QWEN_IMAGE_FACTOR = 28
 _QWEN_MAX_RATIO = 200
@@ -275,7 +250,6 @@ class MiMoAudioProcessor:
         return resampled.numpy().astype(np.float32)
 
 
->>>>>>> main
 @dataclasses.dataclass
 class MMReqState(ReqState):
     """Store the state of a multimodal request."""
@@ -305,33 +279,6 @@ class MultimodalTokenizer(TokenizerManager):
         super().__init__(server_args, port_args)
         self.mm_processor = None
         self.mm_config = None
-<<<<<<< HEAD
-        processor_candidates = [server_args.model_path]
-        model_basename = os.path.basename(server_args.model_path.rstrip("/"))
-        if model_basename in {
-            "text_encoder",
-            "vision_encoder",
-            "language_model",
-            "transformer",
-            "vae",
-            "tokenizer",
-        }:
-            processor_candidates.append(os.path.dirname(server_args.model_path.rstrip("/")))
-        trust_remote_code = server_args.trust_remote_code or server_args.multimodal
-        for candidate in processor_candidates:
-            try:
-                self.mm_processor = AutoProcessor.from_pretrained(
-                    candidate,
-                    trust_remote_code=trust_remote_code,
-                )
-                self.mm_config = AutoConfig.from_pretrained(
-                    candidate,
-                    trust_remote_code=trust_remote_code,
-                )
-                break
-            except Exception as exc:
-                logger.warning("Failed to load processor/config from %s: %s", candidate, exc)
-=======
 
         # since mimo-audio does not specify preprocessor, manual implementation is required to align
         # it with the official implementation
@@ -372,7 +319,6 @@ class MultimodalTokenizer(TokenizerManager):
 
         self.prompt_builder = MultimodalPromptBuilder(tokenizer=self.tokenizer)
 
->>>>>>> main
         self.rid_to_state: dict[str, MMReqState] = {}
         self._result_dispatcher = TypeBasedDispatcher(
             [
@@ -384,13 +330,10 @@ class MultimodalTokenizer(TokenizerManager):
                     AbortReq,
                     self._handle_abort_req,
                 ),
-<<<<<<< HEAD
-=======
                 (
                     ProfileReqOutput,
                     self.profile_communicator.handle_recv,
                 ),
->>>>>>> main
             ]
         )
 
@@ -410,9 +353,6 @@ class MultimodalTokenizer(TokenizerManager):
             if req.rid in self.rid_to_state:
                 self.rid_to_state[req.rid].finished = True
                 self.rid_to_state[req.rid].event.set()
-<<<<<<< HEAD
-                self.rid_to_state[req.rid].out_list = [{"success": True, "meta_info": {}}]
-=======
 
                 out_data = {"success": True, "meta_info": {}}
                 if (
@@ -444,7 +384,6 @@ class MultimodalTokenizer(TokenizerManager):
                         logger.warning("Tokenizer not initialized, returning raw tokens for ASR")
 
                 self.rid_to_state[req.rid].out_list = [out_data]
->>>>>>> main
             else:
                 logger.warning(
                     "Received result for unknown request rid=%s. Known rids: %s",
@@ -483,20 +422,12 @@ class MultimodalTokenizer(TokenizerManager):
                 },
             }
         )
-<<<<<<< HEAD
-        state.event.set()
-=======
         self._notify_state_event(state)
->>>>>>> main
         logger.info("Abort completed for rid=%s", recv_obj.rid)
 
     async def generate_request(
         self,
-<<<<<<< HEAD
-        obj: GenerateMMReqInput | GenerateVLMReqInput,
-=======
         obj: GenerateMMReqInput | GenerateOmniReqInput,
->>>>>>> main
         request: fastapi.Request | None = None,
     ):
         """High level API: accept a generation request and stream responses.
@@ -524,20 +455,12 @@ class MultimodalTokenizer(TokenizerManager):
         async for response in self._wait_one_response(obj, state, request):
             yield response
 
-<<<<<<< HEAD
-    async def _tokenize_one_request(self, obj: GenerateMMReqInput | GenerateVLMReqInput):
-=======
     async def _tokenize_one_request(self, obj: GenerateMMReqInput | GenerateOmniReqInput):
->>>>>>> main
         """
         Converts text fields to token ids using the configured tokenizer.
         Image preprocessing / references are noted as TODO; when provided
         `input_ids` are passed through unchanged.
         """
-<<<<<<< HEAD
-        # Support both 'prompt' (multimodal) and 'text' (text-only) fields
-=======
->>>>>>> main
         input_text = getattr(obj, "prompt", None) or getattr(obj, "text", None)
         neg_input_text = getattr(obj, "neg_prompt", None) or getattr(obj, "text", None)
         input_ids = getattr(obj, "input_ids", None)
@@ -545,11 +468,8 @@ class MultimodalTokenizer(TokenizerManager):
         mm_inputs = None
         image_data = self._normalize_mm_list(getattr(obj, "image_data", None))
         video_data = self._normalize_mm_list(getattr(obj, "video_data", None))
-<<<<<<< HEAD
-=======
         audio_data = self._normalize_mm_list(getattr(obj, "audio_data", None))
 
->>>>>>> main
         if not image_data and not video_data and getattr(obj, "input_reference", None) is not None:
             if obj.data_type == DataType.IMAGE:
                 image_data = [obj.input_reference]
@@ -560,16 +480,6 @@ class MultimodalTokenizer(TokenizerManager):
                 "Multimodal inputs provided but processor/config is not available. "
                 "Check model_path and trust_remote_code settings."
             )
-<<<<<<< HEAD
-        if image_data or video_data:
-            images = [self._load_image_from_source(item) for item in image_data]
-            videos = [self._load_video_from_source(item) for item in video_data]
-            processor_out = self.mm_processor(
-                images=images or None,
-                videos=videos or None,
-                text=input_text or "",
-                return_tensors="pt",
-=======
         if image_data or video_data or audio_data:
             images = [
                 self._load_image_from_source(item) for item in image_data
@@ -590,7 +500,6 @@ class MultimodalTokenizer(TokenizerManager):
                 text=input_text or "",
                 return_tensors="pt",
                 **processor_kwargs,
->>>>>>> main
             )
             if "input_ids" in processor_out:
                 input_ids = processor_out["input_ids"][0].tolist()
@@ -598,23 +507,17 @@ class MultimodalTokenizer(TokenizerManager):
             image_grid_thw = self._to_grid_list(processor_out.get("image_grid_thw"))
             video_grid_thw = self._to_grid_list(processor_out.get("video_grid_thw"))
             second_per_grid_ts = processor_out.get("second_per_grid_ts")
-<<<<<<< HEAD
-=======
             if second_per_grid_ts is None:
                 second_per_grid_ts = processor_out.get("video_second_per_grid")
->>>>>>> main
             pixel_values = self._strip_batch_dim(processor_out.get("pixel_values"))
             pixel_values_videos = self._strip_batch_dim(processor_out.get("pixel_values_videos"))
 
             mrope_positions = None
             mrope_position_delta = None
             if self.mm_config is not None and input_ids is not None:
-<<<<<<< HEAD
-=======
                 if hasattr(self.mm_config, "thinker_config"):
                     # for qwen3-omni
                     self.mm_config = self.mm_config.thinker_config
->>>>>>> main
                 vision_start_token_id = getattr(self.mm_config, "vision_start_token_id", None)
                 image_token_id = getattr(self.mm_config, "image_token_id", None)
                 video_token_id = getattr(self.mm_config, "video_token_id", None)
@@ -663,14 +566,11 @@ class MultimodalTokenizer(TokenizerManager):
                         feature=np.asarray(audio_features),
                     )
                 )
-<<<<<<< HEAD
-=======
 
             audio_feature_attention_mask = processor_out.get("feature_attention_mask")
             if audio_feature_attention_mask is not None:
                 audio_feature_attention_mask = np.asarray(audio_feature_attention_mask)
 
->>>>>>> main
             for item in mm_items:
                 item.set_pad_value()
 
@@ -689,10 +589,7 @@ class MultimodalTokenizer(TokenizerManager):
                 "image_grid_thw": image_grid_thw,
                 "video_grid_thw": video_grid_thw,
                 "second_per_grid_ts": second_per_grid_ts,
-<<<<<<< HEAD
-=======
                 "audio_feature_attention_mask": audio_feature_attention_mask,
->>>>>>> main
             }
         if input_ids is None and input_text is not None:
             if self.tokenizer is None:
@@ -709,15 +606,9 @@ class MultimodalTokenizer(TokenizerManager):
             encoded = self.tokenizer(neg_input_text)
             neg_input_ids = encoded["input_ids"]
 
-<<<<<<< HEAD
-        is_vlm_req = isinstance(obj, GenerateVLMReqInput) or hasattr(obj, "sampling_params")
-        if is_vlm_req:
-            tokenized_obj = self._create_tokenized_vlm_object(obj, input_text, input_ids)
-=======
         is_omni_req = isinstance(obj, GenerateOmniReqInput) or hasattr(obj, "sampling_params")
         if is_omni_req:
             tokenized_obj = self._create_tokenized_omni_object(obj, input_text, input_ids)
->>>>>>> main
         else:
             tokenized_obj = self._create_tokenized_object(
                 obj, input_text, input_ids, neg_input_text, neg_input_ids
@@ -730,8 +621,6 @@ class MultimodalTokenizer(TokenizerManager):
             return []
         return data if isinstance(data, list) else [data]
 
-<<<<<<< HEAD
-=======
     def _is_qwen_video_processor(self) -> bool:
         if self.mm_processor is None:
             return False
@@ -858,7 +747,6 @@ class MultimodalTokenizer(TokenizerManager):
             resized_frames.append(np.asarray(img))
         return np.stack(resized_frames, axis=0)
 
->>>>>>> main
     def _load_image_from_source(self, source: str | bytes) -> Image.Image:
         if isinstance(source, dict) and "url" in source:
             source = source["url"]
@@ -907,8 +795,6 @@ class MultimodalTokenizer(TokenizerManager):
                 os.unlink(tmp_path)
         raise ValueError("Unsupported video source format")
 
-<<<<<<< HEAD
-=======
     def _load_audio_from_source(self, source: str | bytes) -> np.ndarray:
         if not hasattr(self.mm_processor, "feature_extractor"):
             return None
@@ -941,7 +827,6 @@ class MultimodalTokenizer(TokenizerManager):
                 pass
         raise ValueError("Unsupported audio source format")
 
->>>>>>> main
     def _hash_payload(self, payload: bytes) -> int:
         digest = hashlib.sha256(payload).digest()[:8]
         return int.from_bytes(digest, byteorder="big", signed=False) % (1 << 31)
@@ -996,24 +881,14 @@ class MultimodalTokenizer(TokenizerManager):
         )
         return tokenized_obj
 
-<<<<<<< HEAD
-    def _create_tokenized_vlm_object(
-        self, obj: GenerateVLMReqInput, input_text, input_ids
-    ) -> TokenizedGenerateVLMReqInput:
-=======
     def _create_tokenized_omni_object(
         self, obj: GenerateOmniReqInput, input_text, input_ids
     ) -> TokenizedGenerateOmniReqInput:
->>>>>>> main
         rid = getattr(obj, "rid", None)
         if rid is None:
             rid = uuid.uuid4().hex
 
-<<<<<<< HEAD
-        return TokenizedGenerateVLMReqInput(
-=======
         return TokenizedGenerateOmniReqInput(
->>>>>>> main
             rid=rid,
             prompt=input_text,
             input_ids=input_ids,
@@ -1035,13 +910,10 @@ class MultimodalTokenizer(TokenizerManager):
         `rid_to_state` keyed by the request id.
         """
         self.send_to_scheduler.send_pyobj(tokenized_obj)
-<<<<<<< HEAD
-=======
         try:
             caller_loop = asyncio.get_running_loop()
         except RuntimeError:
             caller_loop = None
->>>>>>> main
         state = MMReqState(
             rid=tokenized_obj.rid,
             out_list=[],
@@ -1049,10 +921,7 @@ class MultimodalTokenizer(TokenizerManager):
             event=asyncio.Event(),
             obj=obj,
             created_time=created_time,
-<<<<<<< HEAD
-=======
             event_loop=caller_loop,
->>>>>>> main
         )
         self.rid_to_state[tokenized_obj.rid] = state
         return state
@@ -1111,8 +980,6 @@ class MultimodalTokenizer(TokenizerManager):
                         f"Request is disconnected from the client side. Abort request rid={state.rid}"
                     )
 
-<<<<<<< HEAD
-=======
     async def create_speech(
         self,
         obj: AudioSpeechRequest,
@@ -1341,7 +1208,6 @@ class MultimodalTokenizer(TokenizerManager):
         )
         return audio_array
 
->>>>>>> main
 
 def run_multimodal_tokenizer_process(
     server_args: ServerArgs,

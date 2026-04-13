@@ -1,14 +1,6 @@
 import jax
 import jax.numpy as jnp
 
-<<<<<<< HEAD
-from sgl_jax.srt.kernels.gmm.megablox_gmm_kernel.gmm import gmm as gmm_kernel
-
-gmm = jax.custom_vjp(gmm_kernel, nondiff_argnums=(3, 6, 9, 10))
-
-
-def _gmm_fwd(
-=======
 from sgl_jax.srt.kernels.gmm.megablox_gmm_kernel.gmm import gmm as gmm_v1_kernel
 from sgl_jax.srt.kernels.gmm.megablox_gmm_kernel.gmm_v2 import gmm_v2 as gmm_v2_kernel
 from sgl_jax.srt.kernels.gmm.megablox_gmm_kernel.gmm_v2 import is_supported_by_gmm_v2
@@ -17,64 +9,10 @@ from sgl_jax.srt.utils.quantization.quantization_utils import quantize_tensor_si
 
 
 def gmm(
->>>>>>> main
     lhs: jax.Array,
     rhs: jax.Array,
     group_sizes: jax.Array,
     preferred_element_type: jnp.dtype = jnp.float32,
-<<<<<<< HEAD
-    tiling: tuple[int, int, int] = (128, 128, 128),
-    group_offset: jax.Array | None = None,
-    existing_out: jax.Array | None = None,
-    transpose_rhs: bool = False,
-    interpret: bool = False,
-) -> tuple[
-    jax.Array,
-    tuple[
-        jax.Array,
-        jax.Array,
-        jax.Array,
-        jax.Array | None,
-        int,
-    ],
-]:
-    out = gmm_kernel(
-        lhs,
-        rhs,
-        group_sizes,
-        preferred_element_type,
-        tiling,
-        group_offset,
-        existing_out,
-        transpose_rhs=transpose_rhs,
-        interpret=interpret,
-    )
-    return out, (lhs, rhs, group_sizes, group_offset, rhs.shape[0])
-
-
-def _gmm_bwd(
-    group_sizes,
-    preferred_element_type,
-    tiling,
-    group_offset,
-    existing_out,
-    transpose_rhs,
-    interpret,
-    gmm_grad,
-):
-    # implement the backward pass
-    return (
-        gmm_grad,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-
-
-gmm.defvjp(_gmm_fwd, _gmm_bwd)
-=======
     rhs_scale: jnp.ndarray | None = None,
     rhs_bias: jnp.ndarray | None = None,
     tiling: tuple[int, int, int] | None = None,
@@ -154,4 +92,3 @@ gmm.defvjp(_gmm_fwd, _gmm_bwd)
         out = out * lhs_scale
 
     return out
->>>>>>> main

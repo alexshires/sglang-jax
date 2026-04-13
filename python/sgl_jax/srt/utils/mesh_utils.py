@@ -4,11 +4,8 @@ import jax
 import numpy as np
 from jax._src import mesh_utils
 
-<<<<<<< HEAD
-=======
 from sgl_jax.srt.utils.jax_utils import get_device_id_offset
 
->>>>>>> main
 default_mesh_axes = [
     "data",  # data parallelism
     "tensor",  # tensor parallelism
@@ -29,19 +26,12 @@ def create_device_mesh(
     if devices is None:
         devices = jax.devices()
 
-<<<<<<< HEAD
-    if device_indexes is not None:
-        devices_dict = {device.id: device for device in devices}
-        devices = [devices_dict.get(i) for i in list(set(device_indexes))]
-
-=======
     offset = get_device_id_offset(devices)
 
     if device_indexes is not None:
         device_indexes = [idx + offset for idx in device_indexes]
         devices_dict = {device.id: device for device in devices}
         devices = [devices_dict.get(i) for i in list(set(device_indexes))]
->>>>>>> main
     ici_parallelism = fill_unspecified_parallelism(ici_parallelism, len(devices))
     if num_slices > 1:
         dcn_parallelism = fill_unspecified_parallelism(dcn_parallelism, num_slices)
@@ -52,14 +42,6 @@ def create_device_mesh(
             allow_split_physical_axes=allow_split_physical_axes,
         )
     else:
-<<<<<<< HEAD
-        devices_array = mesh_utils.create_device_mesh(
-            ici_parallelism,
-            devices=devices,
-            contiguous_submeshes=False,
-            allow_split_physical_axes=allow_split_physical_axes,
-        )
-=======
         all_devices = jax.devices()
         is_subset = len(devices) < len(all_devices)
         if is_subset:
@@ -74,7 +56,6 @@ def create_device_mesh(
                 contiguous_submeshes=False,
                 allow_split_physical_axes=allow_split_physical_axes,
             )
->>>>>>> main
 
     if use_explicit_sharding:
         axis_types = (jax.sharding.AxisType.Explicit,) * len(mesh_axes)

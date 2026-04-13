@@ -52,10 +52,7 @@ class WeightMapping:
     kv_head_padding: bool = False
     concat_axis: int | None = None
     is_eagle3: bool = False
-<<<<<<< HEAD
-=======
     physical_to_logical_map: np.ndarray | None = None
->>>>>>> main
 
     def __post_init__(self):
         if self.sharding is None:
@@ -156,8 +153,6 @@ class WeightLoader:
         else:
             self.moe_abstract_mesh = None
 
-<<<<<<< HEAD
-=======
     def _normalize_physical_to_logical_map(
         self,
         physical_to_logical_map: np.ndarray | None,
@@ -304,7 +299,6 @@ class WeightLoader:
         )
         return expand_block_scale(weight, n_out, block_size_out)
 
->>>>>>> main
     def _scan_weight_info(self) -> dict[str, list[dict]]:
         """
         Scan all safetensors files to build a mapping from HF key to file info.
@@ -535,20 +529,11 @@ class WeightLoader:
         concat_axis: int,
         do_transpose: bool = False,
         target_sharding: jax.sharding.NamedSharding = None,
-<<<<<<< HEAD
-=======
         physical_to_logical_map: np.ndarray | None = None,
->>>>>>> main
     ) -> jax.Array:
         """
         Lazy loader for TP-Split MOE weights (e.g., Grok MOE).
         """
-<<<<<<< HEAD
-        num_experts = len(expected_hf_keys)
-
-        # 1. Build file intervals for each expert
-        # expert_file_intervals[expert_idx] = [(start, end, info), ...]
-=======
         num_logical_experts = len(expected_hf_keys)
         physical_to_logical_map = self._normalize_physical_to_logical_map(
             physical_to_logical_map=physical_to_logical_map,
@@ -562,7 +547,6 @@ class WeightLoader:
         )
 
         # 1. Build file intervals for each expert
->>>>>>> main
         expert_file_intervals = []
         expert_global_shapes = []
 
@@ -583,23 +567,12 @@ class WeightLoader:
         }
         target_dtype = dtype_map.get(st_dtype, jnp.float32)
 
-<<<<<<< HEAD
-        for expert_idx, hf_key in enumerate(expected_hf_keys):
-            infos = weight_infos[hf_key]
-            sorted_infos = sorted(infos, key=lambda x: x["file"])
-
-            cumulative_start = 0
-            file_intervals = []  # List of (start, end, info)
-            base_shape = list(sorted_infos[0]["shape"])
-
-=======
         for hf_key in expected_hf_keys:
             infos = weight_infos[hf_key]
             sorted_infos = sorted(infos, key=lambda x: x["file"])
             cumulative_start = 0
             file_intervals = []
             base_shape = list(sorted_infos[0]["shape"])
->>>>>>> main
             for info in sorted_infos:
                 shape = info["shape"]
                 length = shape[concat_axis]
@@ -607,137 +580,6 @@ class WeightLoader:
                 end = start + length
                 file_intervals.append((start, end, info))
                 cumulative_start = end
-<<<<<<< HEAD
-
-            # Global shape for this expert (after TP concat)
-            global_shape = list(base_shape)
-            global_shape[concat_axis] = cumulative_start
-            global_shape = tuple(global_shape)
-
-            expert_file_intervals.append(file_intervals)
-            expert_global_shapes.append(global_shape)
-
-        # All experts should have the same global shape
-        single_expert_shape = expert_global_shapes[0]
-
-        # 2. Determine final shape considering transpose
-        if do_transpose:
-            if len(single_expert_shape) >= 2:
-                final_single_shape = list(single_expert_shape)
-                final_single_shape[-1], final_single_shape[-2] = (
-                    final_single_shape[-2],
-                    final_single_shape[-1],
-                )
-                final_single_shape = tuple(final_single_shape)
-            else:
-                final_single_shape = single_expert_shape
-        else:
-            final_single_shape = single_expert_shape
-
-        stacked_shape = (num_experts, *final_single_shape)
-
-        if target_sharding is None:
-            sharding = jax.sharding.NamedSharding(self.mesh, P())
-        else:
-            sharding = target_sharding
-
-        # 3. Define helper to load a single expert's slice with smart stitching
-        def _load_single_expert_slice(expert_idx, inner_index):
-            """
-            Load a slice from a single expert, handling TP-split files.
-            inner_index: the slice indices for dimensions after expert dimension.
-            """
-            hf_key = expected_hf_keys[expert_idx]
-            file_intervals = expert_file_intervals[expert_idx]
-            expert_shape = expert_global_shapes[expert_idx]
-
-            # Adjust concat_axis for transpose if needed
-            effective_concat_axis = concat_axis
-
-            slice_on_axis = inner_index[effective_concat_axis]
-
-            # Normalize slice
-            req_start, req_stop, req_step = slice_on_axis.indices(
-                expert_shape[effective_concat_axis]
-            )
-            assert req_step == 1, "Strided access not supported in split loader yet"
-
-            collected_chunks = []
-
-            for f_start, f_end, info in file_intervals:
-                # Calculate Intersection: [req_start, req_stop) AND [f_start, f_end)
-                intersect_start = max(req_start, f_start)
-                intersect_end = min(req_stop, f_end)
-
-                if intersect_start < intersect_end:
-                    local_start = intersect_start - f_start
-                    local_end = intersect_end - f_start
-
-                    # Construct read index for this file
-                    file_read_index = list(inner_index)
-                    file_read_index[effective_concat_axis] = slice(local_start, local_end)
-                    file_read_index = tuple(file_read_index)
-
-                    # Read directly
-                    f = file_manager.get_handle(info["file"])
-                    chunk = f.get_slice(hf_key)[file_read_index]
-                    collected_chunks.append(chunk)
-
-            if not collected_chunks:
-                return np.zeros((0,) * len(expert_shape), dtype=target_dtype)
-
-            if len(collected_chunks) == 1:
-                result = collected_chunks[0]
-            else:
-                # Cross-file boundary, needs stitching
-                result = np.concatenate(collected_chunks, axis=effective_concat_axis)
-
-            result = _view_as_fp8_if_needed(result, target_dtype)
-
-            # Apply transpose if needed
-            if do_transpose:
-                result = np.transpose(result)
-
-            return result
-
-        # 4. Define callback that loads all experts and stacks them
-        def _load_stacked_slice(index):
-            expert_slice = index[0]
-            inner_slice = index[1:]
-
-            start, stop, step = expert_slice.indices(num_experts)
-            expert_indices = list(range(start, stop, step))
-            sliced_num_experts = len(expert_indices)
-
-            if sliced_num_experts == 0:
-                return np.zeros((0, *[1] * len(inner_slice)), dtype=target_dtype)
-
-            # Load each expert sequentially (expert 0 -> expert_num - 1)
-            expert_slices = []
-            for expert_idx in expert_indices:
-                # Convert inner_slice to work with original (non-transposed) shape
-                if do_transpose:
-                    # Reverse the last two dimensions in the slice
-                    original_inner_slice = list(inner_slice)
-                    if len(original_inner_slice) >= 2:
-                        original_inner_slice[-1], original_inner_slice[-2] = (
-                            original_inner_slice[-2],
-                            original_inner_slice[-1],
-                        )
-                    original_inner_slice = tuple(original_inner_slice)
-                else:
-                    original_inner_slice = inner_slice
-
-                expert_data = _load_single_expert_slice(expert_idx, original_inner_slice)
-                expert_slices.append(expert_data)
-
-            # Stack all experts together
-            return np.stack(expert_slices, axis=0)
-
-        return jax.make_array_from_callback(stacked_shape, sharding, _load_stacked_slice).astype(
-            target_dtype
-        )
-=======
             global_shape = list(base_shape)
             global_shape[concat_axis] = cumulative_start
             expert_file_intervals.append(file_intervals)
@@ -833,7 +675,6 @@ class WeightLoader:
         if do_transpose and result.ndim >= 3:
             result = jnp.transpose(result, (0, 2, 1))
         return result
->>>>>>> main
 
     def _create_stacked_moe_lazy_tensor(
         self,
@@ -842,27 +683,10 @@ class WeightLoader:
         file_manager: SequentialSafetensorManager,
         do_transpose: bool = False,
         target_sharding: jax.sharding.NamedSharding = None,
-<<<<<<< HEAD
-    ) -> jax.Array:
-        """
-        Lazy loader for MoE weights:
-        1. Global Loading: Directly shards data to avoid redundant I/O.
-        2. CPU Transpose: Performs transpose on CPU to reduce TPU memory peak.
-        3. Pre-allocation: Uses np.empty instead of np.stack to save memory.
-        4. Threaded I/O: High concurrency for GCS throughput.
-        """
-
-        # 1. Get base info from the first expert
-        first_key = expected_hf_keys[0]
-        # assume len(infos) == 1 for standard MoE
-        info = weight_info[first_key][0]
-
-=======
         physical_to_logical_map: np.ndarray | None = None,
     ) -> jax.Array:
         first_key = expected_hf_keys[0]
         info = weight_info[first_key][0]
->>>>>>> main
         single_expert_shape = info["shape"]
         st_dtype = info["dtype"]
 
@@ -878,32 +702,6 @@ class WeightLoader:
         }
         target_dtype = dtype_map.get(st_dtype, jnp.float32)
 
-<<<<<<< HEAD
-        num_experts = len(expected_hf_keys)
-
-        # Determine the final stacked shape, considering optional transpose
-        if do_transpose:
-            if len(single_expert_shape) >= 2:
-                final_single_shape = list(single_expert_shape)
-                final_single_shape[-1], final_single_shape[-2] = (
-                    final_single_shape[-2],
-                    final_single_shape[-1],
-                )
-                final_single_shape = tuple(final_single_shape)
-            else:
-                final_single_shape = single_expert_shape
-        else:
-            final_single_shape = single_expert_shape
-
-        stacked_shape = (num_experts, *final_single_shape)
-
-        if target_sharding is None:
-            sharding = jax.sharding.NamedSharding(self.mesh, P())
-        else:
-            sharding = target_sharding
-
-        MAX_WORKERS = 128
-=======
         num_logical_experts = len(expected_hf_keys)
         physical_to_logical_map = self._normalize_physical_to_logical_map(
             physical_to_logical_map=physical_to_logical_map,
@@ -929,62 +727,11 @@ class WeightLoader:
         sharding = target_sharding or jax.sharding.NamedSharding(self.mesh, P())
 
         LOAD_WORKERS = 16
->>>>>>> main
 
         def _load_stacked_slice(index):
             expert_slice = index[0]
             inner_slice = index[1:]
 
-<<<<<<< HEAD
-            start, stop, step = expert_slice.indices(num_experts)
-            expert_indices = list(range(start, stop, step))
-            sliced_num_experts = len(expert_indices)
-
-            if sliced_num_experts == 0:
-                return np.zeros((0, *[1] * len(inner_slice)), dtype=target_dtype)
-
-            first_idx = expert_indices[0]
-            first_hf_key = expected_hf_keys[first_idx]
-
-            fname_first = weight_info[first_hf_key][0]["file"]
-            f_first = file_manager.get_handle(fname_first)
-
-            # Read raw data
-            first_data = f_first.get_slice(first_hf_key)[:]
-
-            # Process first data (transpose if needed) to determine final buffer properties
-            first_data_processed = np.transpose(first_data) if do_transpose else first_data
-
-            # Slice according to inner_slice to determine the exact shape required
-            first_final_chunk = first_data_processed[inner_slice]
-
-            out_shape = (sliced_num_experts, *first_final_chunk.shape)
-            out_array = np.empty(out_shape, dtype=first_final_chunk.dtype)
-
-            # Fill the first slot
-            out_array[0] = first_final_chunk
-
-            def load_one_expert(args):
-                i, expert_idx = args
-                hf_key = expected_hf_keys[expert_idx]
-                fname = weight_info[hf_key][0]["file"]
-                f = file_manager.get_handle(fname)
-
-                data = f.get_slice(hf_key)[:]
-                data = _view_as_fp8_if_needed(data, target_dtype)
-
-                if do_transpose:
-                    data = np.transpose(data)
-                out_array[i] = data[inner_slice]
-
-            tasks = []
-            for i, expert_idx in enumerate(expert_indices[1:], start=1):
-                tasks.append((i, expert_idx))
-
-            if tasks:
-                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                    list(executor.map(load_one_expert, tasks))
-=======
             start, stop, step = expert_slice.indices(num_physical_experts)
             physical_indices = list(range(start, stop, step))
             sliced_num_physical = len(physical_indices)
@@ -1052,7 +799,6 @@ class WeightLoader:
                 tasks = list(logical_to_positions.items())
                 with ThreadPoolExecutor(max_workers=LOAD_WORKERS) as executor:
                     list(executor.map(load_and_fill_expert, tasks))
->>>>>>> main
 
             return out_array
 
@@ -1117,11 +863,8 @@ class WeightLoader:
                             regular_mappings[weight_info_key] = replaced_mapping
 
         logger.info("Starting parallel weight loading via JAX Lazy Loader...")
-<<<<<<< HEAD
-=======
         quant_cfg = getattr(self.model_config, "quantization_config", None)
         is_static_quant = quant_cfg is not None and quant_cfg.is_static_checkpoint
->>>>>>> main
 
         with SequentialSafetensorManager() as file_manager:
             # 2. Process Regular Weights (Lazy Pull)
@@ -1139,11 +882,7 @@ class WeightLoader:
 
                 infos = weight_info[hf_key]
 
-<<<<<<< HEAD
-                if isinstance(mapping, (str, list)):
-=======
                 if isinstance(mapping, str | list):
->>>>>>> main
                     mapping = WeightMapping(target_path=mapping)
 
                 is_split_weight = len(infos) > 1 and mapping.concat_axis is not None
@@ -1205,14 +944,11 @@ class WeightLoader:
                         target_path = mapping.target_path
                         model_param = self._get_param(params, target_path)
 
-<<<<<<< HEAD
-=======
                         # Expand 2D block-quant scale to 3D kernel-ready layout.
                         lazy_weight = self._maybe_expand_linear_block_scale(
                             lazy_weight, model_param, target_path
                         )
 
->>>>>>> main
                         if lazy_weight.dtype in [jnp.float8_e4m3fn, jnp.float8_e5m2]:
                             model_param.value = lazy_weight
                         else:
@@ -1324,13 +1060,9 @@ class WeightLoader:
                         file_manager,
                         do_transpose=mapping.transpose,  # CPU transpose
                         target_sharding=final_sharding,  # Global loading
-<<<<<<< HEAD
-                    )
-=======
                         physical_to_logical_map=mapping.physical_to_logical_map,
                     )
                     loaded_shape = stacked_weight.shape
->>>>>>> main
 
                     if mapping.reshape is not None:
                         stacked_weight = jnp.reshape(stacked_weight, mapping.reshape)
@@ -1342,19 +1074,6 @@ class WeightLoader:
                     # 3. Direct assignment
                     target_path = mapping.target_path[0]
                     model_param = self._get_param(params, target_path)
-<<<<<<< HEAD
-
-                    if stacked_weight.dtype in [jnp.float8_e4m3fn, jnp.float8_e5m2]:
-                        model_param.value = stacked_weight
-                    else:
-                        model_param.value = stacked_weight.astype(model_param.value.dtype)
-
-                    logger.debug(
-                        "Assigned MoE group %s, shape: %s",
-                        moe_key,
-                        stacked_weight.shape,
-                    )
-=======
                     stacked_weight = self._maybe_convert_epmoe_scale_for_kernel(
                         stacked_weight,
                         model_param,
@@ -1412,7 +1131,6 @@ class WeightLoader:
                             moe_key,
                             stacked_weight.shape,
                         )
->>>>>>> main
                 else:
                     ep_size = getattr(self.model_config.hf_config, "ep_size", 1)
                     if "expert" in mapping.sharding:
@@ -1441,13 +1159,9 @@ class WeightLoader:
                         concat_axis=mapping.concat_axis,
                         do_transpose=mapping.transpose,
                         target_sharding=final_sharding,
-<<<<<<< HEAD
-                    )
-=======
                         physical_to_logical_map=mapping.physical_to_logical_map,
                     )
                     loaded_shape = expert_weights.shape
->>>>>>> main
 
                     if mapping.reshape is not None:
                         expert_weights = jnp.reshape(expert_weights, mapping.reshape)
@@ -1458,13 +1172,6 @@ class WeightLoader:
 
                     target_path = mapping.target_path[0]
                     model_param = self._get_param(params, target_path)
-<<<<<<< HEAD
-
-                    if expert_weights.dtype in [jnp.float8_e4m3fn, jnp.float8_e5m2]:
-                        model_param.value = expert_weights
-                    else:
-                        model_param.value = expert_weights.astype(model_param.value.dtype)
-=======
                     expert_weights = self._maybe_convert_epmoe_scale_for_kernel(
                         expert_weights,
                         model_param,
@@ -1505,7 +1212,6 @@ class WeightLoader:
                             str(e),
                         )
                         raise
->>>>>>> main
 
                     logger.info(
                         "Assigned MoE group %s (Grok Split-Stitch), shape: %s",
@@ -1534,11 +1240,7 @@ class WeightLoader:
 
         for hf_key, mapping in regular_mappings.items():
 
-<<<<<<< HEAD
-            if isinstance(mapping, (str, list)):
-=======
             if isinstance(mapping, str | list):
->>>>>>> main
                 mapping = WeightMapping(target_path=mapping)
 
             target_path = (
@@ -1595,11 +1297,7 @@ class WeightLoader:
             )
 
         for moe_key, mapping in moe_mappings.items():
-<<<<<<< HEAD
-            if isinstance(mapping, (str, list)):
-=======
             if isinstance(mapping, str | list):
->>>>>>> main
                 mapping = WeightMapping(target_path=mapping)
 
             target_path = mapping.target_path[0]
@@ -1736,15 +1434,6 @@ class WeightLoader:
 
         try:
             model_param = self._get_param(params, jax_path)
-<<<<<<< HEAD
-            logger.debug(
-                "Loading %s -> %s, shape: %s, transpose: %s",
-                hf_key,
-                jax_path,
-                processed_weight.shape,
-                mapping.transpose,
-            )
-=======
 
             # Expand 2D block-quant scale to 3D kernel-ready layout.
             sharded_weight = self._maybe_expand_linear_block_scale(
@@ -1758,7 +1447,6 @@ class WeightLoader:
                 processed_weight.shape,
                 mapping.transpose,
             )
->>>>>>> main
             if sharded_weight.dtype in [jnp.float8_e4m3fn, jnp.float8_e5m2]:
                 model_param.value = sharded_weight
             else:

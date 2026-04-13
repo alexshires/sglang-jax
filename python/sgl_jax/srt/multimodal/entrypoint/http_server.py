@@ -6,16 +6,10 @@ import time
 from collections.abc import Callable
 from http import HTTPStatus
 
-<<<<<<< HEAD
-import requests
-import uvicorn
-from fastapi import Request
-=======
 import httpx
 import requests
 import uvicorn
 from fastapi import Depends, File, Form, Request, UploadFile
->>>>>>> main
 from fastapi.responses import ORJSONResponse, Response
 
 from sgl_jax.srt.entrypoints.http_server import _GlobalState, app, set_global_state
@@ -26,17 +20,11 @@ from sgl_jax.srt.managers.template_manager import TemplateManager
 from sgl_jax.srt.multimodal.common.ServerArgs import MultimodalServerArgs
 from sgl_jax.srt.multimodal.manager.global_scheduler import run_global_scheduler_process
 from sgl_jax.srt.multimodal.manager.io_struct import (
-<<<<<<< HEAD
-    DataType,
-    GenerateMMReqInput,
-    GenerateVLMReqInput,
-=======
     AudioSpeechRequest,
     AudioTranscriptionRequest,
     DataType,
     GenerateMMReqInput,
     GenerateOmniReqInput,
->>>>>>> main
     ImageGenerationsRequest,
     VideoGenerationsRequest,
 )
@@ -105,11 +93,7 @@ def _extract_openai_prompt(
     request: ChatCompletionRequest,
     tokenizer,
     messages_override: list[dict] | None = None,
-<<<<<<< HEAD
-) -> tuple[str, list[str] | None, list[str] | None]:
-=======
 ) -> tuple[str, list[str] | None, list[str] | None, list[str] | None]:
->>>>>>> main
     if tokenizer is None:
         raise ValueError("Tokenizer is not initialized for chat completions.")
     openai_messages = []
@@ -142,12 +126,6 @@ def _extract_openai_prompt(
         )
         openai_messages.append(processed_msg)
 
-<<<<<<< HEAD
-    if audio_data:
-        raise ValueError("Audio inputs are not supported for this model.")
-
-=======
->>>>>>> main
     assistant_prefix = None
     if (
         openai_messages
@@ -203,11 +181,7 @@ def _extract_openai_prompt(
         if text_parts:
             prompt += "".join(text_parts)
 
-<<<<<<< HEAD
-    return prompt, (image_data or None), (video_data or None)
-=======
     return prompt, (image_data or None), (video_data or None), (audio_data or None)
->>>>>>> main
 
 
 @app.api_route("/api/v1/videos/generation", methods=["POST", "PUT"])
@@ -225,8 +199,6 @@ async def videos_generation(obj: VideoGenerationsRequest, request: Request):
         return _create_error_response(e)
 
 
-<<<<<<< HEAD
-=======
 # consistent with the openai interface
 # https://developers.openai.com/api/reference/python/resources/audio
 @app.post("/v1/audio/speech")
@@ -325,34 +297,22 @@ async def create_transcription(
         return _create_error_response(e)
 
 
->>>>>>> main
 @app.post("/v1/chat/completions")
 async def chat_completions(obj: ChatCompletionRequest, request: Request):
     try:
         from sgl_jax.srt.entrypoints.http_server import _global_state
 
-<<<<<<< HEAD
-        prompt, image_data, video_data = _extract_openai_prompt(
-            obj, _global_state.tokenizer_manager.tokenizer
-        )
-        if not image_data and not video_data:
-=======
         prompt, image_data, video_data, audio_data = _extract_openai_prompt(
             obj, _global_state.tokenizer_manager.tokenizer
         )
         if not image_data and not video_data and not audio_data:
->>>>>>> main
             try:
                 raw_body = await request.json()
             except Exception:
                 raw_body = None
             raw_messages = raw_body.get("messages") if isinstance(raw_body, dict) else None
             if isinstance(raw_messages, list):
-<<<<<<< HEAD
-                prompt, image_data, video_data = _extract_openai_prompt(
-=======
                 prompt, image_data, video_data, audio_data = _extract_openai_prompt(
->>>>>>> main
                     obj, _global_state.tokenizer_manager.tokenizer, raw_messages
                 )
         max_new_tokens = obj.max_completion_tokens or obj.max_tokens
@@ -367,18 +327,11 @@ async def chat_completions(obj: ChatCompletionRequest, request: Request):
             "repetition_penalty": obj.repetition_penalty,
             "stop": obj.stop,
         }
-<<<<<<< HEAD
-        internal_obj = GenerateVLMReqInput(
-            prompt=prompt,
-            image_data=image_data,
-            video_data=video_data,
-=======
         internal_obj = GenerateOmniReqInput(
             prompt=prompt,
             image_data=image_data,
             video_data=video_data,
             audio_data=audio_data,
->>>>>>> main
             stream=obj.stream,
             n=obj.n,
             rid=obj.rid if isinstance(obj.rid, str) else None,
@@ -587,16 +540,6 @@ def _execute_multimodal_server_warmup(
             ],
             "max_tokens": 3,
         }
-<<<<<<< HEAD
-    elif _is_wan_model(server_args.model_path):
-        request_endpoint = "/api/v1/images/generation"
-        json_data = {
-            "prompt": "warmup request",
-            "size": "480*832",
-            "num_inference_steps": 2,
-            "save_output": False,
-        }
-=======
     elif "Qwen3-Omni" in server_args.model_path:
         request_endpoint = "/v1/chat/completions"
         json_data = {
@@ -641,7 +584,6 @@ def _execute_multimodal_server_warmup(
             return False
 
         return True
->>>>>>> main
     else:
         # Default to image generation for other multimodal models
         request_endpoint = "/api/v1/images/generation"

@@ -3,12 +3,8 @@ import logging
 import jax.sharding
 
 from sgl_jax.srt.managers.communication import CommunicationBackend
-<<<<<<< HEAD
-from sgl_jax.srt.managers.io_struct import AbortReq
-=======
 from sgl_jax.srt.managers.io_struct import AbortReq, ProfileReq
 from sgl_jax.srt.managers.scheduler_profiler_mixing import SchedulerProfilerMixin
->>>>>>> main
 from sgl_jax.srt.multimodal.common.ServerArgs import MultimodalServerArgs
 from sgl_jax.srt.multimodal.manager.schedule_batch import Req
 from sgl_jax.srt.multimodal.model_executor.vit.vit_model_worker import VitModelWorker
@@ -16,11 +12,7 @@ from sgl_jax.srt.multimodal.model_executor.vit.vit_model_worker import VitModelW
 logger = logging.getLogger(__name__)
 
 
-<<<<<<< HEAD
-class VitScheduler:
-=======
 class VitScheduler(SchedulerProfilerMixin):
->>>>>>> main
     """Scheduler shell for ViT-stage feature extraction."""
 
     def __init__(
@@ -30,19 +22,13 @@ class VitScheduler(SchedulerProfilerMixin):
         communication_backend: CommunicationBackend,
         model_class,
         stage_sub_dir: str | None = None,
-<<<<<<< HEAD
-=======
         precompile_params: dict | None = None,
->>>>>>> main
     ):
         self.communication_backend = communication_backend
         self.mesh = mesh
         self.vit_worker = VitModelWorker(server_args, mesh=mesh, model_class=model_class)
-<<<<<<< HEAD
-=======
         self.forward_ct = 0
         self.init_profier()
->>>>>>> main
         self.aborted_rids: set[str] = set()
 
     def event_loop_normal(self):
@@ -53,12 +39,9 @@ class VitScheduler(SchedulerProfilerMixin):
                     if isinstance(req, AbortReq):
                         logger.info("VitScheduler received abort for rid=%s", req.rid)
                         self.aborted_rids.add(req.rid)
-<<<<<<< HEAD
-=======
                     elif isinstance(req, ProfileReq):
                         result = self.profile(req)
                         self.communication_backend.send_pyobj(result)
->>>>>>> main
                     elif isinstance(req, Req):
                         if req.rid in self.aborted_rids:
                             logger.info("VitScheduler skipping aborted request rid=%s", req.rid)
@@ -73,9 +56,6 @@ class VitScheduler(SchedulerProfilerMixin):
     def run_vit_step(self, req: Req):
         """Placeholder: run ViT encoder and forward request to next stage."""
         self.vit_worker.forward(req, self.mesh)
-<<<<<<< HEAD
-=======
         self.forward_ct += 1
         self._profile_batch_predicate(None)
->>>>>>> main
         self.communication_backend.send_pyobj(req)

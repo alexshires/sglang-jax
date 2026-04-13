@@ -1,11 +1,6 @@
 import math
 
 import jax
-<<<<<<< HEAD
-import jax.numpy as jnp
-from flax import nnx
-
-=======
 import jax.experimental.pallas as pl
 import jax.numpy as jnp
 from flax import nnx
@@ -19,7 +14,6 @@ from sgl_jax.srt.multimodal.layers.attention.flash_attention_backend import (
 def align_to(x, a):
     return pl.cdiv(x, a) * a
 
->>>>>>> main
 
 def simple_attention(query, key, value, scale=None, causal=False):
     """Simple dot-product attention for diffusion models (no KV cache).
@@ -80,10 +74,7 @@ class USPAttention(nnx.Module):
         layer_id: int = 0,
         logit_cap: float | None = None,
         scaling: float | None = None,
-<<<<<<< HEAD
-=======
         mesh: jax.sharding.Mesh | None = None,
->>>>>>> main
         **extra_impl_args,
     ) -> None:
         super().__init__()
@@ -97,13 +88,10 @@ class USPAttention(nnx.Module):
         self.layer_id = layer_id
         self.logit_cap = logit_cap or None
         self.scaling = scaling
-<<<<<<< HEAD
-=======
         self.mesh = mesh
         self.attention_backend = FlashAttentionBackend(
             mesh=self.mesh, sm_scale=self.softmax_scale, causal=False
         )
->>>>>>> main
 
     def __call__(
         self,
@@ -119,14 +107,6 @@ class USPAttention(nnx.Module):
 
         Note: Replicated tensors are not supported in this implementation.
         """
-<<<<<<< HEAD
-        # Use simple attention for diffusion (no KV cache needed)
-        if req is None:
-            return simple_attention(query, key, value, self.softmax_scale, self.causal)
-
-        # TODO refactor flashattention backend
-        return req.attention_backend(query, key, value, self, None, None, 0)
-=======
         query = jnp.transpose(query, (0, 2, 1, 3))
         key = jnp.transpose(key, (0, 2, 1, 3))
         value = jnp.transpose(value, (0, 2, 1, 3))
@@ -161,4 +141,3 @@ class USPAttention(nnx.Module):
         output = self.attention_backend(query, key, value, segment_ids)
         output = output[:, :, :q_len, :]
         return jnp.transpose(output, (0, 2, 1, 3))
->>>>>>> main

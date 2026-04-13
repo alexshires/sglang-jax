@@ -406,69 +406,11 @@ class LogitsProcessor(nnx.Module):
     ):
         out_sharding = NamedSharding(mesh, P(None))
         input_token_ids_logprobs_val, input_token_ids_logprobs_idx = [], []
-<<<<<<< HEAD
-        max_pruned_len = max(logits_metadata.extend_logprob_pruned_lens_cpu)
-        max_token_ids_len = max(
-            (
-                len(token_ids)
-                for token_ids in logits_metadata.token_ids_logprobs
-                if token_ids is not None
-            ),
-            default=0,
-        )
-=======
->>>>>>> main
         pt = 0
         for token_ids, pruned_len in zip(
             logits_metadata.token_ids_logprobs,
             logits_metadata.extend_logprob_pruned_lens_cpu,
         ):
-<<<<<<< HEAD
-            token_ids = token_ids or []
-            token_ids_len = len(token_ids)
-
-            if pruned_len > 0 and token_ids_len > 0:
-                token_ids_logprobs_val = jnp.stack(
-                    [
-                        all_logprobs.at[pt + j, token_ids].get(out_sharding=out_sharding)
-                        for j in range(pruned_len)
-                    ]
-                )
-                token_ids_logprobs_idx = jnp.tile(
-                    jnp.array(token_ids, dtype=jnp.int32), reps=(pruned_len, 1)
-                )
-            else:
-                token_ids_logprobs_val = jnp.zeros(
-                    (max(pruned_len, 0), token_ids_len), dtype=all_logprobs.dtype
-                )
-                token_ids_logprobs_idx = jnp.zeros(
-                    (max(pruned_len, 0), token_ids_len), dtype=jnp.int32
-                )
-
-            input_token_ids_logprobs_val.append(
-                jnp.pad(
-                    token_ids_logprobs_val,
-                    (
-                        (0, max_pruned_len - max(pruned_len, 0)),
-                        (0, max_token_ids_len - token_ids_len),
-                    ),
-                )
-            )
-            input_token_ids_logprobs_idx.append(
-                jnp.pad(
-                    token_ids_logprobs_idx,
-                    (
-                        (0, max_pruned_len - max(pruned_len, 0)),
-                        (0, max_token_ids_len - token_ids_len),
-                    ),
-                    constant_values=-1,
-                )
-            )
-            pt += max(pruned_len, 0)
-
-        return jnp.stack(input_token_ids_logprobs_val), jnp.stack(input_token_ids_logprobs_idx)
-
-=======
             if pruned_len <= 0:
                 input_token_ids_logprobs_val.append([])
                 input_token_ids_logprobs_idx.append([])
@@ -485,48 +427,18 @@ class LogitsProcessor(nnx.Module):
 
         return jnp.array(input_token_ids_logprobs_val), jnp.array(input_token_ids_logprobs_idx)
 
->>>>>>> main
     @staticmethod
     def get_top_logprobs(all_logprobs: jax.Array, logits_metadata: LogitsMetadata):
         max_k = max(logits_metadata.top_logprobs_nums)
         values, indices = jax.lax.top_k(all_logprobs, max_k)
 
         input_top_logprobs_val, input_top_logprobs_idx = [], []
-<<<<<<< HEAD
-        max_pruned_len = max(logits_metadata.extend_logprob_pruned_lens_cpu)
-=======
->>>>>>> main
 
         pt = 0
         for k, pruned_len in zip(
             logits_metadata.top_logprobs_nums,
             logits_metadata.extend_logprob_pruned_lens_cpu,
         ):
-<<<<<<< HEAD
-            if pruned_len > 0 and k > 0:
-                top_logprobs_val = values[pt : pt + pruned_len, :k]
-                top_logprobs_idx = indices[pt : pt + pruned_len, :k]
-            else:
-                top_logprobs_val = jnp.zeros((max(pruned_len, 0), k), dtype=values.dtype)
-                top_logprobs_idx = jnp.zeros((max(pruned_len, 0), k), dtype=indices.dtype)
-
-            input_top_logprobs_val.append(
-                jnp.pad(
-                    top_logprobs_val,
-                    ((0, max_pruned_len - max(pruned_len, 0)), (0, max_k - k)),
-                )
-            )
-            input_top_logprobs_idx.append(
-                jnp.pad(
-                    top_logprobs_idx,
-                    ((0, max_pruned_len - max(pruned_len, 0)), (0, max_k - k)),
-                    constant_values=-1,
-                )
-            )
-            pt += max(pruned_len, 0)
-
-        return jnp.stack(input_top_logprobs_val), jnp.stack(input_top_logprobs_idx)
-=======
             if pruned_len <= 0:
                 input_top_logprobs_val.append([])
                 input_top_logprobs_idx.append([])
@@ -537,7 +449,6 @@ class LogitsProcessor(nnx.Module):
             pt += pruned_len
 
         return jnp.array(input_top_logprobs_val), jnp.array(input_top_logprobs_idx)
->>>>>>> main
 
     def compute_temp_top_p_normalized_logprobs(
         self, last_logits: jax.Array, logits_metadata: LogitsMetadata

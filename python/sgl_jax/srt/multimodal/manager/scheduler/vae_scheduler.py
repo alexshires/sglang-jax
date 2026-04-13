@@ -2,20 +2,13 @@ import logging
 
 import jax
 import jax.sharding
-<<<<<<< HEAD
-=======
 import numpy as np
->>>>>>> main
 from jax import NamedSharding
 from jax.sharding import PartitionSpec
 
 from sgl_jax.srt.managers.communication import CommunicationBackend
-<<<<<<< HEAD
-from sgl_jax.srt.managers.io_struct import AbortReq
-=======
 from sgl_jax.srt.managers.io_struct import AbortReq, ProfileReq
 from sgl_jax.srt.managers.scheduler_profiler_mixing import SchedulerProfilerMixin
->>>>>>> main
 from sgl_jax.srt.multimodal.common.ServerArgs import MultimodalServerArgs
 from sgl_jax.srt.multimodal.manager.schedule_batch import Req
 from sgl_jax.srt.multimodal.model_executor.vae.vae_model_worker import VaeModelWorker
@@ -24,11 +17,7 @@ from sgl_jax.srt.utils.jax_utils import device_array
 logger = logging.getLogger(__name__)
 
 
-<<<<<<< HEAD
-class VaeScheduler:
-=======
 class VaeScheduler(SchedulerProfilerMixin):
->>>>>>> main
     """Scheduler for VAE model inference within the multimodal pipeline.
 
     Responsibilities:
@@ -50,10 +39,7 @@ class VaeScheduler(SchedulerProfilerMixin):
         mesh: jax.sharding.Mesh,
         model_class,
         stage_sub_dir: str | None = None,
-<<<<<<< HEAD
-=======
         precompile_params: dict | None = None,
->>>>>>> main
         **kwargs,
     ):
         """Initialize the VaeScheduler.
@@ -75,11 +61,6 @@ class VaeScheduler(SchedulerProfilerMixin):
             stage_sub_dir=stage_sub_dir,
         )
         self.server_args = server_args
-<<<<<<< HEAD
-        self.model_config = model_class.get_config_class()()
-        # Track aborted request IDs to skip processing
-        self.aborted_rids: set[str] = set()
-=======
         self.forward_ct = 0
         self.init_profier()
         self.model_config = model_class.get_config_class()()
@@ -89,7 +70,6 @@ class VaeScheduler(SchedulerProfilerMixin):
             logger.info("[VAE Scheduler] Begins to run vae worker precompile.")
             self.vae_worker.run_precompile()
             logger.info("[VAE Scheduler] Completes vae worker precompile.")
->>>>>>> main
 
     def event_loop_normal(self):
         """Main blocking loop used in non-async environments.
@@ -110,12 +90,9 @@ class VaeScheduler(SchedulerProfilerMixin):
                     if isinstance(req, AbortReq):
                         logger.info("VaeScheduler received abort for rid=%s", req.rid)
                         self.aborted_rids.add(req.rid)
-<<<<<<< HEAD
-=======
                     elif isinstance(req, ProfileReq):
                         result = self.profile(req)
                         self._comm_backend.send_pyobj(result)
->>>>>>> main
                     elif isinstance(req, Req):
                         # Check if this request was aborted
                         if req.rid in self.aborted_rids:
@@ -149,8 +126,6 @@ class VaeScheduler(SchedulerProfilerMixin):
         if hasattr(self.model_config, "shift_factor"):
             req.latents += self.model_config.shift_factor
         req.latents = jax.device_get(req.latents)
-<<<<<<< HEAD
-=======
         latents_t_padding = 0
         if self.server_args.precompile_frame_paddings is not None and hasattr(
             self.model_config, "scale_factor_temporal"
@@ -166,7 +141,6 @@ class VaeScheduler(SchedulerProfilerMixin):
             mode="constant",
             constant_values=0,
         )
->>>>>>> main
 
     def run_vae_batch(self, batch: list[Req]):
         """Run the VAE forward pass for a batch of requests.
@@ -178,11 +152,6 @@ class VaeScheduler(SchedulerProfilerMixin):
         """
 
         for req in batch:
-<<<<<<< HEAD
-            output, _ = self.vae_worker.forward(req)
-            req.output = jax.device_get(output)
-            req.latents = None
-=======
             output, cache_miss = self.vae_worker.forward(req)
             if cache_miss > 0:
                 logger.info("VAE forward pass cache miss: %s", cache_miss)
@@ -190,5 +159,4 @@ class VaeScheduler(SchedulerProfilerMixin):
             req.latents = None
             self.forward_ct += 1
             self._profile_batch_predicate(None)
->>>>>>> main
             self._comm_backend.send_pyobj(req)

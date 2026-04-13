@@ -1,12 +1,3 @@
-<<<<<<< HEAD
-from __future__ import annotations
-
-# Backwards-compat import path for models/configs that reference
-# `sgl_jax.srt.layers.fused_moe.FusedEPMoE`.
-from .moe import FusedEPMoE
-
-__all__ = ["FusedEPMoE"]
-=======
 """Fused Expert-Parallel MoE layer using Pallas kernel."""
 
 import jax
@@ -404,4 +395,3 @@ class FusedEPMoE(nnx.Module):
 
         output = jax.sharding.reshard(output, NamedSharding(self.mesh, P(None, None)))
         return output
->>>>>>> main

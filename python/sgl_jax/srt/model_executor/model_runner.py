@@ -14,13 +14,10 @@ from jax.sharding import PartitionSpec as P
 
 from sgl_jax.srt.configs.load_config import LoadConfig
 from sgl_jax.srt.configs.model_config import AttentionArch, MockModelConfig, ModelConfig
-<<<<<<< HEAD
-=======
 from sgl_jax.srt.eplb.expert_location import (
     init_expert_location_metadata,
     set_global_server_args,
 )
->>>>>>> main
 from sgl_jax.srt.layers.logits_processor import LogitsMetadata, LogitsProcessorOutput
 from sgl_jax.srt.layers.routed_experts_capturer import (
     RoutedExpertsCapturer,
@@ -173,8 +170,6 @@ class ModelRunner(BaseModelRunner):
                 model_config=self.model_config,
                 num_tokens=self.max_total_num_tokens + self.page_size,
                 max_padding=self.max_padding,
-<<<<<<< HEAD
-=======
                 ep_size=self.server_args.ep_size,
                 enable_balance_debug=self.server_args.enable_expert_balance_debug,
                 balance_segment_counter=self.server_args.expert_balance_segment_counter,
@@ -184,7 +179,6 @@ class ModelRunner(BaseModelRunner):
                 dist_recorder_output_file=self.server_args.expert_distribution_recorder_output_file,
                 physical_expert_counts=self.server_args.ep_num_redundant_experts
                 + getattr(self.model_config.hf_config, "num_experts", 0),
->>>>>>> main
             )
         )
 
@@ -234,10 +228,7 @@ class ModelRunner(BaseModelRunner):
             use_sort_for_toppk_minp,
             *args,
         ):
-<<<<<<< HEAD
-=======
 
->>>>>>> main
             model_state = jax.tree_util.tree_unflatten(sampler_state_def, sampler_state_leaves)
             sampler = nnx.merge(sampler_def, model_state)
             return sampler(*args, use_sort_for_toppk_minp=use_sort_for_toppk_minp)
@@ -248,10 +239,6 @@ class ModelRunner(BaseModelRunner):
 
         def run_model_wrapper(forward_batch, logits_metadata):
             token_to_kv_pool = self.token_to_kv_pool
-<<<<<<< HEAD
-
-=======
->>>>>>> main
             return jitted_run_model(
                 model_def,
                 model_state_def,
@@ -276,13 +263,6 @@ class ModelRunner(BaseModelRunner):
     def get_available_device_memory(self):
         distributed = jax.process_count() != 1
         min_available_device_memory = get_available_device_memory(
-<<<<<<< HEAD
-            self.device, distributed=distributed
-        )
-
-        # Check memory for tensor parallelism
-        local_device_memory = get_available_device_memory(self.device)
-=======
             self.device, distributed=distributed, device_indexes=self.server_args.device_indexes
         )
 
@@ -290,7 +270,6 @@ class ModelRunner(BaseModelRunner):
         local_device_memory = get_available_device_memory(
             self.device, device_indexes=self.server_args.device_indexes
         )
->>>>>>> main
         if self.tp_size > 1 and min_available_device_memory < local_device_memory * 0.9:
             if get_bool_env_var("SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK"):
                 logger.warning(
@@ -307,17 +286,11 @@ class ModelRunner(BaseModelRunner):
         return min_available_device_memory
 
     def load_model(self):
-<<<<<<< HEAD
-=======
         set_global_server_args(self.server_args)
->>>>>>> main
         self.model_config.validate_tensor_parallel_config(self.tp_size)
         self.model_config.configure_for_tensor_parallel(self.tp_size)
         self.model_config.log_kv_heads_info(self.tp_size)
         self.model_config.hf_config.ep_size = self.ep_size
-<<<<<<< HEAD
-        self.model_config.hf_config.moe_backend = self.model_config.moe_backend.value
-=======
         self.model_config.hf_config.ep_num_redundant_experts = (
             self.server_args.ep_num_redundant_experts
         )
@@ -327,7 +300,6 @@ class ModelRunner(BaseModelRunner):
             with jax.set_mesh(self.mesh):
                 init_expert_location_metadata(self.server_args, self.model_config)
 
->>>>>>> main
         self.model = self.model_loader.load_model(
             model_config=self.model_config,
         )
@@ -339,8 +311,6 @@ class ModelRunner(BaseModelRunner):
 
         # Apply quantization if quantization config is set
         if self.model_config.quantization_config is not None:
-<<<<<<< HEAD
-=======
             # Block-wise quant relies on a TPU Pallas kernel; reject early.
             wbs = self.model_config.quantization_config.weight_block_size
             if wbs is not None and jax.default_backend() != "tpu":
@@ -348,7 +318,6 @@ class ModelRunner(BaseModelRunner):
                     f"Block-wise quantization (weight_block_size={wbs}) "
                     f"requires TPU backend, but got {jax.default_backend()!r}."
                 )
->>>>>>> main
             is_static = self.model_config.quantization_config.is_static_checkpoint
 
             if not is_static:
@@ -607,8 +576,6 @@ class ModelRunner(BaseModelRunner):
         cache_miss_count = 0
         import jax._src.test_util as jtu
 
-<<<<<<< HEAD
-=======
         for key, value in forward_batch.__dict__.items():
             if isinstance(value, jax.Array):
                 logger.debug(
@@ -633,7 +600,6 @@ class ModelRunner(BaseModelRunner):
             else:
                 logger.debug("logits_metadata %s: %s", key, value)
 
->>>>>>> main
         with jtu.count_pjit_cpp_cache_miss() as count:
             output, layers_kv_fused, _, layers_topk_ids = self.jitted_run_model(
                 forward_batch, logits_metadata
