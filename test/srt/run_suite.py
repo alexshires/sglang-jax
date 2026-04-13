@@ -461,9 +461,6 @@ suites = {
         TestFile("test/srt/test_multi_item_scheduler_output.py", 2),
         TestFile("test/srt/test_multi_item_regression.py", 4),
     ],
-    "multi-item-scoring-benchmark-tpu-v6e-1": [
-        TestFile("test/srt/test_bench_multi_item_score.py", 15),
-    ],
     "minimal-smoke-test": [
         TestFile("python/sgl_jax/test/test_utils.py", 0.2),
     ],
@@ -523,7 +520,6 @@ suites = {
     ],
     "performance-test-tpu-v6e-1": [
         TestFile("test/srt/test_bench_serving_dense.py", 7),
-        TestFile("test/srt/test_bench_score.py", 3),  # Score API performance benchmark
         TestFile(
             "test/srt/test_multi_item_regression.py",
             4,

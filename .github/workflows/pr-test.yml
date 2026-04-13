@@ -1,27 +1,24 @@
 name: PR Test
 
-# on:
-#   push:
-#     branches:
-#       - main
-#       - "epic/*"
-#     paths:
-#       - "python/**"
-#       - "scripts/**"
-#       - "test/**"
-#       - ".github/workflows/pr-test.yml"
-#   pull_request:
-#     branches:
-#       - main
-#       - "epic/*"
-#     paths:
-#       - "python/**"
-#       - "scripts/**"
-#       - "test/**"
-#       - ".github/workflows/pr-test.yml"
-
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "epic/*"
+    paths:
+      - "python/**"
+      - "scripts/**"
+      - "test/**"
+      - ".github/workflows/pr-test.yml"
+  pull_request:
+    branches:
+      - main
+      - "epic/*"
+    paths:
+      - "python/**"
+      - "scripts/**"
+      - "test/**"
+      - ".github/workflows/pr-test.yml"
 
 concurrency:
   group: pr-test-${{ github.ref }}
