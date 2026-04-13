@@ -25,7 +25,6 @@ import uvloop
 import zmq
 import zmq.asyncio
 from fastapi import BackgroundTasks
-from scipy.special import softmax
 
 from sgl_jax.srt.configs.model_config import ModelConfig
 from sgl_jax.srt.hf_transformers_utils import get_tokenizer
@@ -83,6 +82,17 @@ from sgl_jax.utils import TypeBasedDispatcher, get_exception_traceback
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_softmax(values: list[float]) -> list[float]:
+    if not values:
+        return []
+    max_value = max(values)
+    exp_values = [math.exp(value - max_value) for value in values]
+    total = sum(exp_values)
+    if total == 0:
+        return [0.0 for _ in exp_values]
+    return [value / total for value in exp_values]
 
 
 class _SchedulerSender:
@@ -1836,7 +1846,7 @@ class TokenizerManager:
                     logprobs[token_id] = logprob
             score_list = [logprobs.get(token_id, float("-inf")) for token_id in label_token_ids]
             if apply_softmax:
-                return softmax(score_list).tolist()
+                return _stable_softmax(score_list)
             return [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
 
         async def _score_multi_item_tokenized(
@@ -2170,7 +2180,7 @@ class TokenizerManager:
                 )
 
             if apply_softmax:
-                scores.append(softmax(item_scores).tolist())
+                scores.append(_stable_softmax(item_scores))
             else:
                 scores.append([math.exp(x) if x != float("-inf") else 0.0 for x in item_scores])
             if meta_info.get("scheduler_dispatch_count") is not None:
