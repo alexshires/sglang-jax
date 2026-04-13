@@ -105,6 +105,10 @@ class WanTransformerBlock(nnx.Module):
             num_heads=num_heads,
             head_size=dim // num_heads,
             causal=False,
+<<<<<<< HEAD
+=======
+            mesh=mesh,
+>>>>>>> main
         )
         self.hidden_dim = dim
         self.num_attention_heads = num_heads
@@ -241,7 +245,10 @@ class WanTransformerBlock(nnx.Module):
             q = self.norm_q(q)
         if self.norm_k is not None and self.norm_k.num_features == self.hidden_dim:
             k = self.norm_k(k)
+<<<<<<< HEAD
 
+=======
+>>>>>>> main
         q = q.reshape(bs, seq_len, self.num_attention_heads, -1)
         k = k.reshape(bs, seq_len, self.num_attention_heads, -1)
         v = v.reshape(bs, seq_len, self.num_attention_heads, -1)
@@ -348,6 +355,10 @@ class WanSelfAttention(nnx.Module):
             dropout_rate=0,
             softmax_scale=None,
             causal=False,
+<<<<<<< HEAD
+=======
+            mesh=mesh,
+>>>>>>> main
         )
 
     def __call__(self, x: jax.Array, context: jax.Array, context_lens: int):

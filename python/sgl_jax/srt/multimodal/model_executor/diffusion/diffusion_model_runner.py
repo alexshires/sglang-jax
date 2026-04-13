@@ -128,6 +128,10 @@ class DiffusionModelRunner(BaseModelRunner):
         batch: Req,
         mesh: jax.sharding.Mesh,
         abort_checker: Callable[[], bool] | None = None,
+<<<<<<< HEAD
+=======
+        step_callback: Callable[[], None] | None = None,
+>>>>>>> main
     ) -> bool:
         """Run diffusion inference with optional abort checking.
 
@@ -136,6 +140,11 @@ class DiffusionModelRunner(BaseModelRunner):
             mesh: JAX device mesh for sharding.
             abort_checker: Optional callback that returns True if the request
                 should be aborted. Called between diffusion steps.
+<<<<<<< HEAD
+=======
+            step_callback: Optional callback invoked after each denoising step
+                completes, used for profiling step counting.
+>>>>>>> main
 
         Returns:
             True if the request was aborted, False otherwise.
@@ -189,6 +198,10 @@ class DiffusionModelRunner(BaseModelRunner):
         )
         self.solver.set_begin_index(0)
         start_time = time.time()
+<<<<<<< HEAD
+=======
+        import jax._src.test_util as jtu
+>>>>>>> main
 
         for step in tqdm(range(num_inference_steps), desc="Diffusion steps"):
             # Check for abort between steps
@@ -201,6 +214,10 @@ class DiffusionModelRunner(BaseModelRunner):
                 )
                 return True  # Aborted
 
+<<<<<<< HEAD
+=======
+            jax.profiler.StepTraceAnnotation("diffusion_step", step_num=step)
+>>>>>>> main
             t_scalar = jnp.array(self.solver.timesteps, dtype=jnp.int32)[step]
             if do_classifier_free_guidance:
                 latents = jnp.concatenate([latents] * 2, axis=0)
@@ -209,6 +226,7 @@ class DiffusionModelRunner(BaseModelRunner):
             # Transpose to channel-first (B, T, H, W, C) -> (B, C, T, H, W) for model
             latents_cf = latents.transpose(0, 4, 1, 2, 3)
             # Perform denoising step
+<<<<<<< HEAD
             noise_pred: jax.Array = self.jitted_forward(
                 hidden_states=latents_cf,
                 encoder_hidden_states=text_embeds,
@@ -216,6 +234,18 @@ class DiffusionModelRunner(BaseModelRunner):
                 encoder_hidden_states_image=None,
                 guidance_scale=None,
             )
+=======
+            with jtu.count_pjit_cpp_cache_miss() as count:
+                noise_pred: jax.Array = self.jitted_forward(
+                    hidden_states=latents_cf,
+                    encoder_hidden_states=text_embeds,
+                    timesteps=t_batch,
+                    encoder_hidden_states_image=None,
+                    guidance_scale=None,
+                )
+                if count() > 0:
+                    logger.info("diffusion cache miss count: %d", count())
+>>>>>>> main
             if do_classifier_free_guidance:
                 bsz = latents.shape[0] // 2
                 noise_uncond = noise_pred[bsz:]
@@ -232,6 +262,11 @@ class DiffusionModelRunner(BaseModelRunner):
             )[0]
 
             latents = latents.transpose(0, 2, 3, 4, 1)  # back to channel-last
+<<<<<<< HEAD
+=======
+            if step_callback is not None:
+                step_callback()
+>>>>>>> main
 
         logger.info("Finished diffusion step %d in %.2f seconds", step, time.time() - start_time)
         batch.latents = jax.device_get(latents)
@@ -253,8 +288,13 @@ class DiffusionModelRunner(BaseModelRunner):
                     if batch.num_frames is not None
                     else 1
                 ),
+<<<<<<< HEAD
                 batch.width // self.model_config.scale_factor_spatial,
                 batch.height // self.model_config.scale_factor_spatial,
+=======
+                batch.height // self.model_config.scale_factor_spatial,
+                batch.width // self.model_config.scale_factor_spatial,
+>>>>>>> main
                 self.model_config.latent_input_dim,
             ),
             dtype=jnp.float32,

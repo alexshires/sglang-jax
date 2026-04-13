@@ -2,11 +2,19 @@ import logging
 from typing import Any
 
 import jax
+<<<<<<< HEAD
+=======
+import numpy as np
+>>>>>>> main
 from flax import nnx
 from jax import numpy as jnp
 from transformers import PretrainedConfig
 
 from sgl_jax.srt.configs.model_config import ModelConfig, MoEBackend
+<<<<<<< HEAD
+=======
+from sgl_jax.srt.eplb.expert_location import ExpertLocationMetadata
+>>>>>>> main
 from sgl_jax.srt.layers.embeddings import Embed, ParallelLMHead, RotaryEmbedding
 from sgl_jax.srt.layers.layernorm import RMSNorm
 from sgl_jax.srt.layers.linear import LinearBase
@@ -277,6 +285,18 @@ class BailingMoEDecoderLayer(nnx.Module):
                 config.moe_intermediate_size,
             )
 
+<<<<<<< HEAD
+=======
+            self.topk = TopK(
+                topk=config.num_experts_per_tok,
+                renormalize=config.norm_topk_prob,
+                num_expert_group=config.n_group,
+                topk_group=config.topk_group,
+                routed_scaling_factor=config.routed_scaling_factor,
+                layer_id=layer_id,
+            )
+
+>>>>>>> main
             if self.use_fused:
                 self.mlp = FusedEPMoE(
                     hidden_size=config.hidden_size,
@@ -298,6 +318,7 @@ class BailingMoEDecoderLayer(nnx.Module):
                     quantization_config=getattr(config, "quantization_config", None),
                 )
             else:
+<<<<<<< HEAD
                 self.topk = TopK(
                     topk=config.num_experts_per_tok,
                     renormalize=config.norm_topk_prob,
@@ -305,6 +326,8 @@ class BailingMoEDecoderLayer(nnx.Module):
                     topk_group=config.topk_group,
                     routed_scaling_factor=config.routed_scaling_factor,
                 )
+=======
+>>>>>>> main
                 self.mlp = EPMoE(
                     hidden_size=config.hidden_size,
                     num_experts=config.num_experts,
@@ -350,6 +373,10 @@ class BailingMoEDecoderLayer(nnx.Module):
         forward_batch: ForwardBatch,
         token_to_kv_pool: KVCache,
         residual: jax.Array | None = None,
+<<<<<<< HEAD
+=======
+        dispatch_info: ExpertLocationMetadata | None = None,
+>>>>>>> main
     ) -> tuple[jax.Array, jax.Array]:
         if residual is None:
             residual = hidden_states
@@ -377,6 +404,7 @@ class BailingMoEDecoderLayer(nnx.Module):
             router_logits = self.moe_gate(hidden_states)
 
             correction_bias = self.moe_gate.bias.value if self.moe_gate.bias is not None else None
+<<<<<<< HEAD
             if self.use_fused:
                 token_valid_mask = forward_batch.get_token_valid_mask(hidden_states.shape[0])
                 hidden_states = self.mlp(
@@ -389,6 +417,20 @@ class BailingMoEDecoderLayer(nnx.Module):
             else:
                 topk_weights, topk_ids = self.topk(router_logits, correction_bias)
                 hidden_states = self.mlp(hidden_states, topk_weights, topk_ids)
+=======
+            topk_weights, topk_ids = self.topk(
+                router_logits,
+                correction_bias,
+                dispatch_info=dispatch_info,
+            )
+
+            if self.use_fused:
+                token_valid_mask = forward_batch.get_token_valid_mask(hidden_states.shape[0])
+                topk_ids = jnp.where(token_valid_mask[:, None], topk_ids, -1)
+            else:
+                pass
+            hidden_states = self.mlp(hidden_states, topk_weights, topk_ids)
+>>>>>>> main
 
             if shared_output is not None:
                 hidden_states = hidden_states + shared_output
@@ -451,6 +493,10 @@ class BailingMoEModel(nnx.Module):
                 forward_batch,
                 token_to_kv_pool,
                 residual,
+<<<<<<< HEAD
+=======
+                dispatch_info=forward_batch.expert_location_metadata,
+>>>>>>> main
             )
             layers_kv_fused.append(kv_fused)
             layers_topk_ids.append(topk_ids)
@@ -459,6 +505,10 @@ class BailingMoEModel(nnx.Module):
             hidden_states += residual
 
         hidden_states = self.norm(hidden_states)
+<<<<<<< HEAD
+=======
+        # jax.debug.print("hidden_states: {hidden_states}", hidden_states=hidden_states)
+>>>>>>> main
         return hidden_states, layers_kv_fused, layers_topk_ids
 
 
@@ -653,7 +703,11 @@ class BailingMoEForCausalLM(nnx.Module):
                     target_path=f"{target_prefix}.moe_gate.bias", sharding=(None,)
                 )
 
+<<<<<<< HEAD
             num_experts = getattr(self.config, "num_experts", 256)
+=======
+            num_logical_experts = getattr(self.config, "num_experts", 256)
+>>>>>>> main
             moe_backend = getattr(self.config, "moe_backend", "epmoe")
             use_fused = moe_backend == "fused"
 
@@ -661,12 +715,51 @@ class BailingMoEForCausalLM(nnx.Module):
             hidden_size = self.config.hidden_size
             inter_size = getattr(self.config, "moe_intermediate_size", 2048)
 
+<<<<<<< HEAD
             moe_mappings = create_moe_weights_mapping(
                 prefix=prefix,
                 target_prefix=target_prefix,
                 num_experts=num_experts,
                 expert_type_names=("gate_proj", "up_proj", "down_proj"),
                 moe_backend=moe_backend,
+=======
+            # Get physical to logical mapping for redundant experts
+            from sgl_jax.srt.eplb.expert_location import (
+                get_global_expert_location_metadata,
+            )
+
+            metadata = get_global_expert_location_metadata()
+            phy_to_log = None
+            num_physical_experts = num_logical_experts
+            if metadata is not None:
+                num_physical_experts = metadata.num_physical_experts
+                physical_to_logical_map = np.array(jax.device_get(metadata.physical_to_logical_map))
+                phy_to_log = physical_to_logical_map[layer_idx]
+                sample = phy_to_log[: min(10, phy_to_log.shape[0])].tolist()
+                logger.info(
+                    "Layer %s: logical=%s, physical=%s, redundancy=%.2fx",
+                    layer_idx,
+                    num_logical_experts,
+                    num_physical_experts,
+                    num_physical_experts / num_logical_experts,
+                )
+                logger.info(
+                    "Layer %s EPLB map: size=%s min=%s max=%s sample=%s",
+                    layer_idx,
+                    phy_to_log.shape[0],
+                    int(phy_to_log.min()),
+                    int(phy_to_log.max()),
+                    sample,
+                )
+
+            moe_mappings = create_moe_weights_mapping(
+                prefix=prefix,
+                target_prefix=target_prefix,
+                num_experts=num_logical_experts,
+                expert_type_names=("gate_proj", "up_proj", "down_proj"),
+                moe_backend=moe_backend,
+                physical_to_logical_map=phy_to_log,
+>>>>>>> main
             )
 
             if is_static_quant:
@@ -680,6 +773,10 @@ class BailingMoEForCausalLM(nnx.Module):
                         sharding=mapping.sharding,
                         transpose=mapping.transpose,
                         concat_axis=mapping.concat_axis,
+<<<<<<< HEAD
+=======
+                        physical_to_logical_map=mapping.physical_to_logical_map,
+>>>>>>> main
                     )
 
                     scale_key = key + "_scale"
@@ -692,7 +789,13 @@ class BailingMoEForCausalLM(nnx.Module):
                     if use_fused:
                         in_dim = inter_size if is_w2 else hidden_size
                         num_blocks = in_dim // BLOCK_SIZE
+<<<<<<< HEAD
                         scale_reshape = (num_experts, 1, 1, out_dim)
+=======
+                        # Use physical experts count for reshape (after redundant expert cloning)
+                        scale_reshape = (num_physical_experts, 1, 1, out_dim)
+                        logger.info("scale_reshape: %s", scale_reshape)
+>>>>>>> main
                         scale_repeat = (1, num_blocks)
 
                         scale_sharding = None
@@ -711,10 +814,19 @@ class BailingMoEForCausalLM(nnx.Module):
                             reshape=scale_reshape,
                             repeat=scale_repeat,
                             concat_axis=mapping.concat_axis,
+<<<<<<< HEAD
                         )
 
                     else:
                         scale_reshape = (num_experts, 1, 1, out_dim)
+=======
+                            physical_to_logical_map=mapping.physical_to_logical_map,
+                        )
+
+                    else:
+                        # Use physical experts count for reshape (after redundant expert cloning)
+                        scale_reshape = (num_physical_experts, 1, 1, out_dim)
+>>>>>>> main
                         scale_repeat = None
                         scale_sharding = None
                         if mapping.sharding:
@@ -732,6 +844,10 @@ class BailingMoEForCausalLM(nnx.Module):
                             reshape=scale_reshape,
                             repeat=scale_repeat,
                             concat_axis=mapping.concat_axis,
+<<<<<<< HEAD
+=======
+                            physical_to_logical_map=mapping.physical_to_logical_map,
+>>>>>>> main
                         )
 
                 mappings.update(new_moe_mappings)
@@ -831,7 +947,12 @@ class BailingMoEForCausalLM(nnx.Module):
         logits_metadata: LogitsMetadata,
     ):
         hidden_states, layers_kv_fused, layers_topk_ids = self.model(
+<<<<<<< HEAD
             forward_batch, token_to_kv_pool
+=======
+            forward_batch,
+            token_to_kv_pool,
+>>>>>>> main
         )
         if not getattr(self.config, "tie_word_embeddings", False):
             output = self.logits_processor(hidden_states, self.lm_head, logits_metadata)

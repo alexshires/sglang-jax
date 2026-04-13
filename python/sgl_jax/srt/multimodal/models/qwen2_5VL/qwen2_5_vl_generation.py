@@ -2,12 +2,19 @@ import logging
 
 import jax
 import jax.numpy as jnp
+<<<<<<< HEAD
 import numpy as np
+=======
+>>>>>>> main
 from flax import nnx
 
 from sgl_jax.srt.configs.model_config import ModelConfig
 from sgl_jax.srt.hf_transformers_utils import get_hf_text_config
+<<<<<<< HEAD
 from sgl_jax.srt.layers.embeddings import ParallelLMHead, apply_rotary_emb
+=======
+from sgl_jax.srt.layers.embeddings import MRotaryEmbedding, ParallelLMHead
+>>>>>>> main
 from sgl_jax.srt.layers.logits_processor import LogitsMetadata, LogitsProcessor
 from sgl_jax.srt.mem_cache.memory_pool import KVCache
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardBatch
@@ -17,6 +24,7 @@ from sgl_jax.srt.utils.weight_utils import WeightLoader, WeightMapping
 logger = logging.getLogger(__name__)
 
 
+<<<<<<< HEAD
 def _apply_interleaved_rope(x: jax.Array, mrope_section: list[int]) -> jax.Array:
     x_t = x[0]
     x_t = x_t.at[..., 1 : mrope_section[1] * 3 : 3].set(x[1, ..., 1 : mrope_section[1] * 3 : 3])
@@ -122,6 +130,8 @@ class MRotaryEmbedding:
         return query, key
 
 
+=======
+>>>>>>> main
 class Qwen2_5_VL_Model(Qwen2Model):
     """Qwen2Model with MRoPE support for Qwen2.5-VL."""
 

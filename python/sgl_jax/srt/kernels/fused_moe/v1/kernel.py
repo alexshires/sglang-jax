@@ -469,11 +469,19 @@ def _fused_ep_moe_kernel(
     b1_hbm,  # None | F32(local_num_experts, 1, intermediate_size)
     b2_hbm,  # None | F32(local_num_experts, 1, hidden_size)
     b3_hbm,  # None | F32(local_num_experts, 1, intermediate_size)
+<<<<<<< HEAD
     gating_hbm,  # (local_num_tokens, padded_num_experts)
     a2a_s_x2_hbm,  # (2, align_to(bt * num_devices, bts), t_packing, hidden_size // t_packing)
     a2a_s_acc_x2_hbm,  # (2, align_to(bt * num_devices, bts), t_packing, hidden_size // t_packing)
     a2a_g_hbm,  # (num_experts, bt, t_packing, hidden_size // t_packing)
     bias_hbm,  # None | F32(padded_num_experts,)
+=======
+    topk_weights_hbm,  # (local_num_tokens, top_k)
+    topk_ids_hbm,  # (local_num_tokens, top_k)
+    a2a_s_x2_hbm,  # (2, align_to(bt * num_devices, bts), t_packing, hidden_size // t_packing)
+    a2a_s_acc_x2_hbm,  # (2, align_to(bt * num_devices, bts), t_packing, hidden_size // t_packing)
+    a2a_g_hbm,  # (num_experts, bt, t_packing, hidden_size // t_packing)
+>>>>>>> main
     w1_shared_hbm,  # None | (hidden_size, se_intermediate_size)
     w3_shared_hbm,  # None | (hidden_size, se_intermediate_size)
     w2_shared_hbm,  # None | (se_intermediate_size, hidden_size)
@@ -491,9 +499,15 @@ def _fused_ep_moe_kernel(
     a2a_s_sends_x2_smem,  # <e_sem_id> (2,)
     ### Accumulation for gathered tokens:
     a2a_g_acc_vmem,  # (1, top_k, acc_bt, t_packing, hidden_size // t_packing)
+<<<<<<< HEAD
     top_k_logits_vmem,  # F32(bt, top_k)
     ### Expert weight double buffering:
     b_gating_x2_vmem,  # (2, bt, padded_num_experts)
+=======
+    ### Expert weight double buffering:
+    b_topk_weights_x2_vmem,  # <bt_sem_id> (2, bt, padded_top_k)
+    b_topk_ids_x2_vmem,  # <bt_sem_id> (2, bt, padded_top_k)
+>>>>>>> main
     b_output_x2_vmem,  # (2, bt, hidden_size)
     b_w1_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
     b_w3_x2_vmem,  # <bw_sem_id> (2, t_packing, bd1 // t_packing, bf)
@@ -507,7 +521,10 @@ def _fused_ep_moe_kernel(
     b_acc_vmem,  # F32(2, align_to(bt * num_devices, bts), 1, bf)
     b_stage_x2_vmem,  # <token_buf_id> (2, bts, t_packing, bd1 // t_packing)
     a2a_s_acc_stage_x3_vmem,  # <acc_buf_id> (3, bts, t_packing, bd2 // t_packing)
+<<<<<<< HEAD
     b_bias_vmem,  # None | F32(padded_num_experts,)
+=======
+>>>>>>> main
     b_se_tokens_vmem,  # None | (2, 2, bt, t_packing, bd1 // t_packing) [Input Buffer: bt ping-pong x bd1-slice ping-pong]
     b_se_w1_x2_vmem,  # <sew_sem_id> (2, t_packing, bd1 // t_packing, bf)
     b_se_w3_x2_vmem,  # <sew_sem_id> (2, t_packing, bd1 // t_packing, bf)
@@ -527,11 +544,14 @@ def _fused_ep_moe_kernel(
     barrier_sem,
     *,
     top_k: int,
+<<<<<<< HEAD
     use_grouped_topk: bool = False,
     num_groups: int = 1,
     top_k_groups: int = 1,
     renormalize_topk_logits: bool,
     routed_scaling_factor: float | None = None,
+=======
+>>>>>>> main
     dp_axis_name: str,
     tp_axis_name: str,
     act_fn: str,
@@ -628,6 +648,7 @@ def _fused_ep_moe_kernel(
             )
         pltpu.semaphore_wait(barrier_sem, num_devices)
 
+<<<<<<< HEAD
     def start_fetch_b_gating(*, bt_id, priority=0):
         bt_sem_id = bt_id & jnp.int32(1)
         b_gating_sem = local_sems.at[bt_sem_id, 0]
@@ -773,6 +794,41 @@ def _fused_ep_moe_kernel(
         expert_sizes = jnp.sum(t2e, axis=0, keepdims=True)
         expert_starts = jnp.zeros_like(expert_sizes)
         return t2e_routing, expert_sizes, expert_starts
+=======
+    def start_fetch_topk(*, bt_id, priority=0):
+        bt_sem_id = bt_id & jnp.int32(1)
+        bt_start = bt_id * bt
+        local_num_tokens = topk_weights_hbm.shape[0]
+        topk_bits = jnp.dtype(topk_weights_hbm.dtype).itemsize * 8
+        tile0 = math.gcd(256 // topk_bits, local_num_tokens)
+        bt_size = bt
+        bt_start = pl.multiple_of(bt_start, tile0)
+        pltpu.make_async_copy(
+            src_ref=topk_weights_hbm.at[pl.ds(bt_start, bt_size)],
+            dst_ref=b_topk_weights_x2_vmem.at[bt_sem_id, pl.ds(0, bt_size)],
+            sem=local_sems.at[bt_sem_id, 13],
+        ).start(priority=priority)
+
+        pltpu.make_async_copy(
+            src_ref=topk_ids_hbm.at[pl.ds(bt_start, bt_size)],
+            dst_ref=b_topk_ids_x2_vmem.at[bt_sem_id, pl.ds(0, bt_size)],
+            sem=local_sems.at[bt_sem_id, 13],
+        ).start(priority=priority)
+
+    def wait_fetch_topk(*, bt_id):
+        bt_sem_id = bt_id & jnp.int32(1)
+        pltpu.make_async_copy(
+            src_ref=b_topk_weights_x2_vmem.at[bt_sem_id],
+            dst_ref=b_topk_weights_x2_vmem.at[bt_sem_id],
+            sem=local_sems.at[bt_sem_id, 13],
+        ).wait()
+
+        pltpu.make_async_copy(
+            src_ref=b_topk_ids_x2_vmem.at[bt_sem_id],
+            dst_ref=b_topk_ids_x2_vmem.at[bt_sem_id],
+            sem=local_sems.at[bt_sem_id, 13],
+        ).wait()
+>>>>>>> main
 
     def all_reduce_metadata(*, bt_sem_id, t2e_routing, starts, sizes):
         send_sem = send_x2_sems.at[0]
@@ -1101,6 +1157,7 @@ def _fused_ep_moe_kernel(
             w2_shared_scale_copy.start()
             w2_shared_scale_copy.wait()
 
+<<<<<<< HEAD
     def start_fetch_and_wait_bias():
         if bias_hbm is not None:
             bias_copy = pltpu.make_async_copy(
@@ -1111,6 +1168,8 @@ def _fused_ep_moe_kernel(
             bias_copy.start()
             bias_copy.wait()
 
+=======
+>>>>>>> main
     def start_fetch_bw1(local_e_id, bw1_sem_id, bf_id, bd1_id):
         for p in range(t_packing):
             offset = p * h_per_t_packing + bd1_id * bd1_per_t_packing
@@ -2120,10 +2179,16 @@ def _fused_ep_moe_kernel(
 
         def acc_gather_to_output(*, tile_start, out_offset, buf_id):
             output_tile = jnp.zeros((acc_bt, t_packing, h_per_t_packing), dtype=jnp.float32)
+<<<<<<< HEAD
             logits_tile = top_k_logits_vmem.at[
                 pl.ds(tile_start, acc_bt),
                 pl.ds(0, top_k),
             ][...]
+=======
+            logits_tile = b_topk_weights_x2_vmem[
+                bt_sem_id, pl.ds(tile_start, acc_bt), pl.ds(0, top_k)
+            ]
+>>>>>>> main
             for k_id in range(top_k):
                 acc_tile = a2a_g_acc_vmem[buf_id, k_id, :acc_bt].astype(jnp.float32)
                 logits = logits_tile[:, k_id].reshape(acc_bt, 1, 1)
@@ -2195,7 +2260,10 @@ def _fused_ep_moe_kernel(
 
     ### ------- Kernel start ------- ###
     sync_barrier()
+<<<<<<< HEAD
     start_fetch_and_wait_bias()
+=======
+>>>>>>> main
     start_fetch_and_wait_se_scales()
 
     def run_shared_expert_slice(block_id, bt_id, bt_sem_id, out_buf_id):
@@ -2334,7 +2402,11 @@ def _fused_ep_moe_kernel(
             lax.fori_loop(0, num_bd2, body_w2, None)
 
     if num_bt >= 1:
+<<<<<<< HEAD
         start_fetch_b_gating(bt_id=jnp.int32(0))
+=======
+        start_fetch_topk(bt_id=jnp.int32(0))
+>>>>>>> main
         start_fetch_se_tokens(bt_id=jnp.int32(0))
 
     def run_bt(bt_id, e_sem_id):
@@ -2345,6 +2417,7 @@ def _fused_ep_moe_kernel(
 
         @pl.when(next_bt_id < num_bt)
         def _():
+<<<<<<< HEAD
             start_fetch_b_gating(bt_id=next_bt_id)
             start_fetch_se_tokens(next_bt_id)
 
@@ -2357,6 +2430,22 @@ def _fused_ep_moe_kernel(
             renormalize_topk_logits,
             out_top_k_logits_vmem=top_k_logits_vmem,
         )
+=======
+            start_fetch_topk(bt_id=next_bt_id)
+            start_fetch_se_tokens(next_bt_id)
+
+        wait_fetch_topk(bt_id=bt_id)
+
+        # Prepare t2e_routing
+        t2e_routing = b_topk_ids_x2_vmem[bt_sem_id]
+
+        expert_iota = jax.lax.broadcasted_iota(jnp.int32, (1, 1, padded_num_experts), 2)
+        routing_expanded = jnp.expand_dims(t2e_routing[:, :top_k], axis=2)
+        mask = (routing_expanded == expert_iota).astype(jnp.int32)
+        expert_sizes = jnp.sum(mask, axis=(0, 1), keepdims=True).reshape(1, padded_num_experts)
+
+        expert_starts = jnp.zeros_like(expert_sizes)
+>>>>>>> main
 
         all_reduce_metadata(
             bt_sem_id=bt_sem_id,
@@ -2482,6 +2571,7 @@ def _validate_fused_ep_moe_args(
     w1: jax.Array,
     w2: jax.Array,
     w3: jax.Array,
+<<<<<<< HEAD
     gating_output: jax.Array,
     token_valid_mask: jax.Array | None,
     top_k: int,
@@ -2489,6 +2579,11 @@ def _validate_fused_ep_moe_args(
     num_groups: int,
     top_k_groups: int,
     bias: jax.Array | None,
+=======
+    topk_weights: jax.Array,
+    topk_ids: jax.Array,
+    top_k: int,
+>>>>>>> main
     subc_quant_wsz: int | None,
     w1_scale: jax.Array | None,
     w2_scale: jax.Array | None,
@@ -2528,11 +2623,19 @@ def _validate_fused_ep_moe_args(
             f"Expected {w3.shape=} to be {(num_experts, hidden_size, intermediate_size)}."
         )
 
+<<<<<<< HEAD
     if gating_output.shape != (num_tokens, num_experts):
         raise ValueError(f"Expected {gating_output.shape=} to be {(num_tokens, num_experts)}.")
 
     if token_valid_mask is not None and token_valid_mask.shape != (num_tokens,):
         raise ValueError(f"Expected {token_valid_mask.shape=} to be {(num_tokens,)}.")
+=======
+    if topk_weights.shape != (num_tokens, top_k):
+        raise ValueError(f"Expected {topk_weights.shape=} to be {(num_tokens, top_k)}.")
+
+    if topk_ids.shape != (num_tokens, top_k):
+        raise ValueError(f"Expected {topk_ids.shape=} to be {(num_tokens, top_k)}.")
+>>>>>>> main
 
     validate_fused_moe_block_config(
         num_tokens=num_tokens,
@@ -2546,6 +2649,7 @@ def _validate_fused_ep_moe_args(
         block_config=block_config,
     )
 
+<<<<<<< HEAD
     # Mosaic DMA tiling constraint for `start_fetch_b_gating`: the slice shape along the
     # token dimension must be aligned to the underlying HBM tiling of router logits.
     local_num_tokens = num_tokens // ep_size
@@ -2556,6 +2660,18 @@ def _validate_fused_ep_moe_args(
             "Unsupported block_config.bt for router_logits tiling: "
             f"bt={block_config.bt} must be divisible by router_tile0={router_tile0} "
             f"(router_logits dtype={jnp.dtype(gating_output.dtype).name}, local_num_tokens={local_num_tokens})."
+=======
+    # Mosaic DMA tiling constraint for `start_fetch_topk`: the slice shape along the
+    # token dimension must be aligned to the underlying HBM tiling of topk weights/ids.
+    local_num_tokens = num_tokens // ep_size
+    topk_bits = jnp.dtype(topk_weights.dtype).itemsize * 8
+    topk_tile0 = math.gcd(256 // topk_bits, local_num_tokens)
+    if block_config.bt % topk_tile0 != 0:
+        raise ValueError(
+            "Unsupported block_config.bt for topk tiling: "
+            f"bt={block_config.bt} must be divisible by topk_tile0={topk_tile0} "
+            f"(local_num_tokens={local_num_tokens})."
+>>>>>>> main
         )
 
     # Note: block_config.bt is the outer expert-side token tile (routing/comm + output tiling);
@@ -2624,6 +2740,7 @@ def _validate_fused_ep_moe_args(
         if b3.dtype != jnp.float32:
             b3 = b3.astype(jnp.float32)
 
+<<<<<<< HEAD
     if bias is not None and bias.ndim != 1:
         raise ValueError(f"bias must be 1D, got {bias.shape}")
 
@@ -2642,6 +2759,8 @@ def _validate_fused_ep_moe_args(
                 f"num_experts ({num_experts}) must be divisible by num_groups ({num_groups})"
             )
 
+=======
+>>>>>>> main
     if w1_shared is not None:
         if w3_shared is None or w2_shared is None:
             raise ValueError("w1_shared, w3_shared, and w2_shared must be provided together.")
@@ -2726,6 +2845,7 @@ def fused_ep_moe(
     w1: jax.Array,  # (num_experts, hidden_size, intermediate_size)
     w2: jax.Array,  # (num_experts, intermediate_size, hidden_size)
     w3: jax.Array,  # (num_experts, hidden_size, intermediate_size)
+<<<<<<< HEAD
     gating_output: jax.Array,  # (num_tokens, num_experts)
     top_k: int,
     *,
@@ -2734,6 +2854,15 @@ def fused_ep_moe(
     num_groups: int = 1,
     top_k_groups: int = 1,
     bias: jax.Array | None = None,
+=======
+    topk_weights: jax.Array,  # (num_tokens, top_k)
+    topk_ids: jax.Array,  # (num_tokens, top_k)
+    top_k: int,
+    *,
+    use_grouped_topk: bool = False,
+    num_groups: int = 1,
+    top_k_groups: int = 1,
+>>>>>>> main
     renormalize_topk_logits: bool = False,
     routed_scaling_factor: float | None = None,
     act_fn: str = "silu",
@@ -2792,6 +2921,7 @@ def fused_ep_moe(
         w1=w1,
         w2=w2,
         w3=w3,
+<<<<<<< HEAD
         gating_output=gating_output,
         token_valid_mask=token_valid_mask,
         top_k=top_k,
@@ -2799,6 +2929,11 @@ def fused_ep_moe(
         num_groups=num_groups,
         top_k_groups=top_k_groups,
         bias=bias,
+=======
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        top_k=top_k,
+>>>>>>> main
         subc_quant_wsz=subc_quant_wsz,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
@@ -2830,7 +2965,10 @@ def fused_ep_moe(
     padded_num_experts = align_to(num_experts, 128)
     padded_top_k = align_to(top_k, 128)
     t_dtype = tokens.dtype
+<<<<<<< HEAD
     gating_dtype = gating_output.dtype
+=======
+>>>>>>> main
     t_packing = get_dtype_packing(t_dtype)
     hidden_per_pack = hidden_size // t_packing
     # With run_bt tiling in the pallas kernel, a2a scratch only needs to cover one bt tile.
@@ -2863,6 +3001,7 @@ def fused_ep_moe(
     if w3_shared_scale is not None and w3_shared_scale.dtype != jnp.float32:
         w3_shared_scale = w3_shared_scale.astype(jnp.float32)
 
+<<<<<<< HEAD
     # Prepare inputs for the kernel.
     if padded_num_experts != gating_output.shape[-1]:
         gating_output = jnp.pad(
@@ -2884,6 +3023,8 @@ def fused_ep_moe(
         # lengths), and lets the kernel derive validity from `-inf` logits.
         gating_output = jnp.where(token_valid_mask[:, None] != 0, gating_output, -jnp.inf)
 
+=======
+>>>>>>> main
     tokens = tokens.reshape(-1, t_packing, hidden_size // t_packing)
 
     hbm_block_spec = pl.BlockSpec(memory_space=pltpu.MemorySpace.HBM)
@@ -2922,6 +3063,17 @@ def fused_ep_moe(
             jnp.float32,
         )
 
+<<<<<<< HEAD
+=======
+    if padded_top_k > top_k:
+        topk_ids = jnp.pad(
+            topk_ids, ((0, 0), (0, padded_top_k - top_k)), mode="constant", constant_values=-1
+        )
+        topk_weights = jnp.pad(
+            topk_weights, ((0, 0), (0, padded_top_k - top_k)), mode="constant", constant_values=0
+        )
+
+>>>>>>> main
     b1_scratch = None if b1 is None else pltpu.VMEM((2, 1, block_config.bf), jnp.float32)
     b3_scratch = None if b3 is None else pltpu.VMEM((2, 1, block_config.bf), jnp.float32)
     b2_scratch = None if b2 is None else pltpu.VMEM((2, t_packing, 1, bd2_per_pack), jnp.float32)
@@ -2937,9 +3089,15 @@ def fused_ep_moe(
             (2, top_k, math.gcd(bt, 16), t_packing, hidden_per_pack),
             t_dtype,
         ),  # a2a_g_acc_vmem
+<<<<<<< HEAD
         pltpu.VMEM((bt, top_k), jnp.float32),  # top_k_logits_vmem
         # Expert compute scratch.
         pltpu.VMEM((2, bt, padded_num_experts), gating_dtype),  # b_gating_x2_vmem
+=======
+        # Expert compute scratch.
+        pltpu.VMEM((2, bt, padded_top_k), jnp.float32),  # b_topk_weights_x2_vmem
+        pltpu.VMEM((2, bt, padded_top_k), jnp.int32),  # b_topk_ids_x2_vmem
+>>>>>>> main
         pltpu.VMEM((2, bt, hidden_size), t_dtype),  # b_output_x2_vmem
         pltpu.VMEM((2, t_packing, bd1_per_pack, block_config.bf), w1.dtype),  # b_w1_x2_vmem
         pltpu.VMEM((2, t_packing, bd1_per_pack, block_config.bf), w3.dtype),  # b_w3_x2_vmem
@@ -2956,7 +3114,10 @@ def fused_ep_moe(
             (3, block_config.bts, t_packing, bd2_per_pack),
             t_dtype,
         ),  # a2a_s_acc_stage_x3_vmem
+<<<<<<< HEAD
         (None if bias is None else pltpu.VMEM((padded_num_experts,), jnp.float32)),  # b_bias_vmem
+=======
+>>>>>>> main
         (
             None if w1_shared is None else pltpu.VMEM((2, 2, bt, t_packing, bd1_per_pack), t_dtype)
         ),  # b_se_tokens_vmem
@@ -3009,11 +3170,14 @@ def fused_ep_moe(
             functools.partial(
                 _fused_ep_moe_kernel,
                 top_k=top_k,
+<<<<<<< HEAD
                 use_grouped_topk=use_grouped_topk,
                 num_groups=num_groups,
                 top_k_groups=top_k_groups,
                 renormalize_topk_logits=renormalize_topk_logits,
                 routed_scaling_factor=routed_scaling_factor,
+=======
+>>>>>>> main
                 dp_axis_name=dp_axis_name,
                 tp_axis_name=tp_axis_name,
                 act_fn=act_fn,
@@ -3043,11 +3207,19 @@ def fused_ep_moe(
                     None if b1 is None else hbm_block_spec,  # b1_hbm
                     None if b2 is None else hbm_block_spec,  # b2_hbm
                     None if b3 is None else hbm_block_spec,  # b3_hbm
+<<<<<<< HEAD
                     hbm_block_spec,  # gating_output_hbm
                     hbm_block_spec,  # a2a_s_x2_hbm
                     hbm_block_spec,  # a2a_s_acc_x2_hbm
                     hbm_block_spec,  # a2a_g_hbm
                     None if bias is None else hbm_block_spec,  # bias_hbm
+=======
+                    hbm_block_spec,  # topk_weights_hbm
+                    hbm_block_spec,  # topk_ids_hbm
+                    hbm_block_spec,  # a2a_s_x2_hbm
+                    hbm_block_spec,  # a2a_s_acc_x2_hbm
+                    hbm_block_spec,  # a2a_g_hbm
+>>>>>>> main
                     None if w1_shared is None else hbm_block_spec,  # w1_shared_hbm
                     None if w3_shared is None else hbm_block_spec,  # w3_shared_hbm
                     None if w2_shared is None else hbm_block_spec,  # w2_shared_hbm
@@ -3128,11 +3300,21 @@ def fused_ep_moe(
             ),  # b3_hbm
             P(
                 (dp_axis_name, tp_axis_name),
+<<<<<<< HEAD
             ),  # gating_output_hbm
             P(),  # a2a_s_x2_hbm
             P(),  # a2a_s_acc_x2_hbm
             P(),  # a2a_g_hbm
             None if bias is None else P(),
+=======
+            ),  # topk_weights_hbm
+            P(
+                (dp_axis_name, tp_axis_name),
+            ),  # topk_ids_hbm
+            P(),  # a2a_s_x2_hbm
+            P(),  # a2a_s_acc_x2_hbm
+            P(),  # a2a_g_hbm
+>>>>>>> main
             None if w1_shared is None else P(),  # w1_shared
             None if w3_shared is None else P(),  # w3_shared
             None if w2_shared is None else P(),  # w2_shared
@@ -3154,11 +3336,19 @@ def fused_ep_moe(
         b1,
         b2,
         b3,
+<<<<<<< HEAD
         gating_output,
         a2a_s_x2_hbm_scratch,
         a2a_s_acc_x2_hbm_scratch,
         a2a_g_hbm_scratch,
         bias,
+=======
+        topk_weights,
+        topk_ids,
+        a2a_s_x2_hbm_scratch,
+        a2a_s_acc_x2_hbm_scratch,
+        a2a_g_hbm_scratch,
+>>>>>>> main
         w1_shared=None,
         w3_shared=None,
         w2_shared=None,
@@ -3189,13 +3379,21 @@ def fused_ep_moe(
             (None if b1 is None else pltpu.with_memory_space_constraint(b1, pltpu.HBM)),  # b1_hbm
             (None if b2 is None else pltpu.with_memory_space_constraint(b2, pltpu.HBM)),  # b2_hbm
             (None if b3 is None else pltpu.with_memory_space_constraint(b3, pltpu.HBM)),  # b3_hbm
+<<<<<<< HEAD
             pltpu.with_memory_space_constraint(gating_output, pltpu.HBM),  # gating_output_hbm
+=======
+            pltpu.with_memory_space_constraint(topk_weights, pltpu.HBM),  # topk_weights_hbm
+            pltpu.with_memory_space_constraint(topk_ids, pltpu.HBM),  # topk_ids_hbm
+>>>>>>> main
             pltpu.with_memory_space_constraint(a2a_s_x2_hbm_scratch, pltpu.HBM),  # a2a_s_x2_hbm
             pltpu.with_memory_space_constraint(
                 a2a_s_acc_x2_hbm_scratch, pltpu.HBM
             ),  # a2a_s_acc_x2_hbm
             pltpu.with_memory_space_constraint(a2a_g_hbm_scratch, pltpu.HBM),  # a2a_g_hbm
+<<<<<<< HEAD
             (None if bias is None else pltpu.with_memory_space_constraint(bias, pltpu.HBM)),
+=======
+>>>>>>> main
             (
                 None
                 if w1_shared is None
@@ -3248,11 +3446,19 @@ def fused_ep_moe(
         b1,
         b2,
         b3,
+<<<<<<< HEAD
         gating_output,
         a2a_s_x2_hbm_scratch,
         a2a_s_acc_x2_hbm_scratch,
         a2a_g_hbm_scratch,
         bias,
+=======
+        topk_weights,
+        topk_ids,
+        a2a_s_x2_hbm_scratch,
+        a2a_s_acc_x2_hbm_scratch,
+        a2a_g_hbm_scratch,
+>>>>>>> main
         w1_shared,
         w3_shared,
         w2_shared,

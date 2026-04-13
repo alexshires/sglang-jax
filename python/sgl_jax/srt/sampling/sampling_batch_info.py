@@ -191,11 +191,16 @@ class SamplingMetadata:
                 target_shape, linear_penalty_sharding
             )
 
+<<<<<<< HEAD
         # Output-only logprob requests still need sampler-side logprob extraction
         # for next-token top-k/token-id logprob fields.
         need_sampling_logprob = batch.return_logprob or batch.return_output_logprob_only
         return cls(
             return_logprob=need_sampling_logprob,
+=======
+        return cls(
+            return_logprob=batch.return_logprob,
+>>>>>>> main
             top_logprobs_nums=batch.top_logprobs_nums,
             token_ids_logprobs=batch.token_ids_logprobs,
             temperatures=temperatures_device,
@@ -221,9 +226,16 @@ def _get_or_create_zero_penalty_device(
     """
 
     key_shape = (int(shape[0]), int(shape[1]))
+<<<<<<< HEAD
 
     with _zero_linear_penalty_lock:
         cached = _zero_linear_penalty_cache.get(key_shape)
+=======
+    cache_key = (int(shape[0]), int(shape[1]), sharding if sharding is not None else "None")
+
+    with _zero_linear_penalty_lock:
+        cached = _zero_linear_penalty_cache.get(cache_key)
+>>>>>>> main
     if cached is not None:
         return cached
 
@@ -233,9 +245,15 @@ def _get_or_create_zero_penalty_device(
     )
 
     with _zero_linear_penalty_lock:
+<<<<<<< HEAD
         existing = _zero_linear_penalty_cache.get(key_shape)
         if existing is None:
             _zero_linear_penalty_cache[key_shape] = zero_penalty
+=======
+        existing = _zero_linear_penalty_cache.get(cache_key)
+        if existing is None:
+            _zero_linear_penalty_cache[cache_key] = zero_penalty
+>>>>>>> main
             return zero_penalty
         return existing
 

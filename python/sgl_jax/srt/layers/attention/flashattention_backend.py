@@ -14,10 +14,14 @@ from sgl_jax.srt.kernels.ragged_paged_attention.ragged_paged_attention import (
 )
 from sgl_jax.srt.layers.attention.base_attn_backend import AttentionBackend
 from sgl_jax.srt.layers.radix_attention import RadixAttention
+<<<<<<< HEAD
 from sgl_jax.srt.managers.schedule_batch import (
     ModelWorkerBatch,
     global_server_args_dict,
 )
+=======
+from sgl_jax.srt.managers.schedule_batch import ModelWorkerBatch
+>>>>>>> main
 from sgl_jax.srt.mem_cache.memory_pool import KVCache
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sgl_jax.srt.speculative.eagle_util import EagleDraftInput
@@ -100,6 +104,7 @@ class FlashAttention(AttentionBackend):
         self.forward_metadata = nnx.data(FlashAttentionMetadata())
         self.mesh = mesh
 
+<<<<<<< HEAD
     @staticmethod
     def _build_causal_extend_mask(q_len: int, kv_len: int) -> np.ndarray:
         """Build causal mask for extend requests where q corresponds to suffix tokens."""
@@ -244,6 +249,8 @@ class FlashAttention(AttentionBackend):
 
         return prefix_end, row_seg_starts
 
+=======
+>>>>>>> main
     def get_forward_metadata(
         self,
         batch: ModelWorkerBatch,
@@ -298,7 +305,10 @@ class FlashAttention(AttentionBackend):
         else:
             raise ValueError(f"Invalid forward mode: {batch.forward_mode}")
 
+<<<<<<< HEAD
         sharding = NamedSharding(self.mesh, P()) if jax.process_count() == 1 else None
+=======
+>>>>>>> main
         (
             metadata.num_seqs,
             metadata.cu_q_lens,
@@ -308,10 +318,15 @@ class FlashAttention(AttentionBackend):
             metadata.distribution,
         ) = device_array(
             (num_seqs, cu_q_lens, cu_kv_lens, page_indices, seq_lens, distribution),
+<<<<<<< HEAD
             sharding=sharding,
         )
 
         metadata.custom_mask = None
+=======
+            sharding=(NamedSharding(self.mesh, P()) if jax.process_count() == 1 else None),
+        )
+>>>>>>> main
         return metadata
 
     def get_eagle_forward_metadata(self, batch: ModelWorkerBatch):
@@ -605,10 +620,15 @@ class FlashAttention(AttentionBackend):
         kv_cache_fused_paged = kv_cache_fused.reshape(
             num_pages, self.page_size, -1, (self.head_dim + 127) // 128 * 128
         )
+<<<<<<< HEAD
 
         if self.forward_metadata.custom_mask is not None:
             causal = 0
 
+=======
+        if self.forward_metadata.custom_mask is not None:
+            causal = 0
+>>>>>>> main
         # Select page indices and remap to SWA pool if KV cache supports it
         page_indices_arg = self.forward_metadata.page_indices
         if hasattr(token_to_kv_pool, "remap_cache_loc") and self.page_size == 1:

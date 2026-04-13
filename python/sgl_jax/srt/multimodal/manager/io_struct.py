@@ -51,15 +51,70 @@ class VideoResponse(BaseModel):
     path: str | None = None
 
 
+<<<<<<< HEAD
 class DataType(Enum):
     IMAGE = auto()
     VIDEO = auto()
+=======
+class AudioSpeechRequest(BaseModel):
+    """OpenAI /v1/audio/speech request."""
+
+    input: str
+    model: str
+    voice: str
+    response_format: str = "mp3"
+    speed: float = 1.0
+    instructions: str | None = None
+    stream_format: str | None = None
+
+
+class AudioTranscriptionRequest(BaseModel):
+    file: bytes | None = None
+    url: str | None = None
+    model: str
+    language: str | None = None
+    prompt: str | None = None
+    response_format: str = "json"
+    temperature: float | None = None
+    timestamp_granularities: list[str] | None = None
+    chunking_strategy: dict | None = None
+    known_speaker_names: list[str] | None = None
+    known_speaker_references: list[str] | None = None
+    include: list[str] | None = None
+    stream: bool = False
+
+
+class AudioTranscriptionResponse(BaseModel):
+    """OpenAI transcription response (json format)."""
+
+    text: str
+    task: str | None = None
+    language: str | None = None
+    duration: float | None = None
+    segments: list[dict] | None = None
+    words: list[dict] | None = None
+
+    usage: dict | None = None
+
+
+class DataType(Enum):
+    IMAGE = auto()
+    VIDEO = auto()
+    AUDIO = auto()
+>>>>>>> main
 
     def get_default_extension(self) -> str:
         if self == DataType.IMAGE:
             return "jpg"
+<<<<<<< HEAD
         else:
             return "mp4"
+=======
+        elif self == DataType.VIDEO:
+            return "mp4"
+        else:
+            return "wav"
+>>>>>>> main
 
 
 @dataclasses.dataclass
@@ -91,14 +146,23 @@ class GenerateMMReqInput:
 
 
 @dataclasses.dataclass
+<<<<<<< HEAD
 class GenerateVLMReqInput:
     """Input request for VLM chat/completions."""
+=======
+class GenerateOmniReqInput:
+    """Input request for Omni/VLM chat/completions."""
+>>>>>>> main
 
     rid: str | None = None
     prompt: str | None = None
     input_ids: list[int] | None = None
     image_data: list[str] | str | None = None
     video_data: list[str] | str | None = None
+<<<<<<< HEAD
+=======
+    audio_data: list[str] | str | None = None
+>>>>>>> main
     stream: bool = False
     n: int | None = 1
     sampling_params: dict | None = None
@@ -120,7 +184,11 @@ class TokenizedGenerateMMReqInput:
     n: int | None = 1
     input_reference: str | None = None
     preprocessed_image: np.ndarray | None = None
+<<<<<<< HEAD
     mm_inputs: "VLMMInputs | None" = None
+=======
+    mm_inputs: "OmniInputs | None" = None
+>>>>>>> main
     size: str = None
     seconds: int | None = None
     fps: int | None = None
@@ -133,11 +201,19 @@ class TokenizedGenerateMMReqInput:
 
 
 @dataclasses.dataclass
+<<<<<<< HEAD
 class TokenizedGenerateVLMReqInput:
     rid: str | None = None
     prompt: str | None = None
     input_ids: list[int] | None = None
     mm_inputs: "VLMMInputs | None" = None
+=======
+class TokenizedGenerateOmniReqInput:
+    rid: str | None = None
+    prompt: str | None = None
+    input_ids: list[int] | None = None
+    mm_inputs: "OmniInputs | None" = None
+>>>>>>> main
     stream: bool = False
     n: int | None = 1
     sampling_params: dict | None = None
@@ -145,7 +221,30 @@ class TokenizedGenerateVLMReqInput:
 
 
 @dataclasses.dataclass
+<<<<<<< HEAD
 class VLMMInputs:
+=======
+class TokenizedGenerateAudioReqInput:
+    rid: str | None = None
+    audio_mode: str | None = None
+    data_type: DataType | None = None
+    text: str | None = None
+    text_input_ids: list[int] | None = None
+    prompt: str | None = None
+    prompt_input_ids: list[int] | None = None
+    mel_input: np.ndarray | None = None
+    mel_input_lens: np.ndarray | None = None
+
+    # Audio configuration
+    sample_rate: int = 24000
+    n_q: int | None = None
+
+
+@dataclasses.dataclass
+class OmniInputs:
+    audio_features: np.ndarray | None = None
+    audio_feature_lengths: list[int] | None = None
+>>>>>>> main
     pixel_values: np.ndarray | None = None
     pixel_values_videos: np.ndarray | None = None
     image_grid_thw: list[tuple[int, int, int]] | None = None
@@ -157,3 +256,8 @@ class VLMMInputs:
     video_token_id: int | None = None
     pad_values: list[int] | None = None
     multimodal_embeddings: np.ndarray | None = None
+<<<<<<< HEAD
+=======
+    deepstack_visual_embedding: np.ndarray | None = None
+    deepstack_visual_pos_mask: np.ndarray | None = None
+>>>>>>> main

@@ -1,6 +1,7 @@
 """TokenizerManager is a process that tokenizes the text."""
 
 import asyncio
+import contextlib
 import copy
 import dataclasses
 import json
@@ -93,6 +94,7 @@ class ReqState:
 
     # For metrics
     created_time: float
+    event_loop: asyncio.AbstractEventLoop | None = None
     finished_time: float = 0.0
     first_token_time: float = 0.0
     last_time: float = 0.0
@@ -208,12 +210,15 @@ class TokenizerManager:
             self.send_to_scheduler, server_args.dp_size
         )
         self.flush_cache_communicator = _Communicator(self.send_to_scheduler, server_args.dp_size)
+<<<<<<< HEAD
         self.release_scoring_cache_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
         self.score_from_cache_v2_communicator = _CorrelatedCommunicator(
             self.send_to_scheduler, server_args.dp_size
         )
+=======
+>>>>>>> main
         self.profile_communicator = _Communicator(self.send_to_scheduler, server_args.dp_size)
         self.get_internal_state_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
@@ -225,6 +230,9 @@ class TokenizerManager:
         self.score_fastpath_succeeded = 0
         self.score_fastpath_fallback = 0
         self.score_fastpath_fallback_reasons: dict[str, int] = {}
+
+        # LoRA
+        self.lora_registry = LoRARegistry(self.server_args.lora_paths)
 
         # LoRA
         self.lora_registry = LoRARegistry(self.server_args.lora_paths)
@@ -391,6 +399,7 @@ class TokenizerManager:
         # Build return object
 
         tokenized_obj = TokenizedGenerateReqInput(
+<<<<<<< HEAD
             rid=obj.rid,
             text=input_text,
             input_ids=input_ids,
@@ -406,6 +415,21 @@ class TokenizerManager:
             return_routed_experts=obj.return_routed_experts,
             cache_for_scoring=bool(obj.cache_for_scoring),
             extend_from_cache=obj.extend_from_cache,
+=======
+            obj.rid,
+            input_text,
+            input_ids,
+            sampling_params,
+            obj.return_logprob,
+            obj.return_output_logprob_only,
+            obj.logprob_start_len,
+            obj.top_logprobs_num,
+            obj.token_ids_logprob,
+            obj.stream,
+            obj.lora_id,
+            obj.extra_key,
+            obj.return_routed_experts,
+>>>>>>> main
         )
         # note: When only `return_logprob` is specified, we assume that only the output probability is required.
         if (
@@ -468,12 +492,22 @@ class TokenizerManager:
     ):
         self._raise_if_scheduler_unavailable()
         self.send_to_scheduler.send_pyobj(tokenized_obj)
-        state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
+        # Capture the caller's event loop so that _notify_state_event can use
+        # call_soon_threadsafe when handle_loop runs on a different thread
+        # (e.g. enable_engine_loop_run_forever_daemon mode).
+        try:
+            caller_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            caller_loop = None
+        state = ReqState(
+            [], False, asyncio.Event(), obj, created_time=created_time, event_loop=caller_loop
+        )
         # Handle rid being a list (single element) or string
         rid_key = obj.rid[0] if isinstance(obj.rid, list) else obj.rid
         self.rid_to_state[rid_key] = state
         return state
 
+<<<<<<< HEAD
     def _send_batch_requests(
         self,
         objs: list[GenerateReqInput | EmbeddingReqInput],
@@ -569,6 +603,24 @@ class TokenizerManager:
             self.scheduler_unavailable_error
             or "Scheduler subprocess is unavailable. Please restart the server."
         )
+=======
+    def _notify_state_event(self, state: ReqState) -> None:
+        """Thread-safe wrapper around state.event.set().
+
+        If enable_engine_loop_run_forever_daemon was enabled, handle_loop would run on the daemon_loop thread, but the asyncio.Event's
+        internal Future belongs to the eval_loop (the loop that called
+        _send_one_request).  Calling fut.set_result() from the wrong thread
+        does not wake up eval_loop's selector.  call_soon_threadsafe writes to
+        the self-pipe so the selector returns from epoll_wait immediately.
+        """
+        loop = state.event_loop
+        if loop is not None:
+            with contextlib.suppress(RuntimeError):
+                # RuntimeError: loop is already closed (request timed-out / cancelled).
+                loop.call_soon_threadsafe(state.event.set)
+        else:
+            state.event.set()
+>>>>>>> main
 
     async def _wait_one_response(
         self,
@@ -593,11 +645,14 @@ class TokenizerManager:
                         raise ValueError(
                             f"Request is disconnected from the client side (type 1). Abort request rid={obj.rid}"
                         ) from e
+<<<<<<< HEAD
                 if not self._check_scheduler_health():
                     raise ValueError(
                         self.scheduler_unavailable_error
                         or "Scheduler subprocess is unavailable. Please restart the server."
                     ) from None
+=======
+>>>>>>> main
                 continue
 
             out = state.out_list[-1]
@@ -760,6 +815,12 @@ class TokenizerManager:
         num_steps: int | None = None,
         host_tracer_level: int | None = None,
         python_tracer_level: int | None = None,
+<<<<<<< HEAD
+=======
+        stage_id: int | None = None,
+        profile_by_stage: bool = False,
+        profile_stages: list[str] | None = None,
+>>>>>>> main
     ):
         self.auto_create_handle_loop()
         req = ProfileReq(
@@ -770,6 +831,9 @@ class TokenizerManager:
             host_tracer_level=host_tracer_level,
             python_tracer_level=python_tracer_level,
             profile_id=str(time.time()),
+            stage_id=stage_id,
+            profile_by_stage=profile_by_stage,
+            profile_stages=profile_stages,
         )
         return await self._execute_profile(req)
 
@@ -1130,6 +1194,7 @@ class TokenizerManager:
                         f"Cache miss occurred {recv_obj.cache_miss_count} times, please check if the precompile logic covers the current scenario"
                     )
                 meta_info["cache_miss_count"] = recv_obj.cache_miss_count
+<<<<<<< HEAD
             if getattr(recv_obj, "scheduler_queue_wait_s", None) is not None:
                 meta_info["scheduler_queue_wait_s"] = recv_obj.scheduler_queue_wait_s[i]
             if getattr(recv_obj, "scheduler_device_compute_s", None) is not None:
@@ -1138,6 +1203,8 @@ class TokenizerManager:
                 meta_info["scheduler_host_overhead_s"] = recv_obj.scheduler_host_overhead_s[i]
             if getattr(recv_obj, "scheduler_dispatch_count", None) is not None:
                 meta_info["scheduler_dispatch_count"] = recv_obj.scheduler_dispatch_count[i]
+=======
+>>>>>>> main
 
             if isinstance(recv_obj, BatchStrOut):
                 state.text += recv_obj.output_strs[i]
@@ -1182,7 +1249,7 @@ class TokenizerManager:
                 del self.rid_to_state[rid]
 
             state.out_list.append(out_dict)
-            state.event.set()
+            self._notify_state_event(state)
 
             # Log metrics and dump
             if self.dump_requests_folder and state.finished and state.obj.log_metrics:
@@ -1212,6 +1279,7 @@ class TokenizerManager:
                 state.output_token_logprobs_idx,
                 return_text_in_logprobs,
             )
+<<<<<<< HEAD
             if (
                 token_ids_logprob is not None
                 and recv_obj.output_token_ids_logprobs_val is not None
@@ -1228,6 +1296,8 @@ class TokenizerManager:
                     state.output_token_ids_logprobs_idx,
                     return_text_in_logprobs,
                 )
+=======
+>>>>>>> main
             return
         if recv_obj.input_token_logprobs_val is None:
             return
@@ -1514,6 +1584,7 @@ class TokenizerManager:
         scores = []
 
         for result in results:
+<<<<<<< HEAD
             output_logprobs = result["meta_info"].get("output_token_ids_logprobs", [])
             if not output_logprobs or len(output_logprobs) == 0:
                 raise RuntimeError(
@@ -1522,6 +1593,25 @@ class TokenizerManager:
                     "This indicates token_ids_logprobs were not computed properly."
                 )
             scores.append(_convert_logprobs(output_logprobs[0]))
+=======
+            # Get logprobs for each token
+            logprobs = {}
+            for logprob, token_id, _ in result["meta_info"].get("output_token_ids_logprobs", [])[0]:
+                if token_id in label_token_ids:
+                    logprobs[token_id] = logprob
+
+            # Get scores in order of label_token_ids
+            score_list = [logprobs.get(token_id, float("-inf")) for token_id in label_token_ids]
+
+            # Apply softmax to logprobs if needed
+            if apply_softmax:
+                score_list = jax.nn.softmax(jnp.asarray(score_list), axis=0).tolist()
+            else:
+                # Convert logprobs to probabilities if not using softmax
+                score_list = [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
+
+            scores.append(score_list)
+>>>>>>> main
 
         return scores
 
@@ -1991,6 +2081,7 @@ class SignalHandler:
         kill_process_tree(os.getpid())
 
 
+<<<<<<< HEAD
 @dataclasses.dataclass
 class _CorrelatedWaiter[T]:
     event: asyncio.Event
@@ -2052,15 +2143,23 @@ class _CorrelatedCommunicator[T]:
             waiter.event.set()
 
 
+=======
+>>>>>>> main
 class _Communicator[T]:
     """Note: The communicator now only run up to 1 in-flight request at any time."""
 
     def __init__(self, sender, fan_out: int):
         self._sender = sender
         self._fan_out = fan_out
+<<<<<<< HEAD
         self._lock = asyncio.Lock()
         self._result_event: asyncio.Event | None = None
         self._result_values: list[T] | None = None
+=======
+        self._result_event: asyncio.Event | None = None
+        self._result_values: list[T] | None = None
+        self._ready_queue: deque[asyncio.Future] = deque()
+>>>>>>> main
 
     async def __call__(self, obj, timeout: float | None = None):
         async with self._lock:

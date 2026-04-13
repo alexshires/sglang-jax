@@ -11,15 +11,31 @@ import psutil
 import setproctitle
 import zmq
 
+<<<<<<< HEAD
 from sgl_jax.srt.managers.io_struct import AbortReq, BatchStrOut, BatchTokenIDOut
+=======
+from sgl_jax.srt.managers.io_struct import (
+    AbortReq,
+    BatchStrOut,
+    BatchTokenIDOut,
+    ProfileReq,
+    ProfileReqOutput,
+)
+>>>>>>> main
 from sgl_jax.srt.multimodal.common.modality_enum import (
     MultimodalDataItem,
     pad_input_tokens,
 )
 from sgl_jax.srt.multimodal.manager.device_manager import DeviceManager
 from sgl_jax.srt.multimodal.manager.io_struct import (
+<<<<<<< HEAD
     TokenizedGenerateMMReqInput,
     TokenizedGenerateVLMReqInput,
+=======
+    TokenizedGenerateAudioReqInput,
+    TokenizedGenerateMMReqInput,
+    TokenizedGenerateOmniReqInput,
+>>>>>>> main
 )
 from sgl_jax.srt.multimodal.manager.schedule_batch import Req
 from sgl_jax.srt.multimodal.manager.stage import Stage
@@ -134,8 +150,15 @@ class GlobalScheduler:
         self._request_dispatcher = TypeBasedDispatcher(
             [
                 (TokenizedGenerateMMReqInput, self.convert_request),
+<<<<<<< HEAD
                 (TokenizedGenerateVLMReqInput, self.convert_vlm_request),
                 (AbortReq, self.handle_abort_request),
+=======
+                (TokenizedGenerateOmniReqInput, self.convert_omni_request),
+                (TokenizedGenerateAudioReqInput, self.convert_audio_request),
+                (AbortReq, self.handle_abort_request),
+                (ProfileReq, self.handle_profile),
+>>>>>>> main
             ]
         )
 
@@ -197,6 +220,28 @@ class GlobalScheduler:
 
         return None
 
+<<<<<<< HEAD
+=======
+    def handle_profile(self, recv_req: ProfileReq):
+        """Route ProfileReq to the target stage's scheduler via its in_queue."""
+        stage_id = recv_req.stage_id
+        if stage_id is None:
+            # Default to the final output stage (typically the LLM stage).
+            stage_id = next(
+                (i for i, cfg in enumerate(self.stage_configs) if cfg.final_output),
+                len(self.stage_list) - 1,
+            )
+        if stage_id < 0 or stage_id >= len(self.stage_list):
+            result = ProfileReqOutput(
+                success=False,
+                message=f"Invalid stage_id={stage_id}, must be 0..{len(self.stage_list) - 1}",
+            )
+            self.send_to_detokenizer.send_pyobj(result)
+        else:
+            self.in_queues[stage_id].put_nowait(recv_req)
+        return None
+
+>>>>>>> main
     def convert_request(self, input: TokenizedGenerateMMReqInput):
         """Convert a tokenized input into internal `Req`.
 
@@ -211,8 +256,13 @@ class GlobalScheduler:
             input_ids=input.input_ids,
             negative_input_ids=input.negative_input_ids,
             num_outputs_per_prompt=input.n,
+<<<<<<< HEAD
             height=int(size_str.split("*")[0]),
             width=int(size_str.split("*")[1]),
+=======
+            width=int(size_str.split("*")[0]),
+            height=int(size_str.split("*")[1]),
+>>>>>>> main
             num_frames=input.num_frames,
             num_inference_steps=(
                 input.num_inference_steps if input.num_inference_steps is not None else 50
@@ -228,7 +278,34 @@ class GlobalScheduler:
         self.req_store[req.rid] = ReqTrackingState(req=req, current_stage=0)
         return req
 
+<<<<<<< HEAD
     def convert_vlm_request(self, input: TokenizedGenerateVLMReqInput):
+=======
+    def convert_audio_request(self, input: TokenizedGenerateAudioReqInput):
+        """Convert a tokenized audio input into internal Req.
+
+        Creates a Req object for audio tasks (TTS, ASR, audio understanding).
+        """
+        req = Req(
+            rid=input.rid,
+            audio_mode=input.audio_mode,
+            data_type=input.data_type,
+            text=input.text,
+            text_input_ids=input.text_input_ids,
+            prompt=input.prompt,
+            prompt_input_ids=input.prompt_input_ids,
+            mel_input=input.mel_input,
+            mel_input_lens=input.mel_input_lens,
+            sample_rate=input.sample_rate,
+            n_q=input.n_q,
+        )
+        if req.rid in self.req_store:
+            raise RuntimeError(f"{req.rid} is already in req_store")
+        self.req_store[req.rid] = ReqTrackingState(req=req, current_stage=0)
+        return req
+
+    def convert_omni_request(self, input: TokenizedGenerateOmniReqInput):
+>>>>>>> main
         """Convert a tokenized VLM input into internal Req."""
         req = Req(
             rid=input.rid,
@@ -238,11 +315,19 @@ class GlobalScheduler:
         )
         req.origin_input_text = input.prompt
         req.origin_input_ids = input.input_ids
+<<<<<<< HEAD
         req.vlm_inputs = input.mm_inputs
+=======
+        req.omni_inputs = input.mm_inputs
+>>>>>>> main
         if input.mm_inputs:
             mm_items = input.mm_inputs.get("mm_items", [])
             image_items = []
             video_items = []
+<<<<<<< HEAD
+=======
+            audio_items = []
+>>>>>>> main
             all_mm_items = []
             for item in mm_items:
                 if isinstance(item, MultimodalDataItem):
@@ -251,6 +336,11 @@ class GlobalScheduler:
                         image_items.append(item)
                     elif item.is_video():
                         video_items.append(item)
+<<<<<<< HEAD
+=======
+                    elif item.is_audio():
+                        audio_items.append(item)
+>>>>>>> main
                 elif isinstance(item, dict):
                     item_obj = MultimodalDataItem.from_dict(item)
                     all_mm_items.append(item_obj)
@@ -258,6 +348,7 @@ class GlobalScheduler:
                         image_items.append(item_obj)
                     elif item_obj.is_video():
                         video_items.append(item_obj)
+<<<<<<< HEAD
 
             pixel_values_list = []
             for item in image_items:
@@ -269,6 +360,35 @@ class GlobalScheduler:
 
             if pixel_values_list:
                 req.pixel_values = np.concatenate(pixel_values_list, axis=0)
+=======
+                    elif item_obj.is_audio():
+                        audio_items.append(item_obj)
+
+            pixel_values_list = []
+            pixel_values_images_list = []
+            pixel_values_videos_list = []
+            audio_values_list = []
+            for item in image_items:
+                if item.feature is not None:
+                    pixel_values_list.append(np.asarray(item.feature))
+                    pixel_values_images_list.append(np.asarray(item.feature))
+            for item in video_items:
+                if item.feature is not None:
+                    pixel_values_list.append(np.asarray(item.feature))
+                    pixel_values_videos_list.append(np.asarray(item.feature))
+            for item in audio_items:
+                if item.feature is not None:
+                    audio_values_list.append(np.asarray(item.feature))
+
+            if pixel_values_list:
+                req.pixel_values = np.concatenate(pixel_values_list, axis=0)
+            if pixel_values_images_list:
+                req.pixel_values_images = np.concatenate(pixel_values_images_list, axis=0)
+            if pixel_values_videos_list:
+                req.pixel_values_videos = np.concatenate(pixel_values_videos_list, axis=0)
+            if audio_values_list:
+                req.audio_features = np.concatenate(audio_values_list, axis=0)
+>>>>>>> main
 
             image_grid_thw = input.mm_inputs.get("image_grid_thw")
             if image_grid_thw is not None:
@@ -378,7 +498,18 @@ class GlobalScheduler:
                             self.in_queues[0].put_nowait(stage_req)
             else:
                 for i, stage in enumerate(self.stage_list):
+<<<<<<< HEAD
                     stage_result = Req.from_stage(stage.try_collect(), self.req_store)
+=======
+                    raw_result = stage.try_collect()
+                    if raw_result is None:
+                        continue
+                    # Forward ProfileReqOutput directly to detokenizer
+                    if isinstance(raw_result, ProfileReqOutput):
+                        self.send_to_detokenizer.send_pyobj(raw_result)
+                        continue
+                    stage_result = Req.from_stage(raw_result, self.req_store)
+>>>>>>> main
                     if stage_result is None:
                         continue
                     if isinstance(stage_result, BatchTokenIDOut):
@@ -407,7 +538,10 @@ class GlobalScheduler:
                         self.send_to_detokenizer.send_pyobj(stage_result)
                         del self.req_store[stage_result.rid]
                     else:
+<<<<<<< HEAD
                         # Update tracking state to next stage before dispatching
+=======
+>>>>>>> main
                         next_stage = i + 1
                         self.req_store[stage_result.rid].current_stage = next_stage
 

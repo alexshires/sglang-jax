@@ -31,6 +31,10 @@ class ModelWorkerClient:
         server_args: ServerArgs,
         mesh: jax.sharding.Mesh,
         model_class=None,
+<<<<<<< HEAD
+=======
+        precompile_params: dict | None = None,
+>>>>>>> main
     ):
         # Load the model
         self.worker = ModelWorker(server_args, mesh=mesh)

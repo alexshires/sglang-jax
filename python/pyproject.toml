@@ -12,7 +12,11 @@ license = { file = "LICENSE" }
 
 dependencies = [
     "fastapi~=0.116.1",
+<<<<<<< HEAD
     "flax~=0.12.0",
+=======
+    "flax==0.12.4",
+>>>>>>> main
     "huggingface-hub~=0.34.3",
     "jinja2~=3.1.6",
     "llguidance~=1.3.0",
@@ -42,9 +46,15 @@ dependencies = [
     "pybase64",
     "partial_json_parser",
     "pathwaysutils",
+<<<<<<< HEAD
     "pybase64",
     "omegaconf",
     "imageio[ffmpeg]",
+=======
+    "omegaconf",
+    "imageio[ffmpeg]",
+    "librosa",
+>>>>>>> main
 ]
 
 [project.optional-dependencies]
@@ -65,6 +75,14 @@ all = [
 multimodal = [
     "torch",
     "torchvision",
+<<<<<<< HEAD
+=======
+    "torchaudio",
+    "decord",
+    "msgpack==1.0.0",
+    "qwix",
+    "soundfile",
+>>>>>>> main
 ]
 
 [tool.setuptools.packages.find]
@@ -123,6 +141,11 @@ ignore = [
     "B905",
     # Loop control variable not used within loop body
     "B007",
+<<<<<<< HEAD
+=======
+    # Function call in argument defaults (FastAPI uses this pattern)
+    "B008",
+>>>>>>> main
 ]
 
 [tool.ruff.format]
@@ -165,5 +188,12 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.uv.sources]
+<<<<<<< HEAD
 torch = { index = "pytorch-cpu" }
 torchvision = { index = "pytorch-cpu" }
+=======
+tops = { git = "https://github.com/primatrix/pallas-kernel.git", rev = "41431b1c4c5e60f12c7f66e84b09a2585e3b9596" }  # release/v0.4
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
+>>>>>>> main

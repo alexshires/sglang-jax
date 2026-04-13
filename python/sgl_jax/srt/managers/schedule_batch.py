@@ -168,8 +168,14 @@ class Req:
         vocab_size: int | None = None,
         return_hidden_states: bool = False,
         return_routed_experts: bool = False,
+<<<<<<< HEAD
         cache_for_scoring: bool = False,
         extend_from_cache: str | None = None,
+=======
+        multimodal_embedding: list[list[float]] | None = None,
+        deepstack_visual_embedding: list[list[float]] | None = None,
+        deepstack_visual_pos_mask: list[int] | None = None,
+>>>>>>> main
     ):
         # Input and output info
         self.rid = rid
@@ -196,8 +202,11 @@ class Req:
         # Sampling info
         self.sampling_params = sampling_params
         self.return_hidden_states = return_hidden_states
+<<<<<<< HEAD
         self.cache_for_scoring = cache_for_scoring
         self.extend_from_cache = extend_from_cache
+=======
+>>>>>>> main
 
         # Extra key for cache namespace isolation (e.g., cache_salt, lora_id)
         if lora_id is not None:
@@ -249,12 +258,15 @@ class Req:
         self.swa_uuid_for_lock: int | None = None
         # The prefix length of the last prefix matching
         self.last_matched_prefix_len: int = 0
+<<<<<<< HEAD
         # Optional fast-path prefix context for extend-from-cache requests.
         # When populated, init_next_round_input can skip an expensive radix match.
         self.cached_prefix_indices: np.ndarray | None = None
         self.cached_last_node: Any = None
         self.cached_last_host_node: Any = None
         self.cached_host_hit_length: int = 0
+=======
+>>>>>>> main
 
         # Whether or not if it is chunked. It increments whenever
         # it is chunked, and decrement whenever chunked request is
@@ -357,6 +369,15 @@ class Req:
         # latest_bid is used to improve return_routed_expert performance
         self.latest_bid: int = None
 
+<<<<<<< HEAD
+=======
+        # For deepstack
+        self.multimodal_embedding = multimodal_embedding
+        self.apply_for_deepstack = False
+        self.deepstack_visual_pos_mask = deepstack_visual_pos_mask
+        self.deepstack_visual_embedding = deepstack_visual_embedding
+
+>>>>>>> main
     @property
     def seqlen(self):
         return len(self.origin_input_ids) + len(self.output_ids)
@@ -374,6 +395,7 @@ class Req:
     ):
         self.fill_ids = self.origin_input_ids + self.output_ids
         if tree_cache is not None:
+<<<<<<< HEAD
             if (
                 self.extend_from_cache
                 and self.cached_prefix_indices is not None
@@ -396,6 +418,16 @@ class Req:
                 ) = tree_cache.match_prefix(
                     key=RadixKey(self.adjust_max_prefix_ids(), self.extra_key),
                 )
+=======
+            (
+                self.prefix_indices,
+                self.last_node,
+                self.last_host_node,
+                self.host_hit_length,
+            ) = tree_cache.match_prefix(
+                key=RadixKey(self.adjust_max_prefix_ids(), self.extra_key),
+            )
+>>>>>>> main
             self.last_matched_prefix_len = len(self.prefix_indices)
         self.extend_input_len = len(self.fill_ids) - len(self.prefix_indices)
 
@@ -640,6 +672,15 @@ class ScheduleBatch:
     # Whether to return captured experts
     return_routed_experts: bool = False
 
+<<<<<<< HEAD
+=======
+    # Deepstack
+    apply_for_deepstack: bool = False
+    input_embedding: list[list[list[float]]] | None = None
+    deepstack_visual_embedding: list[list[list[float]]] | None = None
+    deepstack_visual_pos_mask: list[list[int]] | None = None
+
+>>>>>>> main
     @classmethod
     def init_new(
         cls,
@@ -659,7 +700,11 @@ class ScheduleBatch:
         is_hybrid = False
         if isinstance(token_to_kv_pool_allocator, SWATokenToKVPoolAllocator):
             assert tree_cache is None or isinstance(
+<<<<<<< HEAD
                 tree_cache, SWARadixCache | ChunkCache
+=======
+                tree_cache, (SWARadixCache, ChunkCache)
+>>>>>>> main
             ), "SWARadixCache or ChunkCache is required for SWATokenToKVPoolAllocator"
             is_hybrid = True
 
@@ -681,6 +726,10 @@ class ScheduleBatch:
             spec_algorithm=spec_algorithm,
             is_prefill_only=all(req.sampling_params.max_new_tokens == 0 for req in reqs),
             return_routed_experts=any(req.return_routed_experts for req in reqs),
+<<<<<<< HEAD
+=======
+            apply_for_deepstack=all(req.apply_for_deepstack for req in reqs),
+>>>>>>> main
         )
 
     def batch_size(self):
@@ -873,7 +922,18 @@ class ScheduleBatch:
         self.prefix_lens = prefix_lens
         self.extend_lens = extend_lens
         self.extend_input_logprob_token_ids = extend_input_logprob_token_ids
-
+        if self.apply_for_deepstack:
+            self.input_embedding = np.concat(
+                [r.multimodal_embedding for r in reqs if r.multimodal_embedding is not None], axis=0
+            )
+            ## the first dimession is layer
+            self.deepstack_visual_embedding = np.concat(
+                [r.deepstack_visual_embedding for r in reqs if r.apply_for_deepstack], axis=1
+            )
+            self.deepstack_visual_pos_mask = np.concat(
+                np.array([r.deepstack_visual_pos_mask for r in reqs if r.apply_for_deepstack]),
+                axis=0,
+            )
         # Write to req_to_token_pool
         pt = 0
         for i in range(bs):
@@ -1120,7 +1180,11 @@ class ScheduleBatch:
         self.output_ids = self.output_ids[keep_indices] if self.output_ids is not None else None
         self.return_logprob = any(req.return_logprob for req in self.reqs)
         self.return_output_logprob_only = any(req.return_output_logprob_only for req in self.reqs)
+<<<<<<< HEAD
         if self.return_logprob or self.return_output_logprob_only:
+=======
+        if self.return_logprob:
+>>>>>>> main
             self.top_logprobs_nums = [self.top_logprobs_nums[i] for i in keep_indices]
             self.token_ids_logprobs = [self.token_ids_logprobs[i] for i in keep_indices]
         else:
@@ -1139,6 +1203,13 @@ class ScheduleBatch:
             self.spec_info.filter_batch(
                 new_indices=keep_indices, has_been_filtered=has_been_filtered
             )
+<<<<<<< HEAD
+=======
+        if self.apply_for_deepstack:
+            self.input_embedding = self.input_embedding[keep_indices]
+            self.deepstack_visual_embedding = self.deepstack_visual_embedding[keep_indices]
+            self.deepstack_visual_pos_mask = self.deepstack_visual_pos_mask[keep_indices]
+>>>>>>> main
 
     def merge_batch(self, other: ScheduleBatch):
         # Penalizer orchestrator must be merged before Batch.reqs is merged. This is because
@@ -1176,6 +1247,18 @@ class ScheduleBatch:
         self.has_grammar |= other.has_grammar
         self.return_hidden_states |= other.return_hidden_states
 
+<<<<<<< HEAD
+=======
+        if self.apply_for_deepstack and other.apply_for_deepstack:
+            self.input_embedding.extend(other.input_embedding)
+            self.deepstack_visual_embedding.extend(other.deepstack_visual_embedding)
+            self.deepstack_visual_pos_mask.extend(other.deepstack_visual_pos_mask)
+        elif other.apply_for_deepstack:
+            self.input_embedding = other.input_embedding
+            self.deepstack_visual_embedding = other.deepstack_visual_embedding
+            self.deepstack_visual_pos_mask = other.deepstack_visual_pos_mask
+
+>>>>>>> main
         if self.spec_info:
             self.spec_info.merge_batch(other.spec_info)
 
@@ -1195,7 +1278,11 @@ class ScheduleBatch:
             extend_prefix_lens = np.array(self.prefix_lens, dtype=np.int32)
             bs_paddings = bs_paddings[-1:]
             cache_loc_paddings = cache_loc_paddings[-1:]
+<<<<<<< HEAD
             extend_logprob_start_lens = np.array(self.extend_logprob_start_lens, dtype=np.int32)
+=======
+            extend_logprob_start_lens = self.extend_logprob_start_lens
+>>>>>>> main
 
         bid = acc_global_bid()
 
@@ -1243,8 +1330,9 @@ class ScheduleBatch:
                 axis=0,
             )
 
-        # Calculate positions and extend_start_loc after padding
+        # Calculate positions after padding
         if self.forward_mode.is_extend():
+<<<<<<< HEAD
             # For prefill: create positions for each token in sequences.
             # Multi-item scoring requests use delimiter-reset positions to remove
             # length-coupled position drift across item blocks.
@@ -1262,6 +1350,16 @@ class ScheduleBatch:
                 np.concatenate(position_chunks)
                 if position_chunks
                 else np.array([], dtype=seq_lens_cpu.dtype)
+=======
+            # For prefill: create positions for each token in sequences
+            # Calculate total tokens without padding first
+            total_tokens_before_padding = sum([extend_len for extend_len in self.extend_lens])
+            positions_cpu = np.concatenate(
+                [
+                    np.arange(prefix_len, seq_len, dtype=seq_lens_cpu.dtype)
+                    for seq_len, prefix_len in zip(seq_lens_cpu, self.prefix_lens)
+                ]
+>>>>>>> main
             )
 
             # If input_ids was padded, pad positions too
@@ -1271,11 +1369,6 @@ class ScheduleBatch:
                     [positions_cpu, np.zeros(padding_size, dtype=positions_cpu.dtype)]
                 )
 
-            # Start location of each sequence in the flattened array
-            extend_start_loc = np.cumsum(
-                np.concatenate([np.array([0]), extend_seq_lens[:-1]]),
-                dtype=seq_lens_cpu.dtype,
-            )
         else:
             # For decode: each sequence contributes one token at the next position (seq_len)
             # Create positions for actual tokens (one per sequence at seq_len)
@@ -1285,6 +1378,7 @@ class ScheduleBatch:
             # Fill in the actual positions for the real tokens
             # positions = positions.at[: len(batch_positions)].set(batch_positions)
             positions_cpu[: len(batch_positions)] = batch_positions
+<<<<<<< HEAD
             # The padding tokens (if any) will have position 0, which is fine for padding
             # For decode, extend_start_loc is typically not used but we'll set it anyway
             extend_start_loc = np.arange(len(seq_lens_cpu), dtype=seq_lens_cpu.dtype)
@@ -1298,6 +1392,18 @@ class ScheduleBatch:
             extend_seq_lens,
         )
 
+=======
+
+        mrope_positions_cpu = _compute_mrope_positions_for_batch(
+            self.reqs,
+            self.forward_mode,
+            seq_lens_cpu,
+            len(input_ids_cpu),
+            extend_prefix_lens,
+            extend_seq_lens,
+        )
+
+>>>>>>> main
         bs_padding_size = 0
         bs_paddings.sort()
         select_bs_index = -1
@@ -1360,11 +1466,14 @@ class ScheduleBatch:
             invalid_seq_lens = np.array([0] * bs_padding_size, dtype=seq_lens_cpu.dtype)
             seq_lens_cpu = np.concat([seq_lens_cpu, invalid_seq_lens], axis=0)
             if self.forward_mode.is_extend():
+<<<<<<< HEAD
                 invalid_extend_start_loc = np.array(
                     [extend_start_loc[-1] + extend_seq_lens[-1]] * bs_padding_size,
                     dtype=extend_start_loc.dtype,
                 )
                 extend_start_loc = np.concat([extend_start_loc, invalid_extend_start_loc], axis=0)
+=======
+>>>>>>> main
                 invalid_extend_prefix_lens = np.array(
                     [0] * bs_padding_size, dtype=extend_prefix_lens.dtype
                 )
@@ -1381,12 +1490,15 @@ class ScheduleBatch:
                     [extend_logprob_start_lens, invalid_extend_logprob_start_lens], axis=0
                 )
 
+<<<<<<< HEAD
             else:
                 invalid_extend_start_loc = np.array(
                     [len(seq_lens_cpu)] * bs_padding_size, dtype=extend_start_loc.dtype
                 )
                 extend_start_loc = np.concat([extend_start_loc, invalid_extend_start_loc], axis=0)
 
+=======
+>>>>>>> main
         sampling_info = self.sampling_info
         if self.sampling_info:
             new_temperatures = np.concatenate(
@@ -1431,7 +1543,10 @@ class ScheduleBatch:
                     ]
                 )
             sampling_info = dataclasses.replace(sampling_info, **updates)
+<<<<<<< HEAD
 
+=======
+>>>>>>> main
         if precision_tracer.get_trace_active():
             self._generate_trace_info(real_bs, bid)
 
@@ -1443,13 +1558,32 @@ class ScheduleBatch:
         input_embedding = None
         if self.forward_mode == ForwardMode.EXTEND:
             input_embedding_list = []
+<<<<<<< HEAD
+=======
+            deepstack_visual_embedding_list = []
+            deepstack_visual_pos_mask_list = []
+>>>>>>> main
             for req, prefix_len, extend_len in zip(self.reqs, self.prefix_lens, self.extend_lens):
                 mm_embedding = req.mm_inputs.get("multimodal_embedding") if req.mm_inputs else None
                 if mm_embedding is not None:
                     mm_full = np.asarray(mm_embedding)
+<<<<<<< HEAD
                     start = int(prefix_len or 0)
                     end = start + int(extend_len or 0)
                     input_embedding_list.append(mm_full[start:end])
+=======
+                    start = int(prefix_len or 0)  # todo: when multi request, this maybe wrong.
+                    end = start + int(extend_len or 0)
+                    input_embedding_list.append(mm_full[start:end])
+                if req.apply_for_deepstack:
+                    start = int(prefix_len or 0)  # todo: when multi request, this maybe wrong.
+                    end = start + int(extend_len or 0)
+                    deepstack_visual_embedding_list.append(
+                        req.deepstack_visual_embedding[:, start:end, :]
+                    )
+                    deepstack_visual_pos_mask_list.append(req.deepstack_visual_pos_mask[start:end])
+
+>>>>>>> main
             if input_embedding_list:
                 input_embedding = np.concatenate(input_embedding_list, axis=0)
                 if len(input_embedding) < len(input_ids_cpu):
@@ -1459,6 +1593,50 @@ class ScheduleBatch:
                         dtype=input_embedding.dtype,
                     )
                     input_embedding = np.concatenate([input_embedding, pad], axis=0)
+<<<<<<< HEAD
+=======
+                if self.apply_for_deepstack:
+                    if not deepstack_visual_pos_mask_list:
+                        self.apply_for_deepstack = False
+                        self.deepstack_visual_embedding = None
+                        self.deepstack_visual_pos_mask = None
+                    else:
+                        mask = np.concatenate(deepstack_visual_pos_mask_list, axis=0)
+                        if not np.any(mask):
+                            self.apply_for_deepstack = False
+                            self.deepstack_visual_embedding = None
+                            self.deepstack_visual_pos_mask = None
+                        else:
+                            self.deepstack_visual_embedding_tmp = np.zeros(
+                                (
+                                    self.deepstack_visual_embedding.shape[0],
+                                    input_embedding.shape[0],
+                                    input_embedding.shape[1],
+                                )
+                            )
+                            if mask.size:
+                                indexes = np.where(mask)[0]
+                                if indexes.size:
+                                    expected = self.deepstack_visual_embedding.shape[1]
+                                    if indexes.size != expected:
+                                        logger.warning(
+                                            "Deepstack visual mask size mismatch: mask=%s, embedding=%s. "
+                                            "Skip assignment.",
+                                            indexes.size,
+                                            expected,
+                                        )
+                                    else:
+                                        for layer in range(
+                                            self.deepstack_visual_embedding.shape[0]
+                                        ):
+                                            self.deepstack_visual_embedding_tmp[layer][
+                                                indexes, :
+                                            ] = self.deepstack_visual_embedding[layer]
+                            self.deepstack_visual_embedding = self.deepstack_visual_embedding_tmp
+        else:
+            self.apply_for_deepstack = False
+            self.deepstack_visual_embedding = None
+>>>>>>> main
 
         return ModelWorkerBatch(
             bid=bid,
@@ -1472,11 +1650,17 @@ class ScheduleBatch:
             return_output_logprob_only=self.return_output_logprob_only,
             top_logprobs_nums=self.top_logprobs_nums,
             token_ids_logprobs=self.token_ids_logprobs,
+<<<<<<< HEAD
             is_prefill_only=self.is_prefill_only,
             sampling_info=sampling_info,
             positions=positions_cpu,
             mrope_positions=mrope_positions_cpu,
             extend_start_loc=extend_start_loc,
+=======
+            sampling_info=sampling_info,
+            positions=positions_cpu,
+            mrope_positions=mrope_positions_cpu,
+>>>>>>> main
             cache_loc=cache_loc_cpu,
             extend_prefix_lens=(
                 extend_prefix_lens if self.forward_mode == ForwardMode.EXTEND else None
@@ -1495,6 +1679,11 @@ class ScheduleBatch:
             ),
             launch_done=self.launch_done,
             input_embedding=input_embedding,
+<<<<<<< HEAD
+=======
+            apply_for_deepstack=self.apply_for_deepstack,
+            deepstack_visual_embedding=self.deepstack_visual_embedding,
+>>>>>>> main
         )
 
     def get_spec_model_worker_batch(
@@ -1532,11 +1721,16 @@ class ScheduleBatch:
         else:
             positions_cpu = None
 
+<<<<<<< HEAD
         # Calculate positions and extend_start_loc after padding
+=======
+        # Calculate positions after padding
+>>>>>>> main
         if self.forward_mode.is_extend():
             # For prefill: create positions for each token in sequences
             # Calculate total tokens without padding first
             if positions_cpu is None:
+<<<<<<< HEAD
                 position_chunks = [
                     _build_extend_positions_for_req(
                         req=req,
@@ -1556,6 +1750,21 @@ class ScheduleBatch:
                 np.concatenate([np.array([0]), extend_seq_lens[:-1]]),
                 dtype=seq_lens_cpu.dtype,
             )
+=======
+                lengths = seq_lens_cpu - self.prefix_lens
+                if len(lengths) > 0:
+                    repeats = lengths
+                    total_len = np.sum(repeats)
+                    # Generate range [0, 1, ... len-1] for each sequence
+                    block_starts = np.concatenate(([0], np.cumsum(repeats)[:-1]))
+                    shifts = np.repeat(block_starts, repeats)
+                    ranges = np.arange(total_len) - shifts
+                    # Add prefix_len to each range
+                    positions_cpu = np.repeat(self.prefix_lens, repeats) + ranges
+                    positions_cpu = positions_cpu.astype(seq_lens_cpu.dtype)
+                else:
+                    positions_cpu = np.array([], dtype=seq_lens_cpu.dtype)
+>>>>>>> main
         else:
             if positions_cpu is None:
                 # For decode: each sequence contributes one token at the next position (seq_len)
@@ -1566,9 +1775,12 @@ class ScheduleBatch:
                 # Fill in the actual positions for the real tokens
                 # positions = positions.at[: len(batch_positions)].set(batch_positions)
                 positions_cpu[: len(batch_positions)] = batch_positions
+<<<<<<< HEAD
                 # The padding tokens (if any) will have position 0, which is fine for padding
                 # For decode, extend_start_loc is typically not used but we'll set it anyway
             extend_start_loc = np.arange(len(seq_lens_cpu), dtype=seq_lens_cpu.dtype)
+=======
+>>>>>>> main
 
         mrope_positions_cpu = _compute_mrope_positions_for_batch(
             self.reqs,
@@ -1660,11 +1872,17 @@ class ScheduleBatch:
             return_output_logprob_only=self.return_output_logprob_only,
             top_logprobs_nums=self.top_logprobs_nums,
             token_ids_logprobs=self.token_ids_logprobs,
+<<<<<<< HEAD
             is_prefill_only=self.is_prefill_only,
             sampling_info=self.sampling_info,
             positions=positions_cpu,
             mrope_positions=mrope_positions_cpu,
             extend_start_loc=extend_start_loc,
+=======
+            sampling_info=self.sampling_info,
+            positions=positions_cpu,
+            mrope_positions=mrope_positions_cpu,
+>>>>>>> main
             cache_loc=cache_loc_flat,
             extend_prefix_lens=(extend_prefix_lens if self.forward_mode.is_extend() else None),
             extend_seq_lens=(extend_seq_lens if self.forward_mode.is_extend() else None),
@@ -1781,12 +1999,15 @@ def align_to_size(lst: list, size: int, value: int = 0) -> list:
     return lst[:] + [value] * (align_len - len(lst))
 
 
+<<<<<<< HEAD
 def _build_extend_positions_for_req(
     req: Req, seq_len: int, prefix_len: int, dtype: np.dtype
 ) -> np.ndarray:
     return np.arange(prefix_len, seq_len, dtype=dtype)
 
 
+=======
+>>>>>>> main
 def _extract_mm_value(mm_inputs: Any, key: str):
     if mm_inputs is None:
         return None
@@ -1798,7 +2019,11 @@ def _extract_mm_value(mm_inputs: Any, key: str):
 def _as_int_scalar(value: Any, default: int = 0) -> int:
     if value is None:
         return default
+<<<<<<< HEAD
     if isinstance(value, np.ndarray | jax.Array):
+=======
+    if isinstance(value, (np.ndarray, jax.Array)):
+>>>>>>> main
         arr = np.asarray(value)
         if arr.size == 0:
             return default
@@ -1904,8 +2129,12 @@ class ModelWorkerBatch:
     sampling_info: SamplingBatchInfo
     # Position information [total_tokens]
     positions: np.ndarray
+<<<<<<< HEAD
     # Start position for each sequence in extend mode [batch_size]
     extend_start_loc: np.ndarray
+=======
+
+>>>>>>> main
     # cache_loc
     cache_loc: np.ndarray
 
@@ -1914,7 +2143,10 @@ class ModelWorkerBatch:
     return_output_logprob_only: bool
     top_logprobs_nums: list[int] | None
     token_ids_logprobs: list[list[int]] | None
+<<<<<<< HEAD
     is_prefill_only: bool
+=======
+>>>>>>> main
 
     # For extend
     # extend_num_tokens: Optional[int]
@@ -1957,6 +2189,11 @@ class ModelWorkerBatch:
     tree_cache: BasePrefixCache = None
 
     input_embedding: np.ndarray | None = None
+<<<<<<< HEAD
+=======
+    apply_for_deepstack: bool = False
+    deepstack_visual_embedding: np.ndarray | None = None
+>>>>>>> main
 
     # MRoPE position information [3, total_tokens]
     mrope_positions: np.ndarray | None = None

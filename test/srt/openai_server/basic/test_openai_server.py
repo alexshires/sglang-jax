@@ -173,7 +173,11 @@ class TestOpenAIServer(CustomTestCase):
                 if not (is_first and echo):
                     assert isinstance(
                         response.choices[0].logprobs.top_logprobs[0], dict
+<<<<<<< HEAD
                     ), "top_logprobs was not a dictionary"
+=======
+                    ), f"top_logprobs was not a dictionary"
+>>>>>>> main
                     ret_num_top_logprobs = len(response.choices[0].logprobs.top_logprobs[0])
                     # FIXME: Sometimes, some top_logprobs are missing in the return value. The reason is that some output id maps to the same output token and duplicate in the map
                     # assert ret_num_top_logprobs == logprobs, f"{ret_num_top_logprobs} vs {logprobs}"
@@ -259,7 +263,11 @@ class TestOpenAIServer(CustomTestCase):
             data = response.choices[0].delta
 
             if is_firsts.get(index, True):
+<<<<<<< HEAD
                 assert data.role == "assistant", "data.role was not 'assistant' for first chunk"
+=======
+                assert data.role == "assistant", f"data.role was not 'assistant' for first chunk"
+>>>>>>> main
                 is_firsts[index] = False
                 continue
 
@@ -270,7 +278,11 @@ class TestOpenAIServer(CustomTestCase):
                 ), "top_logprobs token was not a string"
                 assert isinstance(
                     response.choices[0].logprobs.content[0].top_logprobs, list
+<<<<<<< HEAD
                 ), "top_logprobs was not a list"
+=======
+                ), f"top_logprobs was not a list"
+>>>>>>> main
                 ret_num_top_logprobs = len(response.choices[0].logprobs.content[0].top_logprobs)
                 assert ret_num_top_logprobs == logprobs, f"{ret_num_top_logprobs} vs {logprobs}"
 

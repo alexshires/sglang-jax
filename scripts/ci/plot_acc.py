@@ -32,9 +32,13 @@ def get_args():
         default="daily_qwen_7b_benchmark_results.csv",
         help="Target CSV filename",
     )
+<<<<<<< HEAD
     parser.add_argument(
         "--metric", type=str, default="mmlu_pro", help="Metric column name to analyze"
     )
+=======
+    parser.add_argument("--metric", type=str, default="gsm8k", help="Metric column name to analyze")
+>>>>>>> main
 
     # --- Limit Data Points ---
     parser.add_argument(

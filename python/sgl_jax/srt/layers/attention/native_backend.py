@@ -261,6 +261,10 @@ def forward_attention(
         attn_logits = _apply_decode_mask(attn_logits, seq_lengths)
 
     # Softmax
+<<<<<<< HEAD
+=======
+    attn_logits = attn_logits - jnp.max(attn_logits, axis=-1, keepdims=True)
+>>>>>>> main
     attn_weights = jax.nn.softmax(attn_logits, axis=-1)
 
     attn_output = jnp.matmul(attn_weights, v_t)

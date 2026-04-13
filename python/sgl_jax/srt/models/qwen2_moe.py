@@ -3,10 +3,18 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+<<<<<<< HEAD
+=======
+import numpy as np
+>>>>>>> main
 from flax import nnx
 from transformers import PretrainedConfig
 
 from sgl_jax.srt.configs.model_config import ModelConfig
+<<<<<<< HEAD
+=======
+from sgl_jax.srt.eplb.expert_location import ExpertLocationMetadata
+>>>>>>> main
 from sgl_jax.srt.layers.embeddings import Embed, ParallelLMHead, RotaryEmbedding
 from sgl_jax.srt.layers.layernorm import RMSNorm
 from sgl_jax.srt.layers.linear import LinearBase
@@ -220,6 +228,15 @@ class Qwen2MoeDecoderLayer(nnx.Module):
         self.moe_backend = getattr(config, "moe_backend", "epmoe")
         self.use_fused = self.moe_backend == "fused"
 
+<<<<<<< HEAD
+=======
+        self.topk = TopK(
+            topk=num_experts_per_tok,
+            renormalize=getattr(config, "norm_topk_prob", True),
+            layer_id=layer_id,
+        )
+
+>>>>>>> main
         if self.use_fused:
             from sgl_jax.srt.layers.fused_moe import FusedEPMoE
 
@@ -237,10 +254,13 @@ class Qwen2MoeDecoderLayer(nnx.Module):
                 quantization_config=getattr(config, "quantization_config", None),
             )
         else:
+<<<<<<< HEAD
             self.topk = TopK(
                 topk=num_experts_per_tok,
                 renormalize=getattr(config, "norm_topk_prob", True),
             )
+=======
+>>>>>>> main
             self.mlp = EPMoE(
                 hidden_size=config.hidden_size,
                 num_experts=num_experts,
@@ -295,6 +315,10 @@ class Qwen2MoeDecoderLayer(nnx.Module):
         forward_batch: ForwardBatch,
         token_to_kv_pool: KVCache,
         residual: jax.Array | None = None,
+<<<<<<< HEAD
+=======
+        dispatch_info: ExpertLocationMetadata | None = None,
+>>>>>>> main
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
 
         if residual is None:
@@ -326,6 +350,7 @@ class Qwen2MoeDecoderLayer(nnx.Module):
             shared_output = None
 
         router_logits = self.moe_gate(hidden_states)
+<<<<<<< HEAD
         if self.use_fused:
             token_valid_mask = forward_batch.get_token_valid_mask(hidden_states.shape[0])
             mlp_output = self.mlp(hidden_states, router_logits, token_valid_mask=token_valid_mask)
@@ -333,6 +358,16 @@ class Qwen2MoeDecoderLayer(nnx.Module):
         else:
             topk_weights, topk_ids = self.topk(router_logits)
             mlp_output = self.mlp(hidden_states, topk_weights, topk_ids)
+=======
+        topk_weights, topk_ids = self.topk(router_logits, dispatch_info=dispatch_info)
+
+        if self.use_fused:
+            token_valid_mask = forward_batch.get_token_valid_mask(hidden_states.shape[0])
+            topk_ids = jnp.where(token_valid_mask[:, None], topk_ids, -1)
+        else:
+            pass
+        mlp_output = self.mlp(hidden_states, topk_weights, topk_ids)
+>>>>>>> main
 
         hidden_states = mlp_output if shared_output is None else (mlp_output + shared_output)
 
@@ -396,6 +431,10 @@ class Qwen2MoeModel(nnx.Module):
                 forward_batch,
                 token_to_kv_pool,
                 residual,
+<<<<<<< HEAD
+=======
+                dispatch_info=forward_batch.expert_location_metadata,
+>>>>>>> main
             )
             layers_kv_fused.append(kv_fused)
             layers_topk_ids.append(topk_ids)
@@ -585,6 +624,36 @@ class Qwen2MoeForCausalLM(nnx.Module):
         num_experts = getattr(self.config, "num_experts", 8)
         moe_backend = getattr(self.config, "moe_backend", "epmoe")
 
+<<<<<<< HEAD
+=======
+        # Get physical to logical mapping for redundant experts
+        from sgl_jax.srt.eplb.expert_location import get_global_expert_location_metadata
+
+        metadata = get_global_expert_location_metadata()
+        phy_to_log = None
+        num_physical_experts = num_experts
+        if metadata is not None:
+            num_physical_experts = metadata.num_physical_experts
+            physical_to_logical_map = np.array(jax.device_get(metadata.physical_to_logical_map))
+            phy_to_log = physical_to_logical_map[layer_idx]
+            sample = phy_to_log[: min(10, phy_to_log.shape[0])].tolist()
+            logger.info(
+                "Layer %s: logical=%s, physical=%s, redundancy=%.2fx",
+                layer_idx,
+                num_experts,
+                num_physical_experts,
+                num_physical_experts / num_experts,
+            )
+            logger.info(
+                "Layer %s EPLB map: size=%s min=%s max=%s sample=%s",
+                layer_idx,
+                phy_to_log.shape[0],
+                int(phy_to_log.min()),
+                int(phy_to_log.max()),
+                sample,
+            )
+
+>>>>>>> main
         moe_mappings = create_moe_weights_mapping(
             prefix=prefix,
             target_prefix=target_prefix,
@@ -592,6 +661,10 @@ class Qwen2MoeForCausalLM(nnx.Module):
             moe_backend=moe_backend,
             moe_path="mlp",
             source_expert_pattern="experts.{i}",
+<<<<<<< HEAD
+=======
+            physical_to_logical_map=phy_to_log,
+>>>>>>> main
         )
         mappings.update(moe_mappings)
 
@@ -604,7 +677,12 @@ class Qwen2MoeForCausalLM(nnx.Module):
         logits_metadata: LogitsMetadata,
     ):
         hidden_states, layers_kv_fused, layers_topk_ids = self.model(
+<<<<<<< HEAD
             forward_batch, token_to_kv_pool
+=======
+            forward_batch,
+            token_to_kv_pool,
+>>>>>>> main
         )
         if not getattr(self.config, "tie_word_embeddings", True):
             output = self.logits_processor(hidden_states, self.lm_head, logits_metadata)

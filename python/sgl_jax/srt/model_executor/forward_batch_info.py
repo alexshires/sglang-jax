@@ -28,6 +28,13 @@ from jax.sharding import NamedSharding, PartitionSpec
 from jax.tree_util import register_pytree_node_class
 
 from sgl_jax.srt.configs.model_config import need_attention_mask
+<<<<<<< HEAD
+=======
+from sgl_jax.srt.eplb.expert_location import (
+    ExpertLocationMetadata,
+    get_global_expert_location_metadata,
+)
+>>>>>>> main
 from sgl_jax.srt.speculative.spec_info import SpeculativeAlgorithm
 from sgl_jax.srt.utils.jax_utils import device_array
 
@@ -128,6 +135,16 @@ class CaptureHiddenMode(IntEnum):
     def __lt__(self, other):
         return self.value < other.value
 
+    def parse(mode: int):
+        if mode == 0:
+            return CaptureHiddenMode.NULL
+        elif mode == 1:
+            return CaptureHiddenMode.LAST
+        elif mode == 2:
+            return CaptureHiddenMode.FULL
+        else:
+            raise ValueError(f"Unknown CaptureHiddenMode: {mode}")
+
 
 @register_pytree_node_class
 @dataclass
@@ -150,8 +167,6 @@ class ForwardBatch:
     out_cache_loc: jax.Array
     # Position information [total_tokens]
     positions: jax.Array = None
-    # Start position for each sequence in extend mode [batch_size]
-    extend_start_loc: jax.Array = None
 
     attn_backend: AttentionBackend = None
 
@@ -167,6 +182,12 @@ class ForwardBatch:
     lora_token_indices: jax.Array = None
     lora_ranks: jax.Array = None
 
+<<<<<<< HEAD
+=======
+    # For EPLB
+    expert_location_metadata: ExpertLocationMetadata | None = None
+
+>>>>>>> main
     trace_request_ids: list[str] | None = None
     trace_request_objects: list | None = None
 
@@ -181,6 +202,13 @@ class ForwardBatch:
     input_embedding: jax.Array | None = None
     # MRoPE positions [3, total_tokens] for Qwen2.5-VL
     mrope_positions: jax.Array | None = None
+<<<<<<< HEAD
+=======
+
+    ## for deepstack
+    apply_for_deepstack: bool = False
+    deepstack_visual_embedding: jax.Array | None = None
+>>>>>>> main
 
     def tree_flatten(self):
         children = (
@@ -189,7 +217,10 @@ class ForwardBatch:
             self.seq_lens,
             self.out_cache_loc,
             self.positions,
+<<<<<<< HEAD
             self.extend_start_loc,
+=======
+>>>>>>> main
             self.attn_backend,
             self.cache_loc,
             self.extend_prefix_lens,
@@ -198,9 +229,18 @@ class ForwardBatch:
             self.lora_token_indices,
             self.lora_ranks,
             self.spec_info,
+<<<<<<< HEAD
             self.attention_mask,
             self.input_embedding,
             self.mrope_positions,
+=======
+            self.expert_location_metadata,
+            self.attention_mask,
+            self.input_embedding,
+            self.mrope_positions,
+            self.apply_for_deepstack,
+            self.deepstack_visual_embedding,
+>>>>>>> main
         )
 
         aux_data = {
@@ -229,6 +269,7 @@ class ForwardBatch:
         obj.seq_lens = children[2]
         obj.out_cache_loc = children[3]
         obj.positions = children[4]
+<<<<<<< HEAD
         obj.extend_start_loc = children[5]
         obj.attn_backend = children[6]
         obj.cache_loc = children[7]
@@ -241,7 +282,24 @@ class ForwardBatch:
         obj.attention_mask = children[14] if len(children) > 14 else None
         obj.input_embedding = children[15] if len(children) > 15 else None
         obj.mrope_positions = children[16] if len(children) > 16 else None
+=======
+        obj.attn_backend = children[5]
+        obj.cache_loc = children[6]
+        obj.extend_prefix_lens = children[7]
+        obj.extend_seq_lens = children[8]
+        obj.lora_scalings = children[9]
+        obj.lora_token_indices = children[10]
+        obj.lora_ranks = children[11]
+        obj.spec_info = children[12]
+        obj.expert_location_metadata = children[13]
+>>>>>>> main
 
+        obj.attention_mask = children[14]
+        obj.input_embedding = children[15]
+        obj.mrope_positions = children[16]
+
+        obj.apply_for_deepstack = children[17]
+        obj.deepstack_visual_embedding = children[18]
         return obj
 
     def __repr__(self) -> str:
@@ -253,7 +311,10 @@ class ForwardBatch:
             "seq_lens",
             "out_cache_loc",
             "positions",
+<<<<<<< HEAD
             "extend_start_loc",
+=======
+>>>>>>> main
             "cache_loc",
             "extend_prefix_lens",
             "extend_seq_lens",
@@ -261,6 +322,10 @@ class ForwardBatch:
             "lora_token_indices",
             "lora_ranks",
             "mrope_positions",
+<<<<<<< HEAD
+=======
+            "expert_location_metadata",
+>>>>>>> main
         ]:
             value = getattr(self, field_name, None)
             if value is not None and isinstance(value, jax.Array):
@@ -293,7 +358,10 @@ class ForwardBatch:
             seq_lens,
             out_cache_loc,
             positions,
+<<<<<<< HEAD
             extend_start_loc,
+=======
+>>>>>>> main
             req_pool_indices,
             cache_loc,
             extend_prefix_lens,
@@ -304,7 +372,10 @@ class ForwardBatch:
                 batch.seq_lens,
                 batch.out_cache_loc,
                 batch.positions,
+<<<<<<< HEAD
                 batch.extend_start_loc,
+=======
+>>>>>>> main
                 batch.req_pool_indices,
                 batch.cache_loc,
                 batch.extend_prefix_lens,
@@ -321,7 +392,11 @@ class ForwardBatch:
             (mrope_positions,) = device_array(
                 (batch.mrope_positions,),
                 sharding=(
+<<<<<<< HEAD
                     NamedSharding(model_runner.mesh, PartitionSpec())
+=======
+                    NamedSharding(model_runner.mesh, PartitionSpec(None, None))
+>>>>>>> main
                     if jax.process_count() == 1
                     else None
                 ),
@@ -331,11 +406,20 @@ class ForwardBatch:
             (input_embedding,) = device_array(
                 (batch.input_embedding,),
                 sharding=(
+<<<<<<< HEAD
                     NamedSharding(model_runner.mesh, PartitionSpec())
+=======
+                    NamedSharding(model_runner.mesh, PartitionSpec(None, None))
+>>>>>>> main
                     if jax.process_count() == 1
                     else None
                 ),
             )
+<<<<<<< HEAD
+=======
+        if input_embedding is not None:
+            input_embedding = input_embedding.astype(jnp.bfloat16)
+>>>>>>> main
 
         if batch.lora_scalings is not None:
             (
@@ -361,6 +445,24 @@ class ForwardBatch:
                 batch.lora_ranks,
             )
 
+<<<<<<< HEAD
+=======
+        deepstack_visual_embedding = None
+        if batch.apply_for_deepstack:
+            (deepstack_visual_embedding,) = device_array(
+                (batch.deepstack_visual_embedding,),
+                sharding=(
+                    NamedSharding(model_runner.mesh, PartitionSpec(None, None))
+                    if jax.process_count() == 1
+                    else None
+                ),
+            )
+        if deepstack_visual_embedding is not None:
+            deepstack_visual_embedding = deepstack_visual_embedding.astype(jnp.bfloat16)
+
+        expert_location_metadata = get_global_expert_location_metadata()
+
+>>>>>>> main
         obj = cls(
             bid=batch.bid,
             forward_mode=batch.forward_mode,
@@ -370,7 +472,10 @@ class ForwardBatch:
             out_cache_loc=out_cache_loc,
             positions=positions,
             mrope_positions=mrope_positions,
+<<<<<<< HEAD
             extend_start_loc=extend_start_loc,
+=======
+>>>>>>> main
             req_pool_indices=req_pool_indices,
             cache_loc=cache_loc,
             extend_prefix_lens=extend_prefix_lens,
@@ -384,6 +489,12 @@ class ForwardBatch:
             spec_algorithm=batch.spec_algorithm,
             capture_hidden_mode=batch.capture_hidden_mode,
             input_embedding=input_embedding,
+<<<<<<< HEAD
+=======
+            apply_for_deepstack=batch.apply_for_deepstack,
+            deepstack_visual_embedding=deepstack_visual_embedding,
+            expert_location_metadata=expert_location_metadata,
+>>>>>>> main
         )
 
         # Auto-generate attention mask for Encoder-only models (e.g. UMT5Encoder, BERT)

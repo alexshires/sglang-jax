@@ -6,9 +6,16 @@ import time
 from collections.abc import Callable
 from http import HTTPStatus
 
+<<<<<<< HEAD
 import requests
 import uvicorn
 from fastapi import Request
+=======
+import httpx
+import requests
+import uvicorn
+from fastapi import Depends, File, Form, Request, UploadFile
+>>>>>>> main
 from fastapi.responses import ORJSONResponse, Response
 
 from sgl_jax.srt.entrypoints.http_server import _GlobalState, app, set_global_state
@@ -19,9 +26,17 @@ from sgl_jax.srt.managers.template_manager import TemplateManager
 from sgl_jax.srt.multimodal.common.ServerArgs import MultimodalServerArgs
 from sgl_jax.srt.multimodal.manager.global_scheduler import run_global_scheduler_process
 from sgl_jax.srt.multimodal.manager.io_struct import (
+<<<<<<< HEAD
     DataType,
     GenerateMMReqInput,
     GenerateVLMReqInput,
+=======
+    AudioSpeechRequest,
+    AudioTranscriptionRequest,
+    DataType,
+    GenerateMMReqInput,
+    GenerateOmniReqInput,
+>>>>>>> main
     ImageGenerationsRequest,
     VideoGenerationsRequest,
 )
@@ -90,7 +105,11 @@ def _extract_openai_prompt(
     request: ChatCompletionRequest,
     tokenizer,
     messages_override: list[dict] | None = None,
+<<<<<<< HEAD
 ) -> tuple[str, list[str] | None, list[str] | None]:
+=======
+) -> tuple[str, list[str] | None, list[str] | None, list[str] | None]:
+>>>>>>> main
     if tokenizer is None:
         raise ValueError("Tokenizer is not initialized for chat completions.")
     openai_messages = []
@@ -123,9 +142,12 @@ def _extract_openai_prompt(
         )
         openai_messages.append(processed_msg)
 
+<<<<<<< HEAD
     if audio_data:
         raise ValueError("Audio inputs are not supported for this model.")
 
+=======
+>>>>>>> main
     assistant_prefix = None
     if (
         openai_messages
@@ -181,7 +203,11 @@ def _extract_openai_prompt(
         if text_parts:
             prompt += "".join(text_parts)
 
+<<<<<<< HEAD
     return prompt, (image_data or None), (video_data or None)
+=======
+    return prompt, (image_data or None), (video_data or None), (audio_data or None)
+>>>>>>> main
 
 
 @app.api_route("/api/v1/videos/generation", methods=["POST", "PUT"])
@@ -199,22 +225,134 @@ async def videos_generation(obj: VideoGenerationsRequest, request: Request):
         return _create_error_response(e)
 
 
+<<<<<<< HEAD
+=======
+# consistent with the openai interface
+# https://developers.openai.com/api/reference/python/resources/audio
+@app.post("/v1/audio/speech")
+async def create_speech(obj: AudioSpeechRequest, request: Request):
+    """OpenAI-compatible Text-to-Speech endpoint.
+
+    Returns binary audio data in the specified format.
+    """
+    try:
+        from sgl_jax.srt.entrypoints.http_server import _global_state
+
+        audio_data = await _global_state.tokenizer_manager.create_speech(obj, request)
+
+        media_type = f"audio/{obj.response_format}"
+        return Response(content=audio_data, media_type=media_type)
+    except ValueError as e:
+        logger.error("[http_server] create_speech error: %s", e)
+        return _create_error_response(e)
+
+
+async def parse_transcription_request(
+    file: UploadFile | None = File(None),
+    url: str | None = Form(None),
+    model: str = Form(...),
+    language: str | None = Form(None),
+    prompt: str | None = Form(None),
+    response_format: str = Form("json"),
+    temperature: float | None = Form(None),
+    timestamp_granularities: str | None = Form(None),
+    chunking_strategy: str | None = Form(None),
+    known_speaker_names: str | None = Form(None),
+    known_speaker_references: str | None = Form(None),
+    include: str | None = Form(None),
+    stream: bool = Form(False),
+) -> AudioTranscriptionRequest:
+    """Parse multipart/form-data and wrap into AudioTranscriptionRequest."""
+    import json
+
+    if file is None and url is None:
+        raise ValueError("Either 'file' or 'url' parameter is required")
+    if file is not None and url is not None:
+        raise ValueError("Cannot provide both 'file' and 'url' parameters")
+
+    audio_bytes = None
+    if file is not None:
+        audio_bytes = await file.read()
+    elif url is not None:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=30.0)
+                response.raise_for_status()
+                audio_bytes = response.content
+        except httpx.HTTPError as e:
+            raise ValueError(f"Failed to download audio from URL: {e}") from e
+
+    granularities = json.loads(timestamp_granularities) if timestamp_granularities else None
+    chunking = json.loads(chunking_strategy) if chunking_strategy else None
+    speaker_names = json.loads(known_speaker_names) if known_speaker_names else None
+    speaker_refs = json.loads(known_speaker_references) if known_speaker_references else None
+    include_list = json.loads(include) if include else None
+
+    return AudioTranscriptionRequest(
+        file=audio_bytes,
+        url=url,
+        model=model,
+        language=language,
+        prompt=prompt,
+        response_format=response_format,
+        temperature=temperature,
+        timestamp_granularities=granularities,
+        chunking_strategy=chunking,
+        known_speaker_names=speaker_names,
+        known_speaker_references=speaker_refs,
+        include=include_list,
+        stream=stream,
+    )
+
+
+@app.post("/v1/audio/transcriptions")
+async def create_transcription(
+    request: Request,
+    obj: AudioTranscriptionRequest = Depends(parse_transcription_request),
+):
+    try:
+        from sgl_jax.srt.entrypoints.http_server import _global_state
+
+        result = await _global_state.tokenizer_manager.create_transcription(obj, request)
+
+        if obj.response_format == "text" or obj.response_format in ("srt", "vtt"):
+            return Response(content=result, media_type="text/plain")
+        else:  # json, verbose_json, diarized_json
+            return result
+
+    except ValueError as e:
+        logger.error("[http_server] create_transcription error: %s", e)
+        return _create_error_response(e)
+
+
+>>>>>>> main
 @app.post("/v1/chat/completions")
 async def chat_completions(obj: ChatCompletionRequest, request: Request):
     try:
         from sgl_jax.srt.entrypoints.http_server import _global_state
 
+<<<<<<< HEAD
         prompt, image_data, video_data = _extract_openai_prompt(
             obj, _global_state.tokenizer_manager.tokenizer
         )
         if not image_data and not video_data:
+=======
+        prompt, image_data, video_data, audio_data = _extract_openai_prompt(
+            obj, _global_state.tokenizer_manager.tokenizer
+        )
+        if not image_data and not video_data and not audio_data:
+>>>>>>> main
             try:
                 raw_body = await request.json()
             except Exception:
                 raw_body = None
             raw_messages = raw_body.get("messages") if isinstance(raw_body, dict) else None
             if isinstance(raw_messages, list):
+<<<<<<< HEAD
                 prompt, image_data, video_data = _extract_openai_prompt(
+=======
+                prompt, image_data, video_data, audio_data = _extract_openai_prompt(
+>>>>>>> main
                     obj, _global_state.tokenizer_manager.tokenizer, raw_messages
                 )
         max_new_tokens = obj.max_completion_tokens or obj.max_tokens
@@ -229,10 +367,18 @@ async def chat_completions(obj: ChatCompletionRequest, request: Request):
             "repetition_penalty": obj.repetition_penalty,
             "stop": obj.stop,
         }
+<<<<<<< HEAD
         internal_obj = GenerateVLMReqInput(
             prompt=prompt,
             image_data=image_data,
             video_data=video_data,
+=======
+        internal_obj = GenerateOmniReqInput(
+            prompt=prompt,
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
+>>>>>>> main
             stream=obj.stream,
             n=obj.n,
             rid=obj.rid if isinstance(obj.rid, str) else None,
@@ -441,6 +587,7 @@ def _execute_multimodal_server_warmup(
             ],
             "max_tokens": 3,
         }
+<<<<<<< HEAD
     elif _is_wan_model(server_args.model_path):
         request_endpoint = "/api/v1/images/generation"
         json_data = {
@@ -449,6 +596,52 @@ def _execute_multimodal_server_warmup(
             "num_inference_steps": 2,
             "save_output": False,
         }
+=======
+    elif "Qwen3-Omni" in server_args.model_path:
+        request_endpoint = "/v1/chat/completions"
+        json_data = {
+            "model": server_args.model_path,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Hello"},
+                    ],
+                }
+            ],
+            "max_tokens": 3,
+        }
+    elif "MiMo-Audio" in server_args.model_path:
+        request_endpoint = "/v1/audio/transcriptions"
+        # audio_url = "https://huggingface.co/datasets/nvidia/AudioSkills/resolve/main/assets/WhDJDIviAOg_120_10.mp3"
+        audio_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/cookbook/asr_zh.wav"
+        logger.info("Downloading warmup audio from: %s", audio_url)
+        audio_response = requests.get(audio_url, timeout=30)
+        audio_bytes = audio_response.content
+
+        files = {"file": ("warmup_audio.mp3", audio_bytes, "audio/mpeg")}
+        data = {"model": server_args.model_path}
+
+        try:
+            res = requests.post(
+                url + request_endpoint,
+                files=files,
+                data=data,
+                headers=headers,
+                timeout=600,
+            )
+            assert res.status_code == 200, f"{res.status_code}: {res.text}"
+            logger.info("Audio model warmup completed successfully")
+        except Exception:
+            last_traceback = get_exception_traceback()
+            if pipe_finish_writer is not None:
+                pipe_finish_writer.send(last_traceback)
+            logger.error("Initialization failed. warmup error: %s", last_traceback)
+            kill_process_tree(os.getpid())
+            return False
+
+        return True
+>>>>>>> main
     else:
         # Default to image generation for other multimodal models
         request_endpoint = "/api/v1/images/generation"

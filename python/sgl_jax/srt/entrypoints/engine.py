@@ -111,7 +111,10 @@ class Engine(EngineBase):
 
         # Allocate ports for inter-process communications
         self.port_args = PortArgs.init_new(server_args)
+<<<<<<< HEAD
         self.server_args = server_args
+=======
+>>>>>>> main
         logger.info("server_args=%s", server_args)
 
         # Launch subprocesses or threads
@@ -302,6 +305,8 @@ class Engine(EngineBase):
             logger.debug("Shutting down engine (pid=%d)...", os.getpid())
 
         kill_process_tree(os.getpid(), include_parent=False)
+        if self.server_args.enable_single_process:
+            self.send_to_rpc.close()
 
         if (
             hasattr(self, "server_args")
@@ -680,7 +685,10 @@ def _launch_threads(
     if port_args is None:
         port_args = PortArgs.init_new(server_args)
         logger.info("server_args=%s", server_args)
+<<<<<<< HEAD
 
+=======
+>>>>>>> main
     # If using model from www.modelscope.cn, first download the model.
     server_args.model_path, server_args.tokenizer_path = prepare_model_and_tokenizer(
         server_args.model_path, server_args.tokenizer_path
@@ -727,7 +735,10 @@ def _launch_threads(
 
     # Launch tokenizer process
     tokenizer_manager = TokenizerManager(server_args, port_args)
+<<<<<<< HEAD
     tokenizer_manager.scheduler_pids = []
+=======
+>>>>>>> main
 
     # Initialize templates
     template_manager = TemplateManager()

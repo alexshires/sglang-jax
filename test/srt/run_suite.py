@@ -6,8 +6,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Optional
 
 from sgl_jax.srt.utils import kill_process_tree
 
@@ -16,16 +16,24 @@ from sgl_jax.srt.utils import kill_process_tree
 class TestFile:
     name: str
     estimated_time: float = 60  # in minitues
+<<<<<<< HEAD
     test_methods: Optional[List[str]] = (
         None  # Optional: specific test methods to run (e.g., ["TestClass.test_method"])
     )
+=======
+    test_methods: list[str] | None = (
+        None  # Optional: specific test methods to run (e.g., ["TestClass.test_method"])
+    )
+    runner: str = "python"
+    extra_deps: list[str] | None = None
+>>>>>>> main
 
 
 def run_with_timeout(
     func: Callable,
     args: tuple = (),
-    kwargs: Optional[dict] = None,
-    timeout: float = None,
+    kwargs: dict | None = None,
+    timeout: float | None = None,
 ):
     """Run a function with timeout."""
     ret_value = []
@@ -60,38 +68,64 @@ def cleanup_model_cache():
                         print(f"Failed to clean model cache: {e}\n", flush=True)
 
 
-def run_unittest_files(files: List[TestFile], timeout_per_file: float):
+def run_unittest_files(files: list[TestFile], timeout_per_file: float):
     tic = time.perf_counter()
     success = True
 
     for i, file in enumerate(files):
         filename, estimated_time = file.name, file.estimated_time
+        file_entry = file
+        file_index = i
+        file_count = len(files) - 1
+        file_estimated_time = estimated_time
         process = None
 
-        def run_one_file(filename):
+        def run_one_file(
+            filename,
+            file_entry=file_entry,
+            file_index=file_index,
+            file_count=file_count,
+            file_estimated_time=file_estimated_time,
+        ):
             nonlocal process
 
             filename = os.path.join(os.getcwd(), filename)
             tic = time.perf_counter()
 
             # Check if specific test methods are specified
+<<<<<<< HEAD
             if file.test_methods:
+=======
+            if file_entry.test_methods:
+>>>>>>> main
                 # Run specific test methods using unittest module syntax from test/srt directory
                 # Just use the filename directly (e.g., test_eval_accuracy_large.TestEvalAccuracyLarge.test_mmlu)
                 module_name = os.path.basename(filename).replace(".py", "")
 
                 print(
+<<<<<<< HEAD
                     f".\n.\nBegin ({i}/{len(files) - 1}):\nRunning specific test methods from {filename}\n",
+=======
+                    f".\n.\nBegin ({file_index}/{file_count}):\nRunning specific test methods from {filename}\n",
+>>>>>>> main
                     flush=True,
                 )
 
                 # Run each test method sequentially
+<<<<<<< HEAD
                 for method in file.test_methods:
+=======
+                for method in file_entry.test_methods:
+>>>>>>> main
                     test_path = f"{module_name}.{method}"
                     print(f"Running: python3 -m unittest {test_path}\n", flush=True)
 
                     process = subprocess.Popen(
+<<<<<<< HEAD
                         ["uv", "run", "python3", "-m", "unittest", test_path],
+=======
+                        [sys.executable, "-m", "unittest", test_path],
+>>>>>>> main
                         stdout=sys.stdout,
                         stderr=sys.stderr,
                         env=os.environ,
@@ -108,14 +142,44 @@ def run_unittest_files(files: List[TestFile], timeout_per_file: float):
                         cleanup_model_cache()
                         return process.returncode
             else:
+<<<<<<< HEAD
                 # Run entire file (existing behavior)
                 print(
                     f".\n.\nBegin ({i}/{len(files) - 1}):\npython3 {filename}\n.\n.\n",
+=======
+                if file_entry.runner == "pytest":
+                    cmd = [
+                        "uv",
+                        "run",
+                        "--with",
+                        "pytest",
+                    ]
+                    for dep in file_entry.extra_deps or []:
+                        cmd.extend(["--with", dep])
+                    cmd.extend(
+                        [
+                            "python",
+                            "-m",
+                            "pytest",
+                            "-q",
+                            filename,
+                        ]
+                    )
+                else:
+                    cmd = [sys.executable, filename]
+
+                print(
+                    f".\n.\nBegin ({file_index}/{file_count}):\n{' '.join(cmd)}\n.\n.\n",
+>>>>>>> main
                     flush=True,
                 )
 
                 process = subprocess.Popen(
+<<<<<<< HEAD
                     ["uv", "run", "python3", filename],
+=======
+                    cmd,
+>>>>>>> main
                     stdout=sys.stdout,
                     stderr=sys.stderr,
                     env=os.environ,
@@ -124,7 +188,7 @@ def run_unittest_files(files: List[TestFile], timeout_per_file: float):
 
             elapsed = time.perf_counter() - tic
             print(
-                f".\n.\nEnd ({i}/{len(files) - 1}):\n{filename=}, {elapsed=:.0f}, {estimated_time=}\n.\n.\n",
+                f".\n.\nEnd ({file_index}/{file_count}):\n{filename=}, {elapsed=:.0f}, {file_estimated_time=}\n.\n.\n",
                 flush=True,
             )
 
@@ -405,6 +469,7 @@ suites = {
             estimated_time=7,
             test_methods=["TestModelPerfTrace.test_qwen_7b_performance_trace_tp_1_daily"],
         ),
+<<<<<<< HEAD
     ],
     "score-api-test-tpu-v6e-1": [
         TestFile("test/srt/test_score_api.py", 2),
@@ -437,6 +502,13 @@ suites = {
     ],
     "sglang_dependency_test": [],
     "unit-test-tpu-v6e-1": [
+=======
+    ],
+    "sglang_dependency_test": [],
+    "unit-test-tpu-v6e-1": [
+        TestFile("python/sgl_jax/test/kernels/quantized_linear_test.py", 0.1, runner="pytest"),
+        TestFile("python/sgl_jax/test/kernels/moe_block_quant_test.py", 0.1, runner="pytest"),
+>>>>>>> main
         TestFile("python/sgl_jax/test/test_flashattention.py", 20),
         TestFile("python/sgl_jax/test/test_moe_topk.py", 1),
         TestFile("python/sgl_jax/test/kernels/fused_moe_v1_test.py", 10),
@@ -450,11 +522,29 @@ suites = {
         TestFile("python/sgl_jax/test/speculative/test_eagle_utils.py", 1),
         TestFile("python/sgl_jax/test/multimodal/test_wan_vae_precision.py", 1),
         TestFile("python/sgl_jax/test/multimodal/test_vae_scheduler.py", 2),
+<<<<<<< HEAD
+=======
+        TestFile("python/sgl_jax/test/multimodal/test_flash_attention_kernel.py", 2),
+        TestFile("python/sgl_jax/test/layers/test_group_rmsnorm.py", 1, runner="pytest"),
+        TestFile("python/sgl_jax/test/layers/test_linear_attention_backend.py", 1, runner="pytest"),
+        TestFile(
+            "python/sgl_jax/test/layers/test_cross_framework_linear_attention.py",
+            1,
+            runner="pytest",
+            extra_deps=["torch"],
+        ),
+        TestFile("python/sgl_jax/test/layers/test_linear_attention.py", 5, runner="pytest"),
+>>>>>>> main
         TestFile("test/srt/lora/test_bgmv_backend.py", 5),
         TestFile("test/srt/lora/test_align_lora_accuracy.py", 10),
     ],
     "unit-test-tpu-v6e-4": [
         TestFile("python/sgl_jax/test/test_mesh.py", 1),
+<<<<<<< HEAD
+=======
+        TestFile("python/sgl_jax/test/test_linear_tp.py", 1, runner="pytest"),
+        TestFile("python/sgl_jax/test/layers/test_linear_attention.py", 5, runner="pytest"),
+>>>>>>> main
     ],
     "kernel-performance-test-tpu-v6e-1": [
         TestFile("benchmark/kernels/flash_attention/bench_flashattention.py", 5),
@@ -462,6 +552,7 @@ suites = {
         TestFile("benchmark/kernels/update_kv_cache/bench_update_kv_cache.py", 3),
     ],
     "accuracy-test-tpu-v6e-1": [
+<<<<<<< HEAD
         TestFile("test/srt/test_eval_accuracy_large.py", 5, ["TestEvalAccuracyLarge.test_mmlu"]),
     ],
     "accuracy-test-tpu-v6e-4": [
@@ -478,6 +569,22 @@ suites = {
             ["TestMultiItemRegression.test_multi_item_isolation_and_speed"],
         ),
     ],
+=======
+        TestFile(
+            "test/srt/test_eval_accuracy_large.py",
+            5,
+            ["TestEvalAccuracyLarge.test_mmlu"],
+        ),
+    ],
+    "accuracy-test-tpu-v6e-4": [
+        TestFile(
+            "test/srt/test_moe_eval_accuracy_large.py",
+            40,
+            ["TestMoEEvalAccuracyLarge.test_mmlu"],
+        ),
+    ],
+    "performance-test-tpu-v6e-1": [TestFile("test/srt/test_bench_serving_dense.py", 7)],
+>>>>>>> main
     "performance-test-tpu-v6e-4": [
         TestFile(
             "test/srt/test_bench_serving_dense_tp_4.py",
@@ -494,7 +601,10 @@ suites = {
         TestFile("test/srt/openai_server/basic/test_serving_chat.py", 0.1),
         TestFile("test/srt/openai_server/basic/test_serving_completions.py", 0.1),
         TestFile("test/srt/openai_server/basic/test_openai_server.py", 1),
+<<<<<<< HEAD
         TestFile("test/srt/test_score_api.py", 2),
+=======
+>>>>>>> main
         TestFile("test/srt/openai_server/features/test_ebnf.py", 2),
         TestFile("test/srt/openai_server/features/test_json_mode.py", 2),
         TestFile("test/srt/openai_server/features/test_structural_tag.py", 2),
@@ -506,6 +616,7 @@ suites = {
         TestFile("test/srt/lora/test_static_lora.py", 10),
     ],
     "e2e-test-tpu-v6e-4": [
+<<<<<<< HEAD
         TestFile("test/srt/openai_server/basic/test_tool_calls.py", 3),
         TestFile("test/srt/test_features.py", 3),
         TestFile("test/srt/test_chunked_prefill_size.py", 4),
@@ -517,6 +628,30 @@ suites = {
         TestFile("test/srt/test_engine_pause_continue.py", 3),
         TestFile("test/srt/test_server_pause_continue.py", 6),
         TestFile("test/srt/rl/test_return_routed_experts.py", 5),
+=======
+        TestFile("test/srt/test_moe_block_quant_e2e.py", 5, runner="pytest"),
+        TestFile("test/srt/openai_server/basic/test_tool_calls.py", 3),
+        TestFile("test/srt/test_features.py", 10),
+        TestFile("test/srt/test_chunked_prefill_size.py", 5),
+        # TestFile("test/srt/test_sliding_window_attention.py", 30), # add after gpt-oss supported
+        TestFile("test/srt/test_model_loader.py", 5),
+        TestFile("test/srt/quantization/test_w8_quantization.py", 10),
+        TestFile(
+            "test/srt/quantization/test_w8_block_dynamic_quantization.py",
+            8,
+            runner="pytest",
+        ),
+        TestFile(
+            "test/srt/quantization/test_w8_moe_block_linear_channel_quantization.py",
+            15,
+        ),
+        TestFile("test/srt/test_engine_determine_generation.py", 5),
+        TestFile("test/srt/test_engine_flush_cache.py", 5),
+        TestFile("test/srt/test_engine_pause_continue.py", 6),
+        TestFile("test/srt/test_server_pause_continue.py", 6),
+        TestFile("test/srt/rl/test_return_routed_experts.py", 5),
+        TestFile("test/srt/rl/test_multi_engines_in_one_process.py", 5),
+>>>>>>> main
         TestFile("test/srt/multimodal/test_wan2_1_models.py", 30),
     ],
 }
@@ -606,10 +741,7 @@ if __name__ == "__main__":
     args = arg_parser.parse_args()
     print(f"{args=}")
 
-    if args.suite == "all":
-        files = glob.glob("**/test_*.py", recursive=True)
-    else:
-        files = suites[args.suite]
+    files = glob.glob("**/test_*.py", recursive=True) if args.suite == "all" else suites[args.suite]
 
     if args.auto_partition_size:
         files = auto_partition(files, args.auto_partition_id, args.auto_partition_size)

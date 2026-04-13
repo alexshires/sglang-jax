@@ -3,7 +3,12 @@ import logging
 import jax.sharding
 
 from sgl_jax.srt.managers.communication import CommunicationBackend
+<<<<<<< HEAD
 from sgl_jax.srt.managers.io_struct import AbortReq
+=======
+from sgl_jax.srt.managers.io_struct import AbortReq, ProfileReq
+from sgl_jax.srt.managers.scheduler_profiler_mixing import SchedulerProfilerMixin
+>>>>>>> main
 from sgl_jax.srt.multimodal.common.ServerArgs import MultimodalServerArgs
 from sgl_jax.srt.multimodal.manager.schedule_batch import Req
 from sgl_jax.srt.multimodal.model_executor.diffusion.diffusion_model_worker import (
@@ -13,7 +18,11 @@ from sgl_jax.srt.multimodal.model_executor.diffusion.diffusion_model_worker impo
 logger = logging.getLogger(__name__)
 
 
+<<<<<<< HEAD
 class DiffusionScheduler:
+=======
+class DiffusionScheduler(SchedulerProfilerMixin):
+>>>>>>> main
     """Scheduler responsible for diffusion-model inference steps.
 
     The DiffusionScheduler receives requests via a `CommunicationBackend`,
@@ -35,6 +44,10 @@ class DiffusionScheduler:
         communication_backend: CommunicationBackend,
         model_class,
         stage_sub_dir: str | None = None,
+<<<<<<< HEAD
+=======
+        precompile_params: dict | None = None,
+>>>>>>> main
     ):
         """Initialize the DiffusionScheduler.
 
@@ -51,10 +64,22 @@ class DiffusionScheduler:
         self.diffusion_worker = DiffusionModelWorker(
             server_args, mesh=mesh, model_class=model_class, stage_sub_dir=stage_sub_dir
         )
+<<<<<<< HEAD
+=======
+        self.forward_ct = 0
+        self.init_profier()
+>>>>>>> main
         # Track aborted request IDs to skip processing
         self.aborted_rids: set[str] = set()
         # Current request being processed (for abort checking during steps)
         self._current_rid: str | None = None
+<<<<<<< HEAD
+=======
+        if not server_args.disable_precompile:
+            logger.info("[Diffusion Scheduler] Begins to run diffusion worker precompile.")
+            self.diffusion_worker.run_precompile()
+            logger.info("[Diffusion Scheduler] Completes diffusion worker precompile.")
+>>>>>>> main
 
     def event_loop_normal(self):
         """Blocking event loop for processing incoming diffusion requests.
@@ -72,6 +97,12 @@ class DiffusionScheduler:
                         # Record the aborted rid so we can skip it later
                         logger.info("DiffusionScheduler received abort for rid=%s", req.rid)
                         self.aborted_rids.add(req.rid)
+<<<<<<< HEAD
+=======
+                    elif isinstance(req, ProfileReq):
+                        result = self.profile(req)
+                        self.communication_backend.send_pyobj(result)
+>>>>>>> main
                     elif isinstance(req, Req):
                         # Check if this request was aborted
                         if req.rid in self.aborted_rids:
@@ -98,16 +129,27 @@ class DiffusionScheduler:
         Returns:
             True if the current request should be aborted, False otherwise.
         """
+<<<<<<< HEAD
         # Drain any pending abort requests from the queue
+=======
+        # Drain any pending abort/profile requests from the queue
+>>>>>>> main
         while True:
             try:
                 msg = self.communication_backend._in_queue.get_nowait()
                 if isinstance(msg, AbortReq):
                     logger.info("DiffusionScheduler received abort during step for rid=%s", msg.rid)
                     self.aborted_rids.add(msg.rid)
+<<<<<<< HEAD
                 else:
                     # Put non-abort messages back (this is a simplification;
                     # in practice we might need a separate queue)
+=======
+                elif isinstance(msg, ProfileReq):
+                    result = self.profile(msg)
+                    self.communication_backend.send_pyobj(result)
+                else:
+>>>>>>> main
                     self.communication_backend._in_queue.put_nowait(msg)
                     break
             except Exception:
@@ -119,6 +161,14 @@ class DiffusionScheduler:
             return True
         return False
 
+<<<<<<< HEAD
+=======
+    def _on_step(self):
+        """Called after each denoising step to increment the step counter."""
+        self.forward_ct += 1
+        self._profile_batch_predicate(None)
+
+>>>>>>> main
     def run_diffusion_step(self, req: Req):
         """Execute a single diffusion inference step for `req`.
 
@@ -139,7 +189,13 @@ class DiffusionScheduler:
         # padding request data for JIT
         # schedule_batch -> worker_batch -> forward_batch
         batch = self.prepare_diffusion_batch(req)
+<<<<<<< HEAD
         aborted = self.diffusion_worker.forward(batch, self.mesh, abort_checker=self.check_abort)
+=======
+        aborted = self.diffusion_worker.forward(
+            batch, self.mesh, abort_checker=self.check_abort, step_callback=self._on_step
+        )
+>>>>>>> main
 
         self._current_rid = None
 

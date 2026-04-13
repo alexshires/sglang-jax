@@ -48,10 +48,13 @@ from sgl_jax.srt.managers.io_struct import (
     GetInternalStateReqOutput,
     PauseGenerationReqInput,
     ProfileReq,
+<<<<<<< HEAD
     ReleaseScoringCacheReqInput,
     ReleaseScoringCacheReqOutput,
     ScoreFromCacheReqInput,
     ScoreFromCacheReqOutput,
+=======
+>>>>>>> main
     SetInternalStateReq,
     SetInternalStateReqOutput,
     TokenizedGenerateReqInput,
@@ -82,7 +85,10 @@ from sgl_jax.srt.mem_cache.swa_radix_cache import SWARadixCache
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardMode
 from sgl_jax.srt.multimodal.tokenizer_utils import resolve_tokenizer_subdir
 from sgl_jax.srt.precision_tracer import precision_tracer
+<<<<<<< HEAD
 from sgl_jax.srt.sampling.sampling_params import SamplingParams
+=======
+>>>>>>> main
 from sgl_jax.srt.server_args import PortArgs, ServerArgs
 from sgl_jax.srt.speculative.eagle_util import EagleDraftInput
 from sgl_jax.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -181,6 +187,10 @@ class Scheduler(
         mesh: jax.sharding.Mesh = None,
         model_class: None = None,
         stage_sub_dir: str | None = None,
+<<<<<<< HEAD
+=======
+        precompile_params: dict | None = None,
+>>>>>>> main
     ):
         if stage_sub_dir is not None:
             server_args = dataclasses.replace(server_args)
@@ -203,7 +213,10 @@ class Scheduler(
         if port_args is not None:
             self.pub_sub_addr = port_args.pub_sub_addr
             self.pub_sub_sync_addr = port_args.pub_sub_sync_addr
+<<<<<<< HEAD
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+=======
+>>>>>>> main
         self.tp_size = server_args.tp_size
         self.schedule_policy = server_args.schedule_policy
         self.skip_tokenizer_init = server_args.skip_tokenizer_init
@@ -327,6 +340,10 @@ class Scheduler(
             server_args=server_args,
             mesh=self.mesh,
             model_class=model_class,
+<<<<<<< HEAD
+=======
+            precompile_params=precompile_params,
+>>>>>>> main
         )
 
         # launch draft worker
@@ -398,6 +415,7 @@ class Scheduler(
 
         # Init pause/continue state
         self._engine_paused = False
+<<<<<<< HEAD
 
         # Workstream B: Store cached nodes for prefill+extend
         # Map:
@@ -466,6 +484,8 @@ class Scheduler(
         self.score_from_cache_v2_queue_wait_s_max = 0.0
         self.score_from_cache_v2_device_compute_s_max = 0.0
         self.score_from_cache_v2_host_orchestration_s_max = 0.0
+=======
+>>>>>>> main
 
         # Init schedule policy and new token estimation
         self.policy = SchedulePolicy(
@@ -503,8 +523,11 @@ class Scheduler(
                 (AbortReq, self.abort_request),
                 (ProfileReq, self.profile),
                 (FlushCacheReqInput, self.flush_cache_wrapped),
+<<<<<<< HEAD
                 (ReleaseScoringCacheReqInput, self.release_scoring_cache),
                 (ScoreFromCacheReqInput, self.score_from_cache_v2),
+=======
+>>>>>>> main
                 (GetInternalStateReq, self.get_internal_state),
                 (SetInternalStateReq, self.set_internal_state),
                 (PauseGenerationReqInput, self.pause_generation),
@@ -859,11 +882,17 @@ class Scheduler(
         return recv_reqs
 
     def process_input_requests(self, recv_reqs: list):
+<<<<<<< HEAD
         self._evict_expired_scoring_cache_nodes()
+=======
+>>>>>>> main
         for recv_req in recv_reqs:
             output = self._request_dispatcher(recv_req)
             if output is not None:
-                self.send_to_tokenizer.send_pyobj(output)
+                if self._comm_backend is not None:
+                    self._comm_backend.send_pyobj(output)
+                else:
+                    self.send_to_tokenizer.send_pyobj(output)
 
     def _unpack_scoring_cache_entry(self, entry):
         # Backward-compatible unpack for entries created before `last_access_ts`
@@ -2268,6 +2297,7 @@ class Scheduler(
             vocab_size=self.model_config.vocab_size,
             return_routed_experts=recv_req.return_routed_experts,
             return_hidden_states=recv_req.return_hidden_states,
+<<<<<<< HEAD
             cache_for_scoring=recv_req.cache_for_scoring,
             extend_from_cache=recv_req.extend_from_cache,
         )
@@ -2286,6 +2316,23 @@ class Scheduler(
 
         if hasattr(recv_req, "mm_inputs") and recv_req.mm_inputs:
             req.mm_inputs = recv_req.mm_inputs
+=======
+        )
+        req.tokenizer = self.tokenizer
+        if hasattr(recv_req, "mm_inputs") and recv_req.mm_inputs:
+            req.mm_inputs = recv_req.mm_inputs
+            multimodal_embedding = recv_req.mm_inputs.get("multimodal_embedding")
+            req.multimodal_embedding = multimodal_embedding
+            if (
+                recv_req.mm_inputs.get("deepstack_visual_pos_mask") is not None
+                and recv_req.mm_inputs.get("deepstack_visual_embedding") is not None
+            ):
+                req.apply_for_deepstack = True
+                req.deepstack_visual_pos_mask = recv_req.mm_inputs.get("deepstack_visual_pos_mask")
+                req.deepstack_visual_embedding = recv_req.mm_inputs.get(
+                    "deepstack_visual_embedding"
+                )
+>>>>>>> main
         # Validate prompt length
         error_msg = validate_input_length(
             req,
@@ -2458,6 +2505,7 @@ class Scheduler(
         ret["forward_ct_decode"] = self.forward_ct_decode
         ret["new_token_ratio"] = self.new_token_ratio
         ret["init_new_token_ratio"] = self.init_new_token_ratio
+<<<<<<< HEAD
         score_from_cache_v2_attempted = self.score_from_cache_v2_attempted
         score_timing_totals_s = {
             "queue_wait": self.score_from_cache_v2_queue_wait_s_total,
@@ -2530,6 +2578,8 @@ class Scheduler(
             "score_path_frames": score_path_frames,
             "score_path_messages_per_frame": score_path_messages_per_frame,
         }
+=======
+>>>>>>> main
 
         return GetInternalStateReqOutput(internal_state=ret)
 
@@ -2680,11 +2730,14 @@ class Scheduler(
         self.waiting_queue.append(req)
 
     def _extend_requests_to_queue(self, reqs: list[Req], is_retracted: bool = False):
+<<<<<<< HEAD
         if is_retracted:
             now = time.perf_counter()
             for req in reqs:
                 req.queue_time_start = now
                 req.queue_time_end = None
+=======
+>>>>>>> main
         self.waiting_queue.extend(reqs)
 
     def check_memory(self):
@@ -2702,11 +2755,15 @@ class Scheduler(
             # Strict mode: require perfect accounting with no tolerance
             full_protected = self.tree_cache.full_protected_size()
             swa_protected = self.tree_cache.swa_protected_size()
+<<<<<<< HEAD
             memory_leak = (
                 full_available_size + full_evictable_size + full_protected
             ) != self.full_tokens_per_layer or (
                 swa_available_size + swa_evictable_size + swa_protected
             ) != self.swa_tokens_per_layer
+=======
+            memory_leak = full_num_used != 0 or swa_num_used != 0
+>>>>>>> main
             token_msg = (
                 f"{self.full_tokens_per_layer=}, {full_available_size=}, {full_evictable_size=}, full_protected={full_protected} (used={full_num_used})\n"
                 f"{self.swa_tokens_per_layer=}, {swa_available_size=}, {swa_evictable_size=}, swa_protected={swa_protected} (used={swa_num_used})\n"
@@ -2714,9 +2771,13 @@ class Scheduler(
         else:
             _, _, available_size, evictable_size = self._get_token_info()
             protected_size = self.tree_cache.protected_size()
+<<<<<<< HEAD
             memory_leak = (
                 available_size + evictable_size + protected_size
             ) != self.max_total_num_tokens
+=======
+            memory_leak = (available_size + evictable_size) != self.max_total_num_tokens
+>>>>>>> main
             token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
 
         if memory_leak:
@@ -2813,11 +2874,14 @@ class Scheduler(
         if self.grammar_queue:
             self.move_ready_grammar_requests()
 
+<<<<<<< HEAD
         # `batch_is_full` is a soft throttle flag. If nothing is running, clear it so
         # prefill admission can resume and we don't get stuck in a full-but-idle state.
         if self.running_batch.is_empty() and self.running_batch.batch_is_full:
             self.running_batch.batch_is_full = False
 
+=======
+>>>>>>> main
         # Handle the cases where prefill is not allowed
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
@@ -2867,10 +2931,13 @@ class Scheduler(
 
         # Get requests from the waiting queue to a new prefill batch
         for req in self.waiting_queue:
+<<<<<<< HEAD
             if len(adder.can_run_list) >= req_slots_budget:
                 self.running_batch.batch_is_full = True
                 break
 
+=======
+>>>>>>> main
             if running_bs + len(adder.can_run_list) >= self.max_running_requests:
                 self.running_batch.batch_is_full = True
                 break
@@ -2898,6 +2965,7 @@ class Scheduler(
         if len(can_run_list) == 0:
             return None
 
+<<<<<<< HEAD
         admit_ts = time.perf_counter()
         for req in can_run_list:
             if req.queue_time_start is None:
@@ -2905,6 +2973,16 @@ class Scheduler(
             req.queue_time_end = admit_ts
             req.queue_wait_time_s += max(0.0, req.queue_time_end - req.queue_time_start)
             req.queue_time_start = None
+=======
+        self.waiting_queue = [x for x in self.waiting_queue if x not in set(can_run_list)]
+
+        if adder.new_chunked_req is not None:
+            assert self.chunked_req is None
+            self.chunked_req = adder.new_chunked_req
+
+        if self.chunked_req:
+            self.chunked_req.is_chunked += 1
+>>>>>>> main
 
         self.log_prefill_stats(adder, can_run_list, running_bs)
 
@@ -2924,6 +3002,7 @@ class Scheduler(
 
         new_batch.prepare_for_extend()
 
+<<<<<<< HEAD
         # Update waiting queue and chunked request state only after we
         # successfully allocate req slots in prepare_for_extend().
         self.waiting_queue = [x for x in self.waiting_queue if x not in set(can_run_list)]
@@ -2935,6 +3014,8 @@ class Scheduler(
         if self.chunked_req:
             self.chunked_req.is_chunked += 1
 
+=======
+>>>>>>> main
         # Mixed-style chunked prefill
         if (
             self.is_mixed_chunk
@@ -3014,8 +3095,11 @@ class Scheduler(
 
         # Run forward
         assert self.is_generation
+<<<<<<< HEAD
         batch_wall_start = time.perf_counter()
         forward_start = time.perf_counter()
+=======
+>>>>>>> main
         (
             precompile_token_paddings,
             precompile_bs_paddings,
@@ -3071,8 +3155,11 @@ class Scheduler(
             next_token_ids = batch_output.next_token_ids
             logits_output = batch_output.logits_output
             cache_miss_count = batch_output.cache_miss_count
+<<<<<<< HEAD
         forward_end = time.perf_counter()
         batch_wall_end = time.perf_counter()
+=======
+>>>>>>> main
         bid = model_worker_batch.bid
         batch.output_ids = next_token_ids
 
@@ -3187,7 +3274,15 @@ class Scheduler(
             # This only works for requests that have not started anything.
             # We still need to send something back to TokenizerManager to clean up the state.
             req = self.waiting_queue.pop(i)
+<<<<<<< HEAD
             self.send_to_tokenizer.send_pyobj(AbortReq(rid=req.rid))
+=======
+            abort_out = AbortReq(rid=req.rid)
+            if self._comm_backend is not None:
+                self._comm_backend.send_pyobj(abort_out)
+            else:
+                self.send_to_tokenizer.send_pyobj(abort_out)
+>>>>>>> main
             logger.debug("Abort queued request. rid=%s", req.rid)
 
         # Delete the requests in the grammar queue
@@ -3212,6 +3307,7 @@ class Scheduler(
                 logger.debug("Abort running request. rid=%s", req.rid)
                 req.to_finish = FINISH_ABORT()
 
+<<<<<<< HEAD
         # Abort method 4: Release cached nodes for prefill+extend
         self._release_scoring_cache_nodes(recv_req.rid, recv_req.abort_all)
 
@@ -3245,6 +3341,8 @@ class Scheduler(
             released_items=released,
         )
 
+=======
+>>>>>>> main
     def pause_generation(self, recv_req: PauseGenerationReqInput):
         self._engine_paused = True
 
@@ -3359,6 +3457,7 @@ def run_scheduler_loop_thread_after_create(
     server_args: ServerArgs,
     port_args: PortArgs,
 ):
+<<<<<<< HEAD
     def maybe_freeze_gc_after_warmup():
         if not getattr(server_args, "enable_gc_freeze", False):
             return
@@ -3397,11 +3496,16 @@ def run_scheduler_loop_thread_after_create(
         except Exception:
             logger.exception("Failed to apply gc.freeze after warmup/precompile.")
 
+=======
+>>>>>>> main
     current_process = psutil.Process()
     # Create a scheduler and run the event loop
     try:
         scheduler = Scheduler(server_args, port_args)
+<<<<<<< HEAD
         maybe_freeze_gc_after_warmup()
+=======
+>>>>>>> main
         scheduler_thread = threading.Thread(
             target=scheduler_loop_after_create,
             args=(server_args, scheduler),

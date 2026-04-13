@@ -21,7 +21,28 @@ name: PR Test
 #       - ".github/workflows/pr-test.yml"
 
 on:
+<<<<<<< HEAD
   workflow_dispatch:
+=======
+  push:
+    branches:
+      - main
+      - "epic/*"
+    paths:
+      - "python/**"
+      - "scripts/**"
+      - "test/**"
+      - ".github/workflows/pr-test.yml"
+  pull_request:
+    branches:
+      - main
+      - "epic/*"
+    paths:
+      - "python/**"
+      - "scripts/**"
+      - "test/**"
+      - ".github/workflows/pr-test.yml"
+>>>>>>> main
 
 concurrency:
   group: pr-test-${{ github.ref }}
@@ -88,6 +109,10 @@ jobs:
           source .venv/bin/activate
           pip install uv
           uv pip install -e "python[all]"
+<<<<<<< HEAD
+=======
+          uv pip install "tops @ git+https://github.com/primatrix/pallas-kernel.git@41431b1c4c5e60f12c7f66e84b09a2585e3b9596"  # release/v0.4
+>>>>>>> main
           python test/srt/run_suite.py --suite unit-test-tpu-v6e-1 --auto-partition-id ${{ matrix.part }} --auto-partition-size 2
 
   unit-test-4-tpu:
@@ -110,6 +135,10 @@ jobs:
           source .venv/bin/activate
           pip install uv
           uv pip install -e "python[all]"
+<<<<<<< HEAD
+=======
+          uv pip install "tops @ git+https://github.com/primatrix/pallas-kernel.git@41431b1c4c5e60f12c7f66e84b09a2585e3b9596"  # release/v0.4
+>>>>>>> main
           bash scripts/killall_sglang.sh
           python test/srt/run_suite.py --suite unit-test-tpu-v6e-4 --auto-partition-id ${{ matrix.part }} --auto-partition-size 2
 

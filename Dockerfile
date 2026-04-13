@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 FROM python:3.12
+=======
+FROM python:3.12-slim
+>>>>>>> main
 
 WORKDIR /app
 
@@ -6,13 +10,18 @@ WORKDIR /app
 COPY . .
 
 # Install the sglang-jax package with TPU support
+<<<<<<< HEAD
 RUN cd python && pip install -e .[tpu]
+=======
+RUN cd python && pip install -e .[tpu] --no-cache-dir
+>>>>>>> main
 
 # Set environment variable for JAX compilation cache
 ENV JAX_COMPILATION_CACHE_DIR=/tmp/jit_cache
 
 # Create directories that may need to be mounted from host
 RUN mkdir -p /tmp/jit_cache /tmp/models
+<<<<<<< HEAD
 
 # Set entrypoint to launch server with default TPU arguments
 # Note: TPU devices are automatically detected by JAX when running on TPU VM
@@ -28,3 +37,5 @@ RUN mkdir -p /tmp/jit_cache /tmp/models
 #                   and necessary system permissions for TPU operations
 #   - --network=host: Enables gRPC network communication between JAX and TPU Runtime
 ENTRYPOINT ["python", "-u", "-m", "sgl_jax.launch_server", "--host", "0.0.0.0", "--port", "30000", "--dist-init-addr=0.0.0.0:10011", "--nnodes=1", "--tp-size=4", "--node-rank=0", "--mem-fraction-static=0.8", "--max-prefill-tokens=8192", "--download-dir=/tmp", "--dtype=bfloat16", "--skip-server-warmup", "--enable-single-process", "--grammar-backend=none"]
+=======
+>>>>>>> main

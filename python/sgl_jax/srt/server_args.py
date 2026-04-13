@@ -76,6 +76,11 @@ class ServerArgs:
     device_indexes: list[int] | None = None
     tp_size: int = 1
     ep_size: int = 1
+<<<<<<< HEAD
+=======
+    ep_num_redundant_experts: int = 0
+    ep_dispatch_algorithm: str | None = None
+>>>>>>> main
     stream_interval: int = 1
     stream_output: bool = False
     random_seed: int | None = None
@@ -124,10 +129,14 @@ class ServerArgs:
     disable_radix_cache: bool = False
     allow_auto_truncate: bool = False
     enable_tokenizer_batch_encode: bool = False
+<<<<<<< HEAD
     enable_tokenizer_batch_send: bool = False
     disable_overlap_schedule: bool = False
     enable_gc_freeze: bool = False
     gc_freeze_rollback: bool = False
+=======
+    disable_overlap_schedule: bool = False
+>>>>>>> main
     enable_precision_tracer: bool = False
 
     # Kernel backend
@@ -161,6 +170,7 @@ class ServerArgs:
     # For sampling
     use_sort_for_toppk_minp: bool = False
 
+<<<<<<< HEAD
     # Scoring configuration
     # Maximum number of items allowed in a single multi-item scoring request.
     max_multi_item_count: int = 512
@@ -180,6 +190,8 @@ class ServerArgs:
     # Allow radix cache specifically for scoring requests.
     enable_scoring_cache: bool = False
 
+=======
+>>>>>>> main
     # LoRA
     enable_lora: bool | None = None
     max_lora_rank: int | None = None
@@ -198,6 +210,16 @@ class ServerArgs:
     multimodal: bool = False
 
     enable_return_routed_experts: bool = False
+<<<<<<< HEAD
+=======
+    enable_expert_balance_debug: bool = False
+    expert_balance_segment_counter: int = 100
+    expert_balance_output_file: str | None = None
+    init_expert_location: str = "trivial"
+    enable_expert_distribution_recorder: bool = False
+    expert_distribution_recorder_buffer_size: int = 100
+    expert_distribution_recorder_output_file: str | None = None
+>>>>>>> main
 
     def __post_init__(self):
         # Set missing default values
@@ -277,6 +299,23 @@ class ServerArgs:
         if self.multimodal:
             self.model_path = download_from_hf(self.model_path, allow_patterns=None)
 
+<<<<<<< HEAD
+=======
+        if self.ep_num_redundant_experts < 0:
+            raise ValueError("ep_num_redundant_experts must be non-negative")
+
+        if self.enable_expert_balance_debug and self.expert_balance_segment_counter <= 0:
+            raise ValueError("expert_balance_segment_counter must be positive")
+
+        if self.enable_expert_balance_debug and not self.expert_balance_output_file:
+            import datetime
+
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.expert_balance_output_file = os.path.join(
+                "debug_outputs", f"expert_balance_{timestamp}_{os.getpid()}.csv"
+            )
+
+>>>>>>> main
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
         # Model and tokenizer
@@ -590,6 +629,23 @@ class ServerArgs:
             help="The expert parallelism size",
         )
         parser.add_argument(
+<<<<<<< HEAD
+=======
+            "--ep-num-redundant-experts",
+            type=int,
+            default=ServerArgs.ep_num_redundant_experts,
+            help="Number of redundant experts for EP load balancing. "
+            "Total physical experts = num_logical + this value.",
+        )
+        parser.add_argument(
+            "--ep-dispatch-algorithm",
+            type=str,
+            choices=["static", "dynamic", "fake"],
+            default=ServerArgs.ep_dispatch_algorithm,
+            help="Expert parallel dispatch algorithm.",
+        )
+        parser.add_argument(
+>>>>>>> main
             "--stream-interval",
             type=int,
             default=ServerArgs.stream_interval,
@@ -820,6 +876,7 @@ class ServerArgs:
             action="store_true",
             help="Enable batch tokenization for improved performance when processing multiple text inputs. Do not use with image inputs, pre-tokenized input_ids, or input_embeds.",
         )
+<<<<<<< HEAD
         parser.add_argument(
             "--enable-tokenizer-batch-send",
             action="store_true",
@@ -848,6 +905,54 @@ class ServerArgs:
         )
 
         parser.add_argument(
+=======
+        parser.add_argument(
+            "--enable-precision-tracer",
+            action="store_true",
+            help="Enable precision tracer for debugging tensor values. May have performance impact.",
+        )
+        parser.add_argument(
+            "--enable-expert-balance-debug",
+            action="store_true",
+            help="Enable expert balance debug stats output (segment-based).",
+        )
+        parser.add_argument(
+            "--expert-balance-segment-counter",
+            type=int,
+            default=ServerArgs.expert_balance_segment_counter,
+            help="Segment size for expert balance stats (tokens or decode steps).",
+        )
+        parser.add_argument(
+            "--expert-balance-output-file",
+            type=str,
+            default=ServerArgs.expert_balance_output_file,
+            help="CSV output file path for expert balance stats.",
+        )
+        parser.add_argument(
+            "--init-expert-location",
+            type=str,
+            default=ServerArgs.init_expert_location,
+            help="Initial expert location mapping ('trivial' or file path).",
+        )
+        parser.add_argument(
+            "--enable-expert-distribution-recorder",
+            action="store_true",
+            help="Enable expert distribution recorder for EPLB.",
+        )
+        parser.add_argument(
+            "--expert-distribution-recorder-buffer-size",
+            type=int,
+            default=ServerArgs.expert_distribution_recorder_buffer_size,
+            help="Number of steps to buffer before dumping expert distribution.",
+        )
+        parser.add_argument(
+            "--expert-distribution-recorder-output-file",
+            type=str,
+            help="Output file path for expert distribution recorder (.npy).",
+        )
+
+        parser.add_argument(
+>>>>>>> main
             "--max-seq-len",
             type=int,
             default=ServerArgs.max_seq_len,
@@ -970,6 +1075,7 @@ class ServerArgs:
         )
 
         parser.add_argument(
+<<<<<<< HEAD
             "--max-multi-item-count",
             type=int,
             default=ServerArgs.max_multi_item_count,
@@ -1028,6 +1134,8 @@ class ServerArgs:
         )
 
         parser.add_argument(
+=======
+>>>>>>> main
             "--multimodal",
             action="store_true",
             help="Enable multimodal HTTP server.",
@@ -1155,6 +1263,7 @@ class ServerArgs:
 
     def check_server_args(self):
         assert (self.tp_size) % self.nnodes == 0, "tp_size must be divisible by number of nodes"
+<<<<<<< HEAD
 
         # Check chunked prefill
         # Skip validation if chunked prefill is disabled (i.e., size <= 0).
@@ -1212,6 +1321,38 @@ class ServerArgs:
         if not self.enable_lora and not self.enable_static_lora:
             return
 
+=======
+
+        # Check chunked prefill
+        # Skip validation if chunked prefill is disabled (i.e., size <= 0).
+        if self.chunked_prefill_size > 0:
+            assert (
+                self.chunked_prefill_size % self.page_size == 0
+            ), "chunked_prefill_size must be divisible by page_size"
+
+        # Check LoRA configuration
+        self.check_lora_server_args()
+
+        # Disallow overlap scheduler when speculative decoding is enabled
+        if self.speculative_algorithm is not None and not self.disable_overlap_schedule:
+            raise ValueError(
+                "Speculative decoding does not support overlap scheduler. "
+                "Please pass --disable-overlap-schedule when using --speculative-algorithm."
+            )
+
+    def check_lora_server_args(self):
+        """Validate and normalize LoRA-related server arguments."""
+        # Import LoRARef here to avoid circular imports
+        from sgl_jax.srt.lora.lora_registry import LoRARef
+
+        if self.lora_paths:
+            self.enable_lora = True
+            logger.info("Auto-enabling LoRA because lora_paths are provided")
+
+        if not self.enable_lora and not self.enable_static_lora:
+            return
+
+>>>>>>> main
         assert not (
             self.enable_lora and self.enable_static_lora
         ), f"{self.enable_lora} and {self.enable_static_lora} can not be enable at the same time"
