@@ -22,7 +22,6 @@ import math
 import os
 import unittest
 
-import jax
 import pytest
 
 from sgl_jax.srt.entrypoints.engine import Engine
@@ -39,14 +38,6 @@ class ScoreTestConfig:
         self.dtype = "bfloat16"
         self.tolerance = 0.01
         self.precompile_bs_paddings = [8]
-
-
-def skip_if_no_tpu():
-    devices = jax.devices()
-    if not devices or devices[0].platform != "tpu":
-        raise unittest.SkipTest("Test requires TPU runner")
-
-
 def assert_scores_shape(scores, expected_items, expected_labels, test_case=None):
     tc = test_case or unittest.TestCase()
     tc.maxDiff = None
@@ -113,8 +104,6 @@ class TestScoreAPICore(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         """Initialize engine for all tests in this class."""
-        skip_if_no_tpu()
-
         cls.model_path = get_test_model()
         cls.config = ScoreTestConfig()
 
@@ -124,6 +113,7 @@ class TestScoreAPICore(CustomTestCase):
             trust_remote_code=True,
             tp_size=cls.config.tp_size,
             device=cls.config.device,
+            enable_single_process=True,
             random_seed=3,
             node_rank=0,
             mem_fraction_static=0.7,
@@ -667,8 +657,6 @@ class TestScoreAPIHFReference(CustomTestCase):
         if os.getenv("SGLANG_JAX_RUN_HF_REFERENCE") != "1":
             raise unittest.SkipTest("Set SGLANG_JAX_RUN_HF_REFERENCE=1 to run HF reference tests")
 
-        skip_if_no_tpu()
-
         cls.model_path = get_test_model()
         cls.config = ScoreTestConfig()
 
@@ -677,6 +665,7 @@ class TestScoreAPIHFReference(CustomTestCase):
             trust_remote_code=True,
             tp_size=cls.config.tp_size,
             device=cls.config.device,
+            enable_single_process=True,
             random_seed=3,
             node_rank=0,
             mem_fraction_static=0.7,

@@ -75,6 +75,7 @@ from unittest.mock import patch
 
 import jax
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.utils import is_torch_available
 
 from sgl_jax.srt.entrypoints.engine import Engine
 from sgl_jax.test.test_utils import DEFAULT_SMALL_MODEL_NAME_FOR_TEST, CustomTestCase
@@ -115,16 +116,13 @@ class TestScoreAPI(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         """Set up the test class with a shared engine instance."""
-        devices = jax.devices()
-        if not devices or devices[0].platform != "tpu":
-            raise unittest.SkipTest("Test requires TPU runner")
-
         cls.model_path = TEST_MODEL_NAME
         cls.engine = Engine(
             model_path=cls.model_path,
             trust_remote_code=True,
             tp_size=1,
             device="tpu",
+            enable_single_process=True,
             random_seed=3,
             node_rank=0,
             mem_fraction_static=0.7,
@@ -336,6 +334,9 @@ class TestScoreAPI(CustomTestCase):
                 msg=f"SGLang scores don't sum to 1 ({case_name}): {sum(sglang_score_list):.6f}",
             )
 
+    @unittest.skipUnless(
+        is_torch_available(), "Test requires PyTorch for HuggingFace reference scoring"
+    )
     def test_score_consistency(self):
         """Test that SGLang scoring matches direct HuggingFace model scoring.
 
