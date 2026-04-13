@@ -115,6 +115,10 @@ class TestScoreAPI(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         """Set up the test class with a shared engine instance."""
+        devices = jax.devices()
+        if not devices or devices[0].platform != "tpu":
+            raise unittest.SkipTest("Test requires TPU runner")
+
         cls.model_path = TEST_MODEL_NAME
         cls.engine = Engine(
             model_path=cls.model_path,

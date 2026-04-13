@@ -22,6 +22,7 @@ import math
 import os
 import unittest
 
+import jax
 import pytest
 
 from sgl_jax.srt.entrypoints.engine import Engine
@@ -41,9 +42,9 @@ class ScoreTestConfig:
 
 
 def skip_if_no_tpu():
-    # Do not initialize JAX in the main process to avoid OOM
-    # We assume the test runner is scheduled on a TPU node
-    pass
+    devices = jax.devices()
+    if not devices or devices[0].platform != "tpu":
+        raise unittest.SkipTest("Test requires TPU runner")
 
 
 def assert_scores_shape(scores, expected_items, expected_labels, test_case=None):
