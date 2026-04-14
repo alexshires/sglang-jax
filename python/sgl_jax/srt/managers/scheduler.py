@@ -479,8 +479,9 @@ class Scheduler(
         }
 
         # Telemetry for scoring cache
-        self.scoring_cache_lookups = 0
-        self.scoring_cache_hits = 0
+        self.scoring_cache_lookup_queries = 0
+        self.scoring_cache_lookup_hits = 0
+        self.scoring_cache_lookup_misses = 0
         self.scoring_cache_handles_created = 0
         self.scoring_cache_handles_released = {}
 
