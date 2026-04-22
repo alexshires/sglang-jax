@@ -113,8 +113,9 @@ class TestScoreAPIBench(unittest.TestCase):
         cmd = ["python3", "-m", "sgl_jax.launch_server"] + flags
         logging.info(f"Launching server with command: {' '.join(cmd)}")
 
+        cls.server_log_file = open("/tmp/server_auto.log", "w")
         cls.server_proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            cmd, stdout=cls.server_log_file, stderr=subprocess.STDOUT, text=True
         )
 
         # Wait for server to be ready
@@ -140,6 +141,8 @@ class TestScoreAPIBench(unittest.TestCase):
             logging.info("Shutting down server...")
             cls.server_proc.terminate()
             cls.server_proc.wait()
+            if hasattr(cls, "server_log_file"):
+                cls.server_log_file.close()
 
     def _run_http_bench(
         self,
