@@ -129,7 +129,6 @@ class TestScoreAPIBench(unittest.TestCase):
                     logging.info("Server is ready!")
                     logging.info("Waiting 15 seconds for warmup to drain...")
                     time.sleep(15)
-                    
                     # Warmup with 3 scoring requests
                     logging.info("Sending 3 scoring warmup requests...")
                     warmup_payload = {
@@ -149,7 +148,6 @@ class TestScoreAPIBench(unittest.TestCase):
                             logging.info(f"Warmup request {i+1} status: {resp.status_code}")
                         except Exception as e:
                             logging.warning(f"Warmup request {i+1} failed: {e}")
-                    
                     break
             except requests.exceptions.ConnectionError:
                 pass
