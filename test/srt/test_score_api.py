@@ -72,10 +72,15 @@ Debugging Failed Tests:
 import os
 
 os.environ["JAX_PLATFORMS"] = "cpu"
+import jax
+
+# Force JAX to initialize CPU backend
+jax.devices("cpu")
+# Restore for ServerArgs check
+os.environ["JAX_PLATFORMS"] = "tpu"
 import unittest
 from unittest.mock import patch
 
-import jax
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from sgl_jax.srt.entrypoints.engine import Engine
