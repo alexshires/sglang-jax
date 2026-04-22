@@ -196,33 +196,32 @@ class TestScoreAPI(CustomTestCase):
         Raises:
             May raise HuggingFace model loading errors if model not accessible.
         """
-        # Initialize HF model and tokenizer
+        # Initialize HF model and tokenizer using Flax
+        import jax
+        from transformers import FlaxAutoModelForCausalLM
+
         tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_NAME, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(TEST_MODEL_NAME, trust_remote_code=True)
-        model.eval()  # Set to evaluation mode
+        model = FlaxAutoModelForCausalLM.from_pretrained(TEST_MODEL_NAME, trust_remote_code=True)
 
         try:
             scores = []
             for item in items:
                 # Construct full text based on item_first parameter
                 full_text = f"{item}{query}" if item_first else f"{query}{item}"
-                inputs = tokenizer(full_text, return_tensors="pt")
+                inputs = tokenizer(full_text, return_tensors="np")
 
                 # Get logits for the last token
-                import torch
-
-                with torch.no_grad():
-                    outputs = model(**inputs)
-                    last_token_logits = outputs.logits[0, -1]
+                outputs = model(**inputs)
+                last_token_logits = outputs.logits[0, -1]
 
                 # Get logits for just our target tokens
                 target_logits = last_token_logits[label_token_ids]
 
-                # Apply softmax over just the target tokens
-                target_probs = torch.softmax(target_logits, dim=-1)
+                # Apply softmax over just the target tokens using JAX
+                target_probs = jax.nn.softmax(target_logits, axis=-1)
 
                 # Convert to list of probabilities in order of label_token_ids
-                probs = [target_probs[i].item() for i in range(len(label_token_ids))]
+                probs = [float(target_probs[i]) for i in range(len(label_token_ids))]
 
                 scores.append(probs)
 
