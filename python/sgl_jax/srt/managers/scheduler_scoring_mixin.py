@@ -4,6 +4,7 @@ import os
 import time
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import psutil
 
@@ -122,38 +123,31 @@ class SchedulerScoringMixin:
             batch.bid = acc_global_bid()
             result = self.run_batch(batch)
 
-            if result.logits_output is None:
-                raise RuntimeError("Missing logits output from score-from-cache v2 chunk.")
+            from jax.sharding import NamedSharding
+            from jax.sharding import PartitionSpec as P
 
-            logprob_vals = result.logits_output.next_token_token_ids_logprobs_val
-            logprob_idxs = result.logits_output.next_token_token_ids_logprobs_idx
-            if logprob_vals is None or logprob_idxs is None:
-                raise RuntimeError(
-                    "Missing token_ids_logprobs tensors from score-from-cache v2 chunk."
-                )
-            logprob_vals = np.asarray(jax.device_get(logprob_vals), dtype=np.float64)
-            logprob_idxs = np.asarray(jax.device_get(logprob_idxs), dtype=np.int32)
-            if logprob_vals.ndim != 2 or logprob_idxs.shape != logprob_vals.shape:
-                raise RuntimeError(
-                    f"Unexpected token_ids_logprobs shape: vals={logprob_vals.shape}, idxs={logprob_idxs.shape}."
-                )
+            from sgl_jax.srt.managers.scoring_utils import _compute_label_only_logprobs
+
+            next_token_logits = result.logits_output.next_token_logits[: len(reqs), :]
+            label_token_ids_arr = jnp.asarray(label_token_ids, dtype=jnp.int32)
+            out_sharding = NamedSharding(self.mesh, P(None, None))
+
+            row_logprobs_dev = _compute_label_only_logprobs(
+                next_token_logits, label_token_ids_arr, out_sharding
+            )
+
+            logprob_vals = np.asarray(jax.device_get(row_logprobs_dev), dtype=np.float64)
+
             if logprob_vals.shape[0] != len(reqs):
                 raise RuntimeError(
                     f"Chunk output rows ({logprob_vals.shape[0]}) != request count ({len(reqs)})."
                 )
 
             scores: list[list[float]] = []
-            for row_vals, row_idxs in zip(logprob_vals, logprob_idxs):
-                row_logprobs: list[float] = []
-                for token_id in label_token_ids:
-                    match = np.where(row_idxs == token_id)[0]
-                    if len(match) == 0:
-                        row_logprobs.append(float("-inf"))
-                    else:
-                        row_logprobs.append(float(row_vals[int(match[0])]))
+            for row in logprob_vals:
                 scores.append(
                     self._score_from_cache_v2_probs_from_logprobs(
-                        row_logprobs=row_logprobs,
+                        row_logprobs=row.tolist(),
                         apply_softmax=apply_softmax,
                     )
                 )

@@ -1,9 +1,12 @@
 import os
+
 import psutil
+
 
 def print_mem(label):
     process = psutil.Process(os.getpid())
     print(f"MEM {label}: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+
 
 print_mem("At VERY file top")
 
@@ -110,6 +113,7 @@ print_mem("After unittest import")
 from unittest.mock import patch
 
 import pytest
+
 print_mem("After patch import")
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -197,7 +201,7 @@ class TestScoreAPI(CustomTestCase):
             node_rank=0,
             mem_fraction_static=0.5,
             chunked_prefill_size=1024,
-            download_dir="/dev/shm",
+            download_dir="/app/tmp",
             dtype="bfloat16",
             precompile_bs_paddings=[16],
             max_running_requests=16,
