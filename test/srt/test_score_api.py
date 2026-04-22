@@ -1,3 +1,12 @@
+import os
+import psutil
+
+def print_mem(label):
+    process = psutil.Process(os.getpid())
+    print(f"MEM {label}: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+
+print_mem("At VERY file top")
+
 """
 Test the scoring API functionality (/v1/score).
 
@@ -71,21 +80,48 @@ Debugging Failed Tests:
 
 import os
 
+import psutil
+
+
+def print_mem(label):
+    process = psutil.Process(os.getpid())
+    print(f"MEM {label}: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+
+
+print_mem("At file top")
+
 os.environ["JAX_PLATFORMS"] = "cpu"
+print_mem("After setting JAX_PLATFORMS=cpu")
 import jax
+
+print_mem("After jax import")
 
 # Force JAX to initialize CPU backend
 jax.devices("cpu")
+print_mem("After jax.devices(cpu)")
+
 # Restore for ServerArgs check
 os.environ["JAX_PLATFORMS"] = "tpu"
+print_mem("After restoring JAX_PLATFORMS=tpu")
+
 import unittest
+
+print_mem("After unittest import")
 from unittest.mock import patch
 
 import pytest
+print_mem("After patch import")
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+print_mem("After transformers import")
+
 from sgl_jax.srt.entrypoints.engine import Engine
+
+print_mem("After Engine import")
+
 from sgl_jax.test.test_utils import DEFAULT_SMALL_MODEL_NAME_FOR_TEST, CustomTestCase
+
+print_mem("After test_utils import")
 
 # Use smaller model for faster tests
 TEST_MODEL_NAME = os.getenv("SGLANG_TEST_MODEL", DEFAULT_SMALL_MODEL_NAME_FOR_TEST)
@@ -150,6 +186,7 @@ class TestScoreAPI(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         """Set up the test class with a shared engine instance."""
+        print_mem("Before Engine init")
         cls.model_path = TEST_MODEL_NAME
         cls.engine = Engine(
             model_path=cls.model_path,
@@ -158,7 +195,7 @@ class TestScoreAPI(CustomTestCase):
             device="tpu",
             random_seed=3,
             node_rank=0,
-            mem_fraction_static=0.7,
+            mem_fraction_static=0.5,
             chunked_prefill_size=1024,
             download_dir="/dev/shm",
             dtype="bfloat16",
@@ -171,6 +208,7 @@ class TestScoreAPI(CustomTestCase):
             log_requests=False,
             enable_deterministic_sampling=True,
         )
+        print_mem("After Engine init")
         cls.tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_NAME, trust_remote_code=True)
 
     @classmethod
