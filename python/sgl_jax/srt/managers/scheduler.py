@@ -3,6 +3,7 @@
 import concurrent.futures as futures
 import dataclasses
 import faulthandler
+import gc
 import logging
 import os
 import pickle
@@ -20,6 +21,8 @@ import pathwaysutils
 import psutil
 import setproctitle
 import zmq
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from sgl_jax.global_config import global_config
 from sgl_jax.srt.configs.model_config import ModelConfig
@@ -39,6 +42,10 @@ from sgl_jax.srt.managers.io_struct import (
     GetInternalStateReqOutput,
     PauseGenerationReqInput,
     ProfileReq,
+    ReleaseScoringCacheReqInput,
+    ReleaseScoringCacheReqOutput,
+    ScoreFromCacheReqInput,
+    ScoreFromCacheReqOutput,
     SetInternalStateReq,
     SetInternalStateReqOutput,
     TokenizedGenerateReqInput,
@@ -60,6 +67,7 @@ from sgl_jax.srt.managers.scheduler_output_processor_mixin import (
     SchedulerOutputProcessorMixin,
 )
 from sgl_jax.srt.managers.scheduler_profiler_mixing import SchedulerProfilerMixin
+from sgl_jax.srt.managers.scheduler_scoring_mixin import SchedulerScoringMixin
 from sgl_jax.srt.managers.tp_worker import ModelWorker
 from sgl_jax.srt.managers.tp_worker_overlap_thread import ModelWorkerClient
 from sgl_jax.srt.managers.utils import validate_input_length
@@ -119,10 +127,38 @@ class GenerationBatchResult:
     accept_lens: np.ndarray | None = None
 
 
+def _compute_label_only_logprobs(next_token_logits, label_token_ids_arr, out_sharding):
+    """TPU-optimized label-only logprob computation.
+
+    Math: logprob[label] = logit[label] - logsumexp(logits)
+    """
+    import jax.nn as jnn
+
+    # next_token_logits: [bs, vocab]
+    # label_token_ids_arr: [num_labels]
+    # 1. Get logits for our labels
+    # row_logits: [bs, num_labels]
+    label_logits = next_token_logits[:, label_token_ids_arr]
+
+    # 2. Get normalizer (logsumexp across entire vocab)
+    # normalizer: [bs, 1]
+    normalizer = jnn.logsumexp(next_token_logits, axis=-1, keepdims=True)
+
+    # 3. Compute logprobs
+    row_logprobs = label_logits - normalizer
+
+    # jax.device_put with sharding to keep it on TPU
+    return jax.lax.with_sharding_constraint(row_logprobs, out_sharding)
+
+
+SCORE_V2_ALLOW_REQPOOL_OVERSUBSCRIBE = False
+
+
 class Scheduler(
     SchedulerOutputProcessorMixin,
     SchedulerProfilerMixin,
     SchedulerMetricsMixin,
+    SchedulerScoringMixin,
 ):
     """
     A scheduler that manages a tensor parallel TPU worker, which managaes fixed multi TPU devices.
@@ -395,6 +431,8 @@ class Scheduler(
                 (SetInternalStateReq, self.set_internal_state),
                 (PauseGenerationReqInput, self.pause_generation),
                 (ContinueGenerationReqInput, self.continue_generation),
+                (ScoreFromCacheReqInput, self.score_from_cache_v2),
+                (ReleaseScoringCacheReqInput, self.release_scoring_cache),
             ]
         )
 
@@ -407,6 +445,62 @@ class Scheduler(
                 logger.info("[Scheduler] Begins to run spec_decode worker precompile.")
                 self.draft_worker.run_spec_decode_precompile()
                 logger.info("[Scheduler] Completes spec_decode worker precompile.")
+
+        self.executor = futures.ThreadPoolExecutor(max_workers=4)
+
+        # Prefill+extend scoring cache
+        self.scoring_cache_nodes: dict[str, tuple] = {}
+        self._last_scoring_cache_gc: float = 0.0
+        self.scoring_cache_timeout = float(
+            getattr(server_args, "multi_item_prefill_extend_cache_timeout", 60.0)
+        )
+
+        # Telemetry for ingress
+        self.ingress_recv_calls = 0
+        self.ingress_nonempty_calls = 0
+        self.ingress_max_batch_size = 0
+        self.ingress_tokenizer_frames = 0
+        self.ingress_rpc_frames = 0
+        self.ingress_tokenizer_messages = 0
+        self.ingress_rpc_messages = 0
+        self.ingress_batch_size_histogram = {
+            "eq_0": 0,
+            "eq_1": 0,
+            "2_to_4": 0,
+            "5_to_16": 0,
+            "gt_16": 0,
+        }
+        self.ingress_score_paths = {
+            "tokenizer_cache_for_scoring": 0,
+            "tokenizer_extend_from_cache": 0,
+            "rpc_score_from_cache_v2": 0,
+            "rpc_release_scoring_cache": 0,
+        }
+        self.ingress_score_path_frames = {
+            "tokenizer_cache_for_scoring": 0,
+            "tokenizer_extend_from_cache": 0,
+            "rpc_score_from_cache_v2": 0,
+            "rpc_release_scoring_cache": 0,
+        }
+
+        # Telemetry for scoring cache
+        self.scoring_cache_lookup_queries = 0
+        self.scoring_cache_lookup_hits = 0
+        self.scoring_cache_lookup_misses = 0
+        self.scoring_cache_handles_created = 0
+        self.scoring_cache_handles_released = {}
+
+        # Telemetry for score-from-cache v2
+        self.score_from_cache_v2_attempted = 0
+        self.score_from_cache_v2_succeeded = 0
+        self.score_from_cache_v2_fallback = 0
+        self.score_from_cache_v2_fallback_reasons = {}
+        self.score_from_cache_v2_queue_wait_s_total = 0.0
+        self.score_from_cache_v2_device_compute_s_total = 0.0
+        self.score_from_cache_v2_host_orchestration_s_total = 0.0
+        self.score_from_cache_v2_queue_wait_s_max = 0.0
+        self.score_from_cache_v2_device_compute_s_max = 0.0
+        self.score_from_cache_v2_host_orchestration_s_max = 0.0
 
     def sync_pub(self):
         logger.info(
@@ -485,19 +579,19 @@ class Scheduler(
         server_args = self.server_args
         self.req_to_token_pool, self.token_to_kv_pool_allocator = self.tp_worker.get_memory_pool()
 
-        if self.is_hybrid:
+        if server_args.chunked_prefill_size is not None and server_args.disable_radix_cache:
+            self.tree_cache = ChunkCache(
+                req_to_token_pool=self.req_to_token_pool,
+                token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                page_size=self.page_size,
+            )
+        elif self.is_hybrid:
             self.tree_cache = SWARadixCache(
                 req_to_token_pool=self.req_to_token_pool,
                 token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
                 sliding_window_size=self.sliding_window_size,
                 page_size=self.page_size,
                 disable=server_args.disable_radix_cache,
-            )
-        elif server_args.chunked_prefill_size is not None and server_args.disable_radix_cache:
-            self.tree_cache = ChunkCache(
-                req_to_token_pool=self.req_to_token_pool,
-                token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-                page_size=self.page_size,
             )
         else:
             self.tree_cache = RadixCache(
@@ -646,22 +740,97 @@ class Scheduler(
 
     def recv_requests(self) -> list[Req]:
         """Receive results at node_rank = 0 and broadcast it to all other Node ranks."""
+        self.ingress_recv_calls += 1
         if self.node_rank == 0:
             recv_reqs = []
+            tokenizer_frame_count = 0
+            rpc_frame_count = 0
+            tokenizer_req_count = 0
+            rpc_req_count = 0
 
             while True:
                 try:
-                    recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
+                    recv_obj = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
                 except zmq.ZMQError:
                     break
-                recv_reqs.append(recv_req)
+                tokenizer_frame_count += 1
+                unpacked_reqs = (
+                    list(recv_obj) if isinstance(recv_obj, (list, tuple)) else [recv_obj]
+                )
+                recv_reqs.extend(unpacked_reqs)
+                tokenizer_req_count += len(unpacked_reqs)
+                tokenizer_frame_paths = {
+                    "tokenizer_cache_for_scoring": False,
+                    "tokenizer_extend_from_cache": False,
+                    "rpc_score_from_cache_v2": False,
+                    "rpc_release_scoring_cache": False,
+                }
+                for recv_req in unpacked_reqs:
+                    if isinstance(recv_req, TokenizedGenerateReqInput):
+                        if bool(getattr(recv_req, "cache_for_scoring", False)):
+                            self.ingress_score_paths["tokenizer_cache_for_scoring"] += 1
+                            tokenizer_frame_paths["tokenizer_cache_for_scoring"] = True
+                        if bool(getattr(recv_req, "extend_from_cache", None)):
+                            self.ingress_score_paths["tokenizer_extend_from_cache"] += 1
+                            tokenizer_frame_paths["tokenizer_extend_from_cache"] = True
+                    elif isinstance(recv_req, ScoreFromCacheReqInput):
+                        # Score fastpath requests are sent by tokenizer manager over the
+                        # tokenizer socket.
+                        self.ingress_score_paths["rpc_score_from_cache_v2"] += 1
+                        tokenizer_frame_paths["rpc_score_from_cache_v2"] = True
+                    elif isinstance(recv_req, ReleaseScoringCacheReqInput):
+                        # Cache release requests are also sent over the tokenizer socket.
+                        self.ingress_score_paths["rpc_release_scoring_cache"] += 1
+                        tokenizer_frame_paths["rpc_release_scoring_cache"] = True
+                for path, seen in tokenizer_frame_paths.items():
+                    if seen:
+                        self.ingress_score_path_frames[path] += 1
 
             while True:
                 try:
-                    recv_rpc = self.recv_from_rpc.recv_pyobj(zmq.NOBLOCK)
+                    recv_obj = self.recv_from_rpc.recv_pyobj(zmq.NOBLOCK)
                 except zmq.ZMQError:
                     break
-                recv_reqs.append(recv_rpc)
+                rpc_frame_count += 1
+                unpacked_reqs = (
+                    list(recv_obj) if isinstance(recv_obj, (list, tuple)) else [recv_obj]
+                )
+                recv_reqs.extend(unpacked_reqs)
+                rpc_req_count += len(unpacked_reqs)
+                rpc_frame_paths = {
+                    "rpc_score_from_cache_v2": False,
+                    "rpc_release_scoring_cache": False,
+                }
+                for recv_rpc in unpacked_reqs:
+                    if isinstance(recv_rpc, ScoreFromCacheReqInput):
+                        self.ingress_score_paths["rpc_score_from_cache_v2"] += 1
+                        rpc_frame_paths["rpc_score_from_cache_v2"] = True
+                    elif isinstance(recv_rpc, ReleaseScoringCacheReqInput):
+                        self.ingress_score_paths["rpc_release_scoring_cache"] += 1
+                        rpc_frame_paths["rpc_release_scoring_cache"] = True
+                for path, seen in rpc_frame_paths.items():
+                    if seen:
+                        self.ingress_score_path_frames[path] += 1
+
+            self.ingress_tokenizer_frames += tokenizer_frame_count
+            self.ingress_rpc_frames += rpc_frame_count
+            self.ingress_tokenizer_messages += tokenizer_req_count
+            self.ingress_rpc_messages += rpc_req_count
+            batch_size = tokenizer_req_count + rpc_req_count
+            if batch_size > 0:
+                self.ingress_nonempty_calls += 1
+                if batch_size > self.ingress_max_batch_size:
+                    self.ingress_max_batch_size = batch_size
+            if batch_size == 0:
+                self.ingress_batch_size_histogram["eq_0"] += 1
+            elif batch_size == 1:
+                self.ingress_batch_size_histogram["eq_1"] += 1
+            elif batch_size <= 4:
+                self.ingress_batch_size_histogram["2_to_4"] += 1
+            elif batch_size <= 16:
+                self.ingress_batch_size_histogram["5_to_16"] += 1
+            else:
+                self.ingress_batch_size_histogram["gt_16"] += 1
         else:
             recv_reqs = None
 
@@ -886,6 +1055,78 @@ class Scheduler(
         ret["forward_ct_decode"] = self.forward_ct_decode
         ret["new_token_ratio"] = self.new_token_ratio
         ret["init_new_token_ratio"] = self.init_new_token_ratio
+        score_from_cache_v2_attempted = self.score_from_cache_v2_attempted
+        score_timing_totals_s = {
+            "queue_wait": self.score_from_cache_v2_queue_wait_s_total,
+            "device_compute": self.score_from_cache_v2_device_compute_s_total,
+            "host_orchestration": self.score_from_cache_v2_host_orchestration_s_total,
+        }
+        score_timing_max_s = {
+            "queue_wait": self.score_from_cache_v2_queue_wait_s_max,
+            "device_compute": self.score_from_cache_v2_device_compute_s_max,
+            "host_orchestration": self.score_from_cache_v2_host_orchestration_s_max,
+        }
+        if score_from_cache_v2_attempted > 0:
+            score_timing_mean_s = {
+                "queue_wait": (
+                    self.score_from_cache_v2_queue_wait_s_total / score_from_cache_v2_attempted
+                ),
+                "device_compute": (
+                    self.score_from_cache_v2_device_compute_s_total / score_from_cache_v2_attempted
+                ),
+                "host_orchestration": (
+                    self.score_from_cache_v2_host_orchestration_s_total
+                    / score_from_cache_v2_attempted
+                ),
+            }
+        else:
+            score_timing_mean_s = {
+                "queue_wait": 0.0,
+                "device_compute": 0.0,
+                "host_orchestration": 0.0,
+            }
+
+        ret["score_from_cache_v2_metrics"] = {
+            "attempted": score_from_cache_v2_attempted,
+            "succeeded": self.score_from_cache_v2_succeeded,
+            "fallback": self.score_from_cache_v2_fallback,
+            "fallback_reasons": dict(self.score_from_cache_v2_fallback_reasons),
+            "timing_totals_s": score_timing_totals_s,
+            "timing_mean_s": score_timing_mean_s,
+            "timing_max_s": score_timing_max_s,
+        }
+        ret["scoring_cache_metrics"] = self._scoring_cache_metrics_snapshot()
+        score_path_messages = dict(self.ingress_score_paths)
+        score_path_frames = dict(self.ingress_score_path_frames)
+        score_path_messages_per_frame = {}
+        for path_name, path_message_count in score_path_messages.items():
+            path_frame_count = score_path_frames.get(path_name, 0)
+            score_path_messages_per_frame[path_name] = (
+                float(path_message_count / path_frame_count) if path_frame_count > 0 else 0.0
+            )
+        ret["ingress_metrics"] = {
+            "recv_calls": self.ingress_recv_calls,
+            "nonempty_calls": self.ingress_nonempty_calls,
+            "max_batch_size": self.ingress_max_batch_size,
+            "tokenizer_frames": self.ingress_tokenizer_frames,
+            "rpc_frames": self.ingress_rpc_frames,
+            "tokenizer_messages": self.ingress_tokenizer_messages,
+            "rpc_messages": self.ingress_rpc_messages,
+            "tokenizer_messages_per_frame": (
+                float(self.ingress_tokenizer_messages / self.ingress_tokenizer_frames)
+                if self.ingress_tokenizer_frames > 0
+                else 0.0
+            ),
+            "rpc_messages_per_frame": (
+                float(self.ingress_rpc_messages / self.ingress_rpc_frames)
+                if self.ingress_rpc_frames > 0
+                else 0.0
+            ),
+            "batch_size_histogram": dict(self.ingress_batch_size_histogram),
+            "score_path_messages": score_path_messages,
+            "score_path_frames": score_path_frames,
+            "score_path_messages_per_frame": score_path_messages_per_frame,
+        }
 
         return GetInternalStateReqOutput(internal_state=ret)
 
@@ -1040,8 +1281,8 @@ class Scheduler(
     def check_memory(self):
         if self.is_hybrid:
             (
-                _,
-                _,
+                full_num_used,
+                swa_num_used,
                 _,
                 _,
                 full_available_size,
@@ -1049,30 +1290,19 @@ class Scheduler(
                 swa_available_size,
                 swa_evictable_size,
             ) = self._get_swa_token_info()
-            # Invariant: available + evictable + protected == total
+            # Strict mode: require perfect accounting with no tolerance
             full_protected = self.tree_cache.full_protected_size()
             swa_protected = self.tree_cache.swa_protected_size()
-            full_total = full_available_size + full_evictable_size + full_protected
-            swa_total = swa_available_size + swa_evictable_size + swa_protected
-            full_leak = full_total != self.full_tokens_per_layer
-            swa_leak = swa_total != self.swa_tokens_per_layer
-            memory_leak = full_leak or swa_leak
+            memory_leak = full_num_used != 0 or swa_num_used != 0
             token_msg = (
-                f"[full] total={self.full_tokens_per_layer}, {full_available_size=}, "
-                f"{full_evictable_size=}, {full_protected=}\n"
-                f"[swa] total={self.swa_tokens_per_layer}, {swa_available_size=}, "
-                f"{swa_evictable_size=}, {swa_protected=}\n"
+                f"{self.full_tokens_per_layer=}, {full_available_size=}, {full_evictable_size=}, full_protected={full_protected} (used={full_num_used})\n"
+                f"{self.swa_tokens_per_layer=}, {swa_available_size=}, {swa_evictable_size=}, swa_protected={swa_protected} (used={swa_num_used})\n"
             )
         else:
             _, _, available_size, evictable_size = self._get_token_info()
             protected_size = self.tree_cache.protected_size()
-            memory_leak = (
-                available_size + evictable_size + protected_size
-            ) != self.max_total_num_tokens
-            token_msg = (
-                f"total={self.max_total_num_tokens}, {available_size=}, "
-                f"{evictable_size=}, {protected_size=}\n"
-            )
+            memory_leak = (available_size + evictable_size) != self.max_total_num_tokens
+            token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
 
         if memory_leak:
             msg = f"token_to_kv_pool_allocator memory leak detected! {token_msg}"
@@ -1168,6 +1398,11 @@ class Scheduler(
         if self.grammar_queue:
             self.move_ready_grammar_requests()
 
+        # `batch_is_full` is a soft throttle flag. If nothing is running, clear it so
+        # prefill admission can resume and we don't get stuck in a full-but-idle state.
+        if self.running_batch.is_empty() and self.running_batch.batch_is_full:
+            self.running_batch.batch_is_full = False
+
         # Handle the cases where prefill is not allowed
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
@@ -1177,6 +1412,16 @@ class Scheduler(
         running_bs = len(self.running_batch.reqs)
         if running_bs >= self.max_running_requests:
             self.running_batch.batch_is_full = True
+            return None
+
+        # ReqToTokenPool slots gate how many requests can enter EXTEND in this round.
+        # Under prefill+extend scoring, a single user request can fan out into many
+        # internal requests. If we ignore current slot pressure here, prepare_for_extend()
+        # can raise and kill the scheduler process.
+        req_slots_budget = self.req_to_token_pool.available_size()
+        if req_slots_budget <= 0:
+            self.running_batch.batch_is_full = True
+            logger.debug("Deferring prefill: no req slots available in ReqToTokenPool.")
             return None
 
         # Get priority queue
@@ -1207,6 +1452,10 @@ class Scheduler(
 
         # Get requests from the waiting queue to a new prefill batch
         for req in self.waiting_queue:
+            if len(adder.can_run_list) >= req_slots_budget:
+                self.running_batch.batch_is_full = True
+                break
+
             if running_bs + len(adder.can_run_list) >= self.max_running_requests:
                 self.running_batch.batch_is_full = True
                 break
@@ -1234,14 +1483,13 @@ class Scheduler(
         if len(can_run_list) == 0:
             return None
 
-        self.waiting_queue = [x for x in self.waiting_queue if x not in set(can_run_list)]
-
-        if adder.new_chunked_req is not None:
-            assert self.chunked_req is None
-            self.chunked_req = adder.new_chunked_req
-
-        if self.chunked_req:
-            self.chunked_req.is_chunked += 1
+        admit_ts = time.perf_counter()
+        for req in can_run_list:
+            if req.queue_time_start is None:
+                continue
+            req.queue_time_end = admit_ts
+            req.queue_wait_time_s += max(0.0, req.queue_time_end - req.queue_time_start)
+            req.queue_time_start = None
 
         self.log_prefill_stats(adder, can_run_list, running_bs)
 
@@ -1260,6 +1508,17 @@ class Scheduler(
         )
 
         new_batch.prepare_for_extend()
+
+        # Update waiting queue and chunked request state only after we
+        # successfully allocate req slots in prepare_for_extend().
+        self.waiting_queue = [x for x in self.waiting_queue if x not in set(can_run_list)]
+
+        if adder.new_chunked_req is not None and adder.new_chunked_req in set(can_run_list):
+            assert self.chunked_req is None
+            self.chunked_req = adder.new_chunked_req
+
+        if self.chunked_req:
+            self.chunked_req.is_chunked += 1
 
         # Mixed-style chunked prefill
         if (
@@ -1327,11 +1586,21 @@ class Scheduler(
         """Run a batch."""
         self.forward_ct += 1
 
+        if self.server_args.log_requests:
+            logger.debug(
+                "Run batch: mode=%s, bs=%d, return_logprob=%s",
+                batch.forward_mode,
+                batch.batch_size(),
+                batch.return_logprob,
+            )
+
         # Whether to run the profiler
         self._profile_batch_predicate(batch)
 
         # Run forward
         assert self.is_generation
+        batch_wall_start = time.perf_counter()
+        forward_start = time.perf_counter()
         (
             precompile_token_paddings,
             precompile_bs_paddings,
@@ -1387,8 +1656,17 @@ class Scheduler(
             next_token_ids = batch_output.next_token_ids
             logits_output = batch_output.logits_output
             cache_miss_count = batch_output.cache_miss_count
+        forward_end = time.perf_counter()
+        batch_wall_end = time.perf_counter()
         bid = model_worker_batch.bid
         batch.output_ids = next_token_ids
+
+        device_compute_s = max(0.0, forward_end - forward_start)
+        host_overhead_s = max(0.0, (batch_wall_end - batch_wall_start) - device_compute_s)
+        for req in batch.reqs:
+            req.device_compute_time_s += device_compute_s
+            req.host_overhead_time_s += host_overhead_s
+            req.scheduler_dispatch_count += 1
 
         # These 2 values are needed for processing the output, but the values can be
         # modified by overlap schedule. So we have to copy them here so that
@@ -1551,6 +1829,503 @@ class Scheduler(
         self._engine_paused = False
         logger.info("Generation continued")
 
+    def _unpack_scoring_cache_entry(self, entry):
+        # Backward-compatible unpack for entries created before `last_access_ts`
+        # was added.
+        if len(entry) == 6:
+            return entry
+        if len(entry) == 5:
+            node, swa_uuid, input_ids, prefix_indices, extra_key = entry
+            return node, swa_uuid, input_ids, prefix_indices, extra_key, 0.0
+        raise RuntimeError(f"Invalid scoring cache entry format (len={len(entry)}).")
+
+    def _record_scoring_cache_lookup(self, path: str, hit: bool) -> None:
+        self.scoring_cache_lookup_queries += 1
+        if hit:
+            self.scoring_cache_lookup_hits += 1
+        else:
+            self.scoring_cache_lookup_misses += 1
+
+        bucket = self.scoring_cache_lookup_by_path.setdefault(
+            path,
+            {"queries": 0, "hits": 0, "misses": 0},
+        )
+        bucket["queries"] += 1
+        if hit:
+            bucket["hits"] += 1
+        else:
+            bucket["misses"] += 1
+
+    def _record_scoring_cache_handle_created(self) -> None:
+        self.scoring_cache_handles_created += 1
+
+    def _record_scoring_cache_handle_released(self, reason: str) -> None:
+        self.scoring_cache_handles_released += 1
+        if reason == "manual":
+            self.scoring_cache_handles_released_manual += 1
+        elif reason == "expired":
+            self.scoring_cache_handles_released_expired += 1
+        else:
+            self.scoring_cache_handles_released_other += 1
+
+    def _release_scoring_cache_entry(self, rid: str, entry, reason: str) -> None:
+        node, swa_uuid, *_ = self._unpack_scoring_cache_entry(entry)
+        self._record_scoring_cache_handle_released(reason)
+        if node is None:
+            self.scoring_cache_handles_missing_node += 1
+            logger.warning("Scoring cache entry rid=%s has no radix node (%s).", rid, reason)
+            return
+        try:
+            if isinstance(self.tree_cache, SWARadixCache):
+                self.tree_cache.dec_lock_ref(node, swa_uuid)
+            else:
+                self.tree_cache.dec_lock_ref(node)
+        except Exception:
+            logger.exception(
+                "Failed to decrement scoring-cache lock ref for rid=%s (%s).",
+                rid,
+                reason,
+            )
+
+    def _touch_scoring_cache_entry(self, rid: str, now: float | None = None):
+        entry = self.scoring_cache_nodes.get(rid)
+        if entry is None:
+            return
+        node, swa_uuid, input_ids, prefix_indices, extra_key, _ = self._unpack_scoring_cache_entry(
+            entry
+        )
+        self.scoring_cache_nodes[rid] = (
+            node,
+            swa_uuid,
+            input_ids,
+            prefix_indices,
+            extra_key,
+            time.monotonic() if now is None else now,
+        )
+
+    def _evict_expired_scoring_cache_nodes(self, now: float | None = None) -> int:
+        timeout = self.scoring_cache_timeout
+        if timeout <= 0:
+            return 0
+
+        now_ts = time.monotonic() if now is None else now
+        # Throttle GC to avoid walking the dict too often.
+        if now is None and now_ts - self._last_scoring_cache_gc < 0.5:
+            return 0
+        self._last_scoring_cache_gc = now_ts
+
+        expired_rids: list[str] = []
+        for rid, entry in self.scoring_cache_nodes.items():
+            *_, last_access_ts = self._unpack_scoring_cache_entry(entry)
+            if now_ts - last_access_ts > timeout:
+                expired_rids.append(rid)
+
+        for rid in expired_rids:
+            entry = self.scoring_cache_nodes.pop(rid, None)
+            if entry is None:
+                continue
+            self._release_scoring_cache_entry(rid, entry, reason="expired")
+
+        if expired_rids:
+            logger.info("Evicted %d expired scoring cache handles.", len(expired_rids))
+        return len(expired_rids)
+
+    def _resolve_extend_from_cache(
+        self, recv_req: TokenizedGenerateReqInput
+    ) -> tuple[tuple | None, str | None]:
+        if not recv_req.extend_from_cache:
+            return None, None
+
+        self._evict_expired_scoring_cache_nodes()
+        entry = self.scoring_cache_nodes.get(recv_req.extend_from_cache)
+        if entry is None:
+            self._record_scoring_cache_lookup(path="extend", hit=False)
+            err = (
+                f"Missing scoring cache handle '{recv_req.extend_from_cache}'. "
+                "The cached prefix may have expired or been released."
+            )
+            logger.warning("Prefill+extend scheduler: %s", err)
+            return None, err
+        self._record_scoring_cache_lookup(path="extend", hit=True)
+
+        cached_last_node, _, prefix_ids, prefix_indices, cached_extra_key, _ = (
+            self._unpack_scoring_cache_entry(entry)
+        )
+        item_ids = recv_req.input_ids or []
+        recv_req.input_ids = prefix_ids + item_ids
+        cached_prefix_len = len(prefix_indices)
+        suffix_len = max(0, len(item_ids))
+        if recv_req.extra_key is None:
+            recv_req.extra_key = cached_extra_key
+        self._touch_scoring_cache_entry(recv_req.extend_from_cache)
+        logger.debug(
+            "Prefill+extend scheduler: extend request rid=%s handle=%s prefix_tokens=%d cached_prefix=%d item_tokens=%d merged_input_tokens=%d max_new_tokens=%s",
+            recv_req.rid,
+            recv_req.extend_from_cache,
+            len(prefix_ids),
+            cached_prefix_len,
+            suffix_len,
+            len(recv_req.input_ids),
+            recv_req.sampling_params.max_new_tokens,
+        )
+        return (cached_last_node, prefix_indices), None
+
+    def _record_score_from_cache_v2_fallback(self, reason: str):
+        self.score_from_cache_v2_fallback += 1
+        self.score_from_cache_v2_fallback_reasons[reason] = (
+            self.score_from_cache_v2_fallback_reasons.get(reason, 0) + 1
+        )
+
+    def _record_score_from_cache_v2_timing(
+        self,
+        queue_wait_s: float,
+        device_compute_s: float,
+        host_orchestration_s: float,
+    ) -> None:
+        queue_wait_s = max(0.0, float(queue_wait_s))
+        device_compute_s = max(0.0, float(device_compute_s))
+        host_orchestration_s = max(0.0, float(host_orchestration_s))
+        self.score_from_cache_v2_queue_wait_s_total += queue_wait_s
+        self.score_from_cache_v2_device_compute_s_total += device_compute_s
+        self.score_from_cache_v2_host_orchestration_s_total += host_orchestration_s
+        self.score_from_cache_v2_queue_wait_s_max = max(
+            self.score_from_cache_v2_queue_wait_s_max,
+            queue_wait_s,
+        )
+        self.score_from_cache_v2_device_compute_s_max = max(
+            self.score_from_cache_v2_device_compute_s_max,
+            device_compute_s,
+        )
+        self.score_from_cache_v2_host_orchestration_s_max = max(
+            self.score_from_cache_v2_host_orchestration_s_max,
+            host_orchestration_s,
+        )
+
+    def _score_from_cache_v2_fallback_output(
+        self,
+        recv_req: ScoreFromCacheReqInput,
+        reason: str,
+        error_msg: str = "",
+        dispatch_count: int = 0,
+        queue_wait_s: float = 0.0,
+        device_compute_s: float = 0.0,
+        host_orchestration_s: float = 0.0,
+    ) -> ScoreFromCacheReqOutput:
+        self._record_score_from_cache_v2_fallback(reason)
+        self._record_score_from_cache_v2_timing(
+            queue_wait_s=queue_wait_s,
+            device_compute_s=device_compute_s,
+            host_orchestration_s=host_orchestration_s,
+        )
+        return ScoreFromCacheReqOutput(
+            rid=recv_req.rid,
+            success=False,
+            scores=[],
+            fallback_reason=reason,
+            error_msg=error_msg,
+            dispatch_count=dispatch_count,
+            lifecycle_requests_sent=0,
+            lifecycle_results_received=0,
+            queue_wait_s=max(0.0, float(queue_wait_s)),
+            device_compute_s=device_compute_s,
+            host_orchestration_s=host_orchestration_s,
+        )
+
+    def _score_from_cache_v2_validate_items(
+        self, recv_req: ScoreFromCacheReqInput
+    ) -> tuple[bool, str, str]:
+        if not recv_req.cache_handle:
+            return False, "missing_cache_handle", "cache_handle must be non-empty."
+        if not isinstance(recv_req.items_2d, list):
+            return False, "unsupported_shape", "items_2d must be a list of token lists."
+        if not isinstance(recv_req.label_token_ids, list) or len(recv_req.label_token_ids) == 0:
+            return False, "unsupported_shape", "label_token_ids must be a non-empty list."
+        if any((not isinstance(token_id, int)) for token_id in recv_req.label_token_ids):
+            return False, "unsupported_shape", "label_token_ids must contain ints."
+        for token_id in recv_req.label_token_ids:
+            if token_id < 0 or token_id >= self.model_config.vocab_size:
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"label_token_ids must be in [0, {self.model_config.vocab_size - 1}].",
+                )
+        for idx, item in enumerate(recv_req.items_2d):
+            if not isinstance(item, list):
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"items_2d[{idx}] must be a list of token ids.",
+                )
+            if len(item) == 0:
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"items_2d[{idx}] must contain at least one token.",
+                )
+            if any((not isinstance(token_id, int)) for token_id in item):
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"items_2d[{idx}] must contain ints.",
+                )
+        return True, "", ""
+
+    # Removed for PR 1a (moved to Mixin)
+
+    @staticmethod
+    def _estimate_score_from_cache_v2_words(prefix_len: int, items: list[list[int]]) -> int:
+        # Conservative host-side int32-sized tensor estimate for this chunk.
+        total_item_tokens = sum(len(item) for item in items)
+        total_fill_tokens = sum(prefix_len + len(item) for item in items)
+        max_item_len = max((len(item) for item in items), default=0)
+        bs = len(items)
+        # Terms loosely track main arrays: flat input ids, seq/prefix/extend lengths,
+        # req_to_token writes, and token-id-logprob tensors.
+        return (
+            total_item_tokens
+            + total_fill_tokens
+            + (3 * bs)
+            + (bs * max_item_len)
+            + (bs * prefix_len)
+        )
+
+    def _dispatch_score_from_cache_v2_chunk_label_only(
+        self,
+        cache_handle,
+        chunk_items,
+        label_token_ids,
+        label_token_ids_arr,
+        cached_last_node,
+        cached_prefix_indices,
+        prefix_ids,
+        cached_extra_key,
+    ):
+        """Part 1: Prepares arrays and dispatches to TPU (Fast, Non-blocking)"""
+        reqs = self._build_score_from_cache_v2_chunk_reqs(...)  # Pass your args
+        chunk_wall_start = time.perf_counter()
+
+        batch = ScheduleBatch.init_new(...)  # Pass your args
+        batch.prepare_for_extend()
+        batch.bid = acc_global_bid()
+
+        # Get your padding sizes
+        precompile_token_paddings, precompile_bs_paddings, precompile_cache_loc_paddings = (
+            self.tp_worker.get_precompile_paddings()
+        )
+        model_worker_batch = batch.get_model_worker_batch(...)  # Pass your args
+
+        forward_start = time.perf_counter()
+        logits_output, _, _ = self.tp_worker.forward_batch_generation(
+            model_worker_batch=model_worker_batch,
+            launch_done=None,
+            skip_sample=True,
+            sampling_metadata=None,
+        )
+
+        next_token_logits = logits_output.next_token_logits[: model_worker_batch.real_bs, :]
+        out_sharding = NamedSharding(self.mesh, P(None, None))
+
+        # Enqueue the JAX operation (Non-blocking)
+        row_logprobs_dev = _compute_label_only_logprobs(
+            next_token_logits, label_token_ids_arr, out_sharding
+        )
+
+        # RETURN IMMEDIATELY, do not block or cleanup here.
+        return row_logprobs_dev, batch, reqs, forward_start, chunk_wall_start
+
+    def _resolve_math_async(self, dev_future, apply_softmax, forward_start, chunk_wall_start):
+        """Part 2: Waits for TPU and does NumPy math (Runs in background thread)"""
+        dev_future.block_until_ready()  # Releases GIL, thread sleeps until TPU is done
+        forward_end = time.perf_counter()
+
+        row_logprobs = np.asarray(jax.device_get(dev_future), dtype=np.float64)
+
+        token_prob_vals = np.exp(row_logprobs)
+        if apply_softmax:
+            row_max = np.max(token_prob_vals, axis=1, keepdims=True)
+            stable = token_prob_vals - row_max
+            exp_vals = np.exp(stable)
+            denom = np.sum(exp_vals, axis=1, keepdims=True)
+            scores_np = exp_vals / denom
+        else:
+            scores_np = token_prob_vals
+
+        chunk_device_compute_s = max(0.0, forward_end - forward_start)
+        chunk_total_s = max(0.0, time.perf_counter() - chunk_wall_start)
+        chunk_host_overhead_s = max(0.0, chunk_total_s - chunk_device_compute_s)
+
+        return scores_np.tolist(), chunk_device_compute_s, chunk_host_overhead_s
+
+    def _run_score_from_cache_v2_chunk_label_only(
+        self,
+        cache_handle: str,
+        chunk_items: list[list[int]],
+        label_token_ids: list[int],
+        label_token_ids_arr: jax.Array,
+        apply_softmax: bool,
+        cached_last_node,
+        cached_prefix_indices,
+        prefix_ids: list[int],
+        cached_extra_key: str | None,
+    ) -> tuple[list[list[float]], float, float]:
+        batch: ScheduleBatch | None = None
+        reqs = self._build_score_from_cache_v2_chunk_reqs(
+            cache_handle=cache_handle,
+            chunk_items=chunk_items,
+            label_token_ids=label_token_ids,
+            cached_last_node=cached_last_node,
+            cached_prefix_indices=cached_prefix_indices,
+            prefix_ids=prefix_ids,
+            cached_extra_key=cached_extra_key,
+            return_label_logprobs=False,
+        )
+        try:
+            chunk_wall_start = time.perf_counter()
+            batch = ScheduleBatch.init_new(
+                reqs=reqs,
+                req_to_token_pool=self.req_to_token_pool,
+                token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                tree_cache=self.tree_cache,
+                model_config=self.model_config,
+                enable_overlap=self.enable_overlap,
+                spec_algorithm=self.spec_algorithm,
+                enable_custom_logit_processor=False,
+                chunked_req=None,
+                mesh=self.mesh,
+            )
+            batch.prepare_for_extend()
+            batch.bid = acc_global_bid()
+            (
+                precompile_token_paddings,
+                precompile_bs_paddings,
+                precompile_cache_loc_paddings,
+            ) = self.tp_worker.get_precompile_paddings()
+            model_worker_batch = batch.get_model_worker_batch(
+                precompile_token_paddings,
+                precompile_bs_paddings,
+                precompile_cache_loc_paddings,
+                self.page_size,
+                self.server_args.enable_static_lora,
+            )
+
+            forward_start = time.perf_counter()
+            logits_output, _, _ = self.tp_worker.forward_batch_generation(
+                model_worker_batch=model_worker_batch,
+                launch_done=None,
+                skip_sample=True,
+                sampling_metadata=None,
+            )
+
+            if logits_output is None or logits_output.next_token_logits is None:
+                raise RuntimeError(
+                    "Missing next_token_logits from score-from-cache v2 label-only chunk."
+                )
+
+            next_token_logits = logits_output.next_token_logits[: model_worker_batch.real_bs, :]
+            out_sharding = NamedSharding(self.mesh, P(None, None))
+            row_logprobs_dev = _compute_label_only_logprobs(
+                next_token_logits,
+                label_token_ids_arr,
+                out_sharding,
+            )
+            row_logprobs_dev.block_until_ready()
+            forward_end = time.perf_counter()
+            row_logprobs = np.asarray(jax.device_get(row_logprobs_dev), dtype=np.float64)
+
+            # scores_dev = _compute_label_only_scores(
+            #     next_token_logits, label_token_ids_arr, out_sharding, apply_softmax
+            # )
+
+            # scores_dev.block_until_ready()
+            # forward_end = time.perf_counter()
+
+            if row_logprobs.ndim != 2:
+                raise RuntimeError(f"Unexpected label-only logprob shape: {row_logprobs.shape}.")
+            if row_logprobs.shape[0] != len(reqs):
+                raise RuntimeError(
+                    f"Chunk output rows ({row_logprobs.shape[0]}) != request count ({len(reqs)})."
+                )
+            if row_logprobs.shape[1] != len(label_token_ids):
+                raise RuntimeError(
+                    f"Chunk output labels ({row_logprobs.shape[1]}) != requested label count ({len(label_token_ids)})."
+                )
+
+            # Align with baseline v2 semantics: raw values are token probabilities
+            # (not normalized across label ids). Apply optional softmax on those
+            # raw probability values only when requested.
+
+            token_prob_vals = np.exp(row_logprobs)
+            if apply_softmax:
+                row_max = np.max(token_prob_vals, axis=1, keepdims=True)
+                stable = token_prob_vals - row_max
+                exp_vals = np.exp(stable)
+                denom = np.sum(exp_vals, axis=1, keepdims=True)
+                scores_np = exp_vals / denom
+            else:
+                scores_np = token_prob_vals
+            scores = scores_np.tolist()
+
+            # scores = np.asarray(jax.device_get(scores_dev), dtype=np.float64).tolist()
+
+            chunk_device_compute_s = max(0.0, forward_end - forward_start)
+            chunk_total_s = max(0.0, time.perf_counter() - chunk_wall_start)
+            chunk_host_overhead_s = max(0.0, chunk_total_s - chunk_device_compute_s)
+            return scores, chunk_device_compute_s, chunk_host_overhead_s
+        finally:
+            self._release_score_from_cache_v2_chunk_reqs(reqs, batch=batch)
+
+    def _release_scoring_cache_nodes(self, rid_prefix: str | None, abort_all: bool) -> int:
+        released = 0
+        self._evict_expired_scoring_cache_nodes()
+        if not abort_all and not rid_prefix:
+            return released
+
+        rids_to_remove = []
+        for rid in self.scoring_cache_nodes:
+            if abort_all or (rid_prefix and rid.startswith(rid_prefix)):
+                rids_to_remove.append(rid)
+
+        for rid in rids_to_remove:
+            entry = self.scoring_cache_nodes.pop(rid, None)
+            if entry is None:
+                continue
+            self._release_scoring_cache_entry(rid, entry, reason="manual")
+            released += 1
+            logger.debug("Released cached node for rid=%s", rid)
+        return released
+
+    def release_scoring_cache(
+        self, recv_req: ReleaseScoringCacheReqInput
+    ) -> ReleaseScoringCacheReqOutput:
+        released = self._release_scoring_cache_nodes(recv_req.rid, abort_all=False)
+        return ReleaseScoringCacheReqOutput(
+            rid=recv_req.rid,
+            success=True,
+            released_items=released,
+        )
+
+    def _scoring_cache_metrics_snapshot(self) -> dict:
+        query_total = self.scoring_cache_lookup_queries
+        hit_total = self.scoring_cache_lookup_hits
+        miss_total = self.scoring_cache_lookup_misses
+        hit_rate = float(hit_total / query_total) if query_total > 0 else 0.0
+        return {
+            "active_handles": len(self.scoring_cache_nodes),
+            "handles_created": self.scoring_cache_handles_created,
+            "handles_released_total": self.scoring_cache_handles_released,
+            "handles_released_manual": self.scoring_cache_handles_released_manual,
+            "handles_released_expired": self.scoring_cache_handles_released_expired,
+            "handles_released_other": self.scoring_cache_handles_released_other,
+            "handles_missing_node": self.scoring_cache_handles_missing_node,
+            "lookup_queries": query_total,
+            "lookup_hits": hit_total,
+            "lookup_misses": miss_total,
+            "lookup_hit_rate": hit_rate,
+            "lookup_by_path": {
+                path: dict(stats) for path, stats in self.scoring_cache_lookup_by_path.items()
+            },
+        }
+
 
 def run_scheduler_process(
     server_args: ServerArgs,
@@ -1558,6 +2333,44 @@ def run_scheduler_process(
     dp_rank: int | None,
     pipe_writer,
 ):
+    def maybe_freeze_gc_after_warmup():
+        if not getattr(server_args, "enable_gc_freeze", False):
+            return
+        if not hasattr(gc, "freeze"):
+            logger.warning(
+                "GC freeze requested but gc.freeze is unavailable on this Python runtime."
+            )
+            return
+        try:
+            freeze_before = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+            collected = gc.collect()
+            gc.freeze()
+            freeze_after = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+            logger.info(
+                "Applied gc.freeze after warmup/precompile. collected=%d freeze_before=%d freeze_after=%d gc_count=%s",
+                collected,
+                freeze_before,
+                freeze_after,
+                gc.get_count(),
+            )
+            if getattr(server_args, "gc_freeze_rollback", False):
+                if hasattr(gc, "unfreeze"):
+                    gc.unfreeze()
+                    rollback_count = (
+                        gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+                    )
+                    logger.warning(
+                        "Rolled back gc.freeze due to --gc-freeze-rollback. freeze_count_after_rollback=%d gc_count=%s",
+                        rollback_count,
+                        gc.get_count(),
+                    )
+                else:
+                    logger.warning(
+                        "GC freeze rollback requested but gc.unfreeze is unavailable on this Python runtime."
+                    )
+        except Exception:
+            logger.exception("Failed to apply gc.freeze after warmup/precompile.")
+
     # Generate the prefix
     prefix = ""
     if server_args.nnodes > 1:
@@ -1575,6 +2388,7 @@ def run_scheduler_process(
     # Create a scheduler and run the event loop
     try:
         scheduler = Scheduler(server_args, port_args)
+        maybe_freeze_gc_after_warmup()
         pipe_writer.send(
             {
                 "status": "ready",

@@ -2157,11 +2157,12 @@ class ModelWorkerBatch:
     extend_prefix_lens: np.ndarray | None
     extend_logprob_start_lens: np.ndarray | None
     extend_input_logprob_token_ids: np.ndarray | None
-    # Start location of each sequence in the flattened extend array
-    extend_start_loc: np.ndarray | None
 
     # For padding
     real_bs: int
+
+    # Start location of each sequence in the flattened extend array
+    extend_start_loc: np.ndarray | None = None
 
     # For LoRA
     lora_ids: list[str] | None = None
