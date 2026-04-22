@@ -20,9 +20,11 @@ import unittest
 from typing import Any
 
 import requests
+import subprocess
+import yaml
 
 # Configuration
-API_URL = os.getenv("SGLANG_API_URL", "http://localhost:8000")
+API_URL = os.getenv("SGLANG_API_URL", "http://127.0.0.1:30000")
 MODEL_NAME = os.getenv("SGLANG_MODEL_NAME", "qwen3-0-6b")
 LABEL_TOKEN_IDS = [9693, 2152]  # Default label IDs
 
@@ -63,6 +65,81 @@ def diff_nested(after: dict[str, Any], before: dict[str, Any]) -> dict[str, Any]
 
 
 class TestScoreAPIBench(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        """Launch the server as a subprocess."""
+        import time
+        import requests
+
+        # Read flags from YAML if it exists
+        config_path = os.path.join(
+            os.path.dirname(__file__), "benchmark_config.yaml"
+        )
+        flags = []
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                config = yaml.safe_load(f)
+                for k, v in config.items():
+                    if v is True:
+                        flags.append(f"--{k}")
+                    elif v is False:
+                        pass
+                    else:
+                        flags.append(f"--{k}")
+                        flags.append(str(v))
+        else:
+            # Default flags for baseline
+            flags = [
+                "--model-path",
+                "/models/Qwen/Qwen3-0.6B",
+                "--trust-remote-code",
+                "--device",
+                "tpu",
+                "--dtype",
+                "bfloat16",
+                "--mem-fraction-static",
+                "0.7",
+                "--max-running-requests",
+                "128",
+                "--page-size",
+                "16",
+                "--attention-backend",
+                "fa",
+                "--port",
+                "30000",
+            ]
+
+        cmd = ["python3", "-m", "sgl_jax.launch_server"] + flags
+        logging.info(f"Launching server with command: {' '.join(cmd)}")
+
+        cls.server_proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+
+        # Wait for server to be ready
+        url = "http://127.0.0.1:30000/get_model_info"
+        logging.info("Waiting for server to be ready...")
+        for _ in range(60):  # Wait up to 5 minutes (5s intervals)
+            try:
+                resp = requests.get(url, timeout=1)
+                if resp.status_code == 200:
+                    logging.info("Server is ready!")
+                    break
+            except requests.exceptions.ConnectionError:
+                pass
+            time.sleep(5)
+        else:
+            cls.server_proc.kill()
+            raise RuntimeError("Server failed to become ready in time.")
+
+    @classmethod
+    def tearDownClass(cls):
+        """Kill the server subprocess."""
+        if hasattr(cls, "server_proc"):
+            logging.info("Shutting down server...")
+            cls.server_proc.terminate()
+            cls.server_proc.wait()
 
     def _run_http_bench(
         self,
