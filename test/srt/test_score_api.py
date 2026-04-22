@@ -90,6 +90,33 @@ from sgl_jax.test.test_utils import DEFAULT_SMALL_MODEL_NAME_FOR_TEST, CustomTes
 TEST_MODEL_NAME = os.getenv("SGLANG_TEST_MODEL", DEFAULT_SMALL_MODEL_NAME_FOR_TEST)
 
 
+def _compute_hf_scores_worker(
+    query, items, label_token_ids, apply_softmax, item_first, result_queue
+):
+    import jax
+    import jax.numpy as jnp
+    from transformers import AutoTokenizer, FlaxAutoModelForCausalLM
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_NAME, trust_remote_code=True)
+        model = FlaxAutoModelForCausalLM.from_pretrained(TEST_MODEL_NAME, trust_remote_code=True)
+
+        scores = []
+        for item in items:
+            full_text = f"{item}{query}" if item_first else f"{query}{item}"
+            inputs = tokenizer(full_text, return_tensors="np")
+            outputs = model(**inputs)
+            last_token_logits = outputs.logits[0, -1]
+            target_logits = last_token_logits[jnp.asarray(label_token_ids)]
+            target_probs = jax.nn.softmax(target_logits, axis=-1)
+            probs = [float(target_probs[i]) for i in range(len(label_token_ids))]
+            scores.append(probs)
+
+        result_queue.put(scores)
+    except Exception as e:
+        result_queue.put(e)
+
+
 class TestScoreAPI(CustomTestCase):
     """Test the scoring API functionality.
 
@@ -156,83 +183,28 @@ class TestScoreAPI(CustomTestCase):
     def compute_hf_scores(
         self, query, items, label_token_ids, apply_softmax=False, item_first=False
     ):
-        """Compute reference scores using direct HuggingFace model inference.
+        """Compute reference scores using direct HuggingFace model inference in a subprocess."""
+        import multiprocessing
 
-        This method provides ground truth scores for validating SGLang's scoring API.
-        It loads the same model using HuggingFace Transformers and computes logprobs
-        for the specified token IDs at the last token position.
+        result_queue = multiprocessing.Queue()
+        p = multiprocessing.Process(
+            target=_compute_hf_scores_worker,
+            args=(
+                query,
+                items,
+                label_token_ids,
+                apply_softmax,
+                item_first,
+                result_queue,
+            ),
+        )
+        p.start()
+        p.join()
 
-        **Algorithm:**
-        1. Load model and tokenizer from HuggingFace
-        2. For each item:
-           a. Construct full_text = (item + query) or (query + item) based on item_first
-           b. Tokenize and run forward pass
-           c. Extract logits at last token position: logits[0, -1, :]
-           d. Select logits for label_token_ids
-           e. Apply softmax to get probabilities
-        3. Return list of probability lists
-
-        **Important Notes:**
-        - Always uses CPU (to avoid GPU memory conflicts with JAX/TPU)
-        - Cleans up model after completion to free memory
-        - Applies softmax over ONLY the label_token_ids (not full vocabulary)
-        - This matches the behavior of SGLang's token_ids_logprob feature
-
-        Args:
-            query: The query text (e.g., "Is this true? ")
-            items: List of item texts (e.g., ["Yes", "No", "Maybe"])
-            label_token_ids: List of token IDs to compute probabilities for
-                           (e.g., [9454, 2753] for "Yes"/"No" tokens)
-            apply_softmax: Whether to normalize probabilities using softmax.
-                          Should always be True for probability interpretation.
-            item_first: If True, construct prompts as f"{item}{query}".
-                       If False, construct prompts as f"{query}{item}".
-
-        Returns:
-            List of score lists, one per item. Each score list has length
-            equal to len(label_token_ids).
-            Example: [[0.9, 0.1], [0.3, 0.7]] for 2 items, 2 label tokens.
-
-        Raises:
-            May raise HuggingFace model loading errors if model not accessible.
-        """
-        # Initialize HF model and tokenizer using Flax
-        import jax
-        from transformers import FlaxAutoModelForCausalLM
-
-        tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_NAME, trust_remote_code=True)
-        model = FlaxAutoModelForCausalLM.from_pretrained(TEST_MODEL_NAME, trust_remote_code=True)
-
-        try:
-            scores = []
-            for item in items:
-                # Construct full text based on item_first parameter
-                full_text = f"{item}{query}" if item_first else f"{query}{item}"
-                inputs = tokenizer(full_text, return_tensors="np")
-
-                # Get logits for the last token
-                outputs = model(**inputs)
-                last_token_logits = outputs.logits[0, -1]
-
-                # Get logits for just our target tokens
-                import jax.numpy as jnp
-
-                target_logits = last_token_logits[jnp.asarray(label_token_ids)]
-
-                # Apply softmax over just the target tokens using JAX
-                target_probs = jax.nn.softmax(target_logits, axis=-1)
-
-                # Convert to list of probabilities in order of label_token_ids
-                probs = [float(target_probs[i]) for i in range(len(label_token_ids))]
-
-                scores.append(probs)
-
-            return scores
-        finally:
-            # Clean up HF resources
-            del model
-            del tokenizer
-            # No need for torch.cuda.empty_cache() on TPU
+        result = result_queue.get()
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def _get_token_ids(self, tokens):
         """Convert token strings to their corresponding token IDs.
