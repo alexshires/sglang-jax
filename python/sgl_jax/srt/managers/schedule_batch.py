@@ -65,7 +65,6 @@ GLOBAL_SERVER_ARGS_KEYS = [
     "speculative_accept_threshold_single",
     "speculative_accept_threshold_acc",
     "enable_deterministic_sampling",
-    "chunked_prefill_size",
 ]
 
 PADDING_BUCKETS = [1 << i for i in range(6, 21)]
@@ -172,6 +171,10 @@ class Req:
         multimodal_embedding: list[list[float]] | None = None,
         deepstack_visual_embedding: list[list[float]] | None = None,
         deepstack_visual_pos_mask: list[int] | None = None,
+        cache_for_scoring: bool = False,
+        extend_from_cache: str | None = None,
+        is_multi_item_scoring: bool = False,
+        multi_item_scoring_delimiter: int | None = None,
     ):
         # Input and output info
         self.rid = rid
@@ -198,6 +201,10 @@ class Req:
         # Sampling info
         self.sampling_params = sampling_params
         self.return_hidden_states = return_hidden_states
+        self.cache_for_scoring = cache_for_scoring
+        self.extend_from_cache = extend_from_cache
+        self.is_multi_item_scoring = is_multi_item_scoring
+        self.multi_item_scoring_delimiter = multi_item_scoring_delimiter
 
         # Extra key for cache namespace isolation (e.g., cache_salt, lora_id)
         if lora_id is not None:
@@ -249,6 +256,12 @@ class Req:
         self.swa_uuid_for_lock: int | None = None
         # The prefix length of the last prefix matching
         self.last_matched_prefix_len: int = 0
+        # Optional fast-path prefix context for extend-from-cache requests.
+        # When populated, init_next_round_input can skip an expensive radix match.
+        self.cached_prefix_indices: np.ndarray | None = None
+        self.cached_last_node: Any = None
+        self.cached_last_host_node: Any = None
+        self.cached_host_hit_length: int = 0
 
         # Whether or not if it is chunked. It increments whenever
         # it is chunked, and decrement whenever chunked request is
@@ -307,11 +320,6 @@ class Req:
             ) = None
         self.hidden_states: list[list[float]] = []
 
-        # SWA eviction tracking
-        self.swa_evicted_seqlen: int = 0
-        self.extend_batch_idx: int = 0
-        self.decode_batch_idx: int = 0
-
         # The number of cached tokens that were already cached in the KV cache
         self.cached_tokens = 0
         self.already_computed = 0
@@ -327,6 +335,10 @@ class Req:
         self.has_log_time_stats: bool = False
         self.queue_time_start = None
         self.queue_time_end = None
+        self.queue_wait_time_s: float = 0.0
+        self.device_compute_time_s: float = 0.0
+        self.host_overhead_time_s: float = 0.0
+        self.scheduler_dispatch_count: int = 0
 
         # the start index of the sent kv cache
         # We want to send it chunk by chunk for chunked prefill.
@@ -375,14 +387,28 @@ class Req:
     ):
         self.fill_ids = self.origin_input_ids + self.output_ids
         if tree_cache is not None:
-            (
-                self.prefix_indices,
-                self.last_node,
-                self.last_host_node,
-                self.host_hit_length,
-            ) = tree_cache.match_prefix(
-                key=RadixKey(self.adjust_max_prefix_ids(), self.extra_key),
-            )
+            if (
+                self.extend_from_cache
+                and self.cached_prefix_indices is not None
+                and self.cached_last_node is not None
+            ):
+                self.prefix_indices = self.cached_prefix_indices
+                self.last_node = self.cached_last_node
+                self.last_host_node = (
+                    self.cached_last_host_node
+                    if self.cached_last_host_node is not None
+                    else self.cached_last_node
+                )
+                self.host_hit_length = self.cached_host_hit_length
+            else:
+                (
+                    self.prefix_indices,
+                    self.last_node,
+                    self.last_host_node,
+                    self.host_hit_length,
+                ) = tree_cache.match_prefix(
+                    key=RadixKey(self.adjust_max_prefix_ids(), self.extra_key),
+                )
             self.last_matched_prefix_len = len(self.prefix_indices)
         self.extend_input_len = len(self.fill_ids) - len(self.prefix_indices)
 
@@ -604,6 +630,8 @@ class ScheduleBatch:
     extend_logprob_start_lens: list[int] = None
     # It comes empty list if logprob is not required.
     extend_input_logprob_token_ids: np.ndarray | None = None
+    # Start location of each sequence in the flattened extend array
+    extend_start_loc: np.ndarray | None = None
 
     # Stream
     has_stream: bool = False
@@ -848,7 +876,6 @@ class ScheduleBatch:
             req.cached_tokens += pre_len - req.already_computed
             req.already_computed = seq_len
             req.is_retracted = False
-            req.extend_batch_idx += 1
 
             # Compute the relative logprob_start_len in an extend batch
             if req.logprob_start_len >= pre_len:
@@ -930,6 +957,9 @@ class ScheduleBatch:
         self.prefix_lens = prefix_lens
         self.extend_lens = extend_lens
         self.extend_input_logprob_token_ids = extend_input_logprob_token_ids
+        # Start location of each sequence in the flattened extend array
+        self.extend_start_loc = np.cumsum(np.concatenate([np.array([0]), extend_lens[:-1]]))
+
         if self.apply_for_deepstack:
             self.input_embedding = np.concat(
                 [r.multimodal_embedding for r in reqs if r.multimodal_embedding is not None], axis=0
@@ -1089,11 +1119,6 @@ class ScheduleBatch:
     def prepare_for_decode(self):
         self.forward_mode = ForwardMode.DECODE
         bs = len(self.reqs)
-
-        # Evict SWA tokens outside sliding window
-        if self.is_hybrid:
-            self.maybe_evict_swa()
-
         if self.spec_algorithm is not None and self.spec_algorithm.is_eagle():
             # if spec decoding is used, the decode batch is prepared inside
             # `forward_batch_speculative_generation` after running draft models.
@@ -1143,9 +1168,6 @@ class ScheduleBatch:
             (self.req_pool_indices, locs), self.out_cache_loc.astype(np.int32)
         )
 
-        for req in self.reqs:
-            req.decode_batch_idx += 1
-
     def filter_batch(
         self,
         chunked_req_to_exclude: Req | list[Req] | None = None,
@@ -1193,7 +1215,7 @@ class ScheduleBatch:
         self.output_ids = self.output_ids[keep_indices] if self.output_ids is not None else None
         self.return_logprob = any(req.return_logprob for req in self.reqs)
         self.return_output_logprob_only = any(req.return_output_logprob_only for req in self.reqs)
-        if self.return_logprob:
+        if self.return_logprob or self.return_output_logprob_only:
             self.top_logprobs_nums = [self.top_logprobs_nums[i] for i in keep_indices]
             self.token_ids_logprobs = [self.token_ids_logprobs[i] for i in keep_indices]
         else:
@@ -1234,13 +1256,15 @@ class ScheduleBatch:
                     other.output_ids[: len(other.seq_lens)],
                 ]
             )
-        if self.return_logprob and other.return_logprob:
+        self_needs_sampling_logprob = self.return_logprob or self.return_output_logprob_only
+        other_needs_sampling_logprob = other.return_logprob or other.return_output_logprob_only
+        if self_needs_sampling_logprob and other_needs_sampling_logprob:
             self.top_logprobs_nums.extend(other.top_logprobs_nums)
             self.token_ids_logprobs.extend(other.token_ids_logprobs)
-        elif self.return_logprob:
+        elif self_needs_sampling_logprob:
             self.top_logprobs_nums.extend([0] * len(other.reqs))
             self.token_ids_logprobs.extend([None] * len(other.reqs))
-        elif other.return_logprob:
+        elif other_needs_sampling_logprob:
             self.top_logprobs_nums = [0] * len(self.reqs) + other.top_logprobs_nums
             self.token_ids_logprobs = [None] * len(self.reqs) + other.token_ids_logprobs
         self.reqs.extend(other.reqs)
@@ -1279,7 +1303,7 @@ class ScheduleBatch:
             extend_prefix_lens = np.array(self.prefix_lens, dtype=np.int32)
             bs_paddings = bs_paddings[-1:]
             cache_loc_paddings = cache_loc_paddings[-1:]
-            extend_logprob_start_lens = self.extend_logprob_start_lens
+            extend_logprob_start_lens = np.array(self.extend_logprob_start_lens, dtype=np.int32)
 
         bid = acc_global_bid()
 
@@ -1327,16 +1351,25 @@ class ScheduleBatch:
                 axis=0,
             )
 
-        # Calculate positions after padding
+        # Calculate positions and extend_start_loc after padding
         if self.forward_mode.is_extend():
-            # For prefill: create positions for each token in sequences
-            # Calculate total tokens without padding first
-            total_tokens_before_padding = sum([extend_len for extend_len in self.extend_lens])
-            positions_cpu = np.concatenate(
-                [
-                    np.arange(prefix_len, seq_len, dtype=seq_lens_cpu.dtype)
-                    for seq_len, prefix_len in zip(seq_lens_cpu, self.prefix_lens)
-                ]
+            # For prefill: create positions for each token in sequences.
+            # Multi-item scoring requests use delimiter-reset positions to remove
+            # length-coupled position drift across item blocks.
+            total_tokens_before_padding = sum(self.extend_lens)
+            position_chunks = [
+                _build_extend_positions_for_req(
+                    req=req,
+                    seq_len=int(seq_len),
+                    prefix_len=int(prefix_len),
+                    dtype=seq_lens_cpu.dtype,
+                )
+                for req, seq_len, prefix_len in zip(self.reqs, seq_lens_cpu, self.prefix_lens)
+            ]
+            positions_cpu = (
+                np.concatenate(position_chunks)
+                if position_chunks
+                else np.array([], dtype=seq_lens_cpu.dtype)
             )
 
             # If input_ids was padded, pad positions too
@@ -1345,6 +1378,11 @@ class ScheduleBatch:
                 positions_cpu = np.concatenate(
                     [positions_cpu, np.zeros(padding_size, dtype=positions_cpu.dtype)]
                 )
+
+            extend_start_loc = np.cumsum(
+                np.concatenate([np.array([0]), extend_seq_lens[:-1]]),
+                dtype=seq_lens_cpu.dtype,
+            )
 
         else:
             # For decode: each sequence contributes one token at the next position (seq_len)
@@ -1355,6 +1393,9 @@ class ScheduleBatch:
             # Fill in the actual positions for the real tokens
             # positions = positions.at[: len(batch_positions)].set(batch_positions)
             positions_cpu[: len(batch_positions)] = batch_positions
+            # The padding tokens (if any) will have position 0, which is fine for padding
+            # For decode, extend_start_loc is typically not used but we'll set it anyway
+            extend_start_loc = np.arange(len(seq_lens_cpu), dtype=seq_lens_cpu.dtype)
 
         mrope_positions_cpu = _compute_mrope_positions_for_batch(
             self.reqs,
@@ -1427,6 +1468,11 @@ class ScheduleBatch:
             invalid_seq_lens = np.array([0] * bs_padding_size, dtype=seq_lens_cpu.dtype)
             seq_lens_cpu = np.concat([seq_lens_cpu, invalid_seq_lens], axis=0)
             if self.forward_mode.is_extend():
+                invalid_extend_start_loc = np.array(
+                    [extend_start_loc[-1] + extend_seq_lens[-1]] * bs_padding_size,
+                    dtype=extend_start_loc.dtype,
+                )
+                extend_start_loc = np.concat([extend_start_loc, invalid_extend_start_loc], axis=0)
                 invalid_extend_prefix_lens = np.array(
                     [0] * bs_padding_size, dtype=extend_prefix_lens.dtype
                 )
@@ -1442,6 +1488,12 @@ class ScheduleBatch:
                 extend_logprob_start_lens = np.concat(
                     [extend_logprob_start_lens, invalid_extend_logprob_start_lens], axis=0
                 )
+
+            else:
+                invalid_extend_start_loc = np.array(
+                    [len(seq_lens_cpu)] * bs_padding_size, dtype=extend_start_loc.dtype
+                )
+                extend_start_loc = np.concat([extend_start_loc, invalid_extend_start_loc], axis=0)
 
         sampling_info = self.sampling_info
         if self.sampling_info:
@@ -1487,6 +1539,7 @@ class ScheduleBatch:
                     ]
                 )
             sampling_info = dataclasses.replace(sampling_info, **updates)
+
         if precision_tracer.get_trace_active():
             self._generate_trace_info(real_bs, bid)
 
@@ -1504,11 +1557,11 @@ class ScheduleBatch:
                 mm_embedding = req.mm_inputs.get("multimodal_embedding") if req.mm_inputs else None
                 if mm_embedding is not None:
                     mm_full = np.asarray(mm_embedding)
-                    start = int(prefix_len or 0)  # todo: when multi request, this maybe wrong.
+                    start = int(prefix_len or 0)
                     end = start + int(extend_len or 0)
                     input_embedding_list.append(mm_full[start:end])
                 if req.apply_for_deepstack:
-                    start = int(prefix_len or 0)  # todo: when multi request, this maybe wrong.
+                    start = int(prefix_len or 0)
                     end = start + int(extend_len or 0)
                     deepstack_visual_embedding_list.append(
                         req.deepstack_visual_embedding[:, start:end, :]
@@ -1566,6 +1619,15 @@ class ScheduleBatch:
             self.apply_for_deepstack = False
             self.deepstack_visual_embedding = None
 
+        multi_item_scoring_flags = np.array(
+            [req.is_multi_item_scoring for req in self.reqs] + [False] * bs_padding_size,
+            dtype=np.bool_,
+        )
+        multi_item_scoring_delimiter = next(
+            (req.multi_item_scoring_delimiter for req in self.reqs if req.is_multi_item_scoring),
+            None,
+        )
+
         return ModelWorkerBatch(
             bid=bid,
             forward_mode=self.forward_mode,
@@ -1578,9 +1640,13 @@ class ScheduleBatch:
             return_output_logprob_only=self.return_output_logprob_only,
             top_logprobs_nums=self.top_logprobs_nums,
             token_ids_logprobs=self.token_ids_logprobs,
+            is_prefill_only=self.is_prefill_only,
+            multi_item_scoring_flags=multi_item_scoring_flags,
+            multi_item_scoring_delimiter=multi_item_scoring_delimiter,
             sampling_info=sampling_info,
             positions=positions_cpu,
             mrope_positions=mrope_positions_cpu,
+            extend_start_loc=extend_start_loc,
             cache_loc=cache_loc_cpu,
             extend_prefix_lens=(
                 extend_prefix_lens if self.forward_mode == ForwardMode.EXTEND else None
@@ -1638,24 +1704,30 @@ class ScheduleBatch:
         else:
             positions_cpu = None
 
-        # Calculate positions after padding
+        # Calculate positions and extend_start_loc after padding
         if self.forward_mode.is_extend():
             # For prefill: create positions for each token in sequences
             # Calculate total tokens without padding first
             if positions_cpu is None:
-                lengths = seq_lens_cpu - self.prefix_lens
-                if len(lengths) > 0:
-                    repeats = lengths
-                    total_len = np.sum(repeats)
-                    # Generate range [0, 1, ... len-1] for each sequence
-                    block_starts = np.concatenate(([0], np.cumsum(repeats)[:-1]))
-                    shifts = np.repeat(block_starts, repeats)
-                    ranges = np.arange(total_len) - shifts
-                    # Add prefix_len to each range
-                    positions_cpu = np.repeat(self.prefix_lens, repeats) + ranges
-                    positions_cpu = positions_cpu.astype(seq_lens_cpu.dtype)
-                else:
-                    positions_cpu = np.array([], dtype=seq_lens_cpu.dtype)
+                position_chunks = [
+                    _build_extend_positions_for_req(
+                        req=req,
+                        seq_len=int(seq_len),
+                        prefix_len=int(prefix_len),
+                        dtype=seq_lens_cpu.dtype,
+                    )
+                    for req, seq_len, prefix_len in zip(self.reqs, seq_lens_cpu, self.prefix_lens)
+                ]
+                positions_cpu = (
+                    np.concatenate(position_chunks)
+                    if position_chunks
+                    else np.array([], dtype=seq_lens_cpu.dtype)
+                )
+            # Start location of each sequence in the flattened array
+            extend_start_loc = np.cumsum(
+                np.concatenate([np.array([0]), extend_seq_lens[:-1]]),
+                dtype=seq_lens_cpu.dtype,
+            )
         else:
             if positions_cpu is None:
                 # For decode: each sequence contributes one token at the next position (seq_len)
@@ -1666,6 +1738,9 @@ class ScheduleBatch:
                 # Fill in the actual positions for the real tokens
                 # positions = positions.at[: len(batch_positions)].set(batch_positions)
                 positions_cpu[: len(batch_positions)] = batch_positions
+                # The padding tokens (if any) will have position 0, which is fine for padding
+                # For decode, extend_start_loc is typically not used but we'll set it anyway
+            extend_start_loc = np.arange(len(seq_lens_cpu), dtype=seq_lens_cpu.dtype)
 
         mrope_positions_cpu = _compute_mrope_positions_for_batch(
             self.reqs,
@@ -1745,6 +1820,15 @@ class ScheduleBatch:
         # Extract lora_ids from requests
         lora_ids = [req.lora_id for req in self.reqs]
 
+        multi_item_scoring_flags = np.array(
+            [req.is_multi_item_scoring for req in self.reqs],
+            dtype=np.bool_,
+        )
+        multi_item_scoring_delimiter = next(
+            (req.multi_item_scoring_delimiter for req in self.reqs if req.is_multi_item_scoring),
+            None,
+        )
+
         return ModelWorkerBatch(
             bid=bid,
             forward_mode=self.forward_mode,
@@ -1757,9 +1841,13 @@ class ScheduleBatch:
             return_output_logprob_only=self.return_output_logprob_only,
             top_logprobs_nums=self.top_logprobs_nums,
             token_ids_logprobs=self.token_ids_logprobs,
+            is_prefill_only=self.is_prefill_only,
+            multi_item_scoring_flags=multi_item_scoring_flags,
+            multi_item_scoring_delimiter=multi_item_scoring_delimiter,
             sampling_info=self.sampling_info,
             positions=positions_cpu,
             mrope_positions=mrope_positions_cpu,
+            extend_start_loc=extend_start_loc,
             cache_loc=cache_loc_flat,
             extend_prefix_lens=(extend_prefix_lens if self.forward_mode.is_extend() else None),
             extend_seq_lens=(extend_seq_lens if self.forward_mode.is_extend() else None),
@@ -1874,6 +1962,66 @@ class ScheduleBatch:
 def align_to_size(lst: list, size: int, value: int = 0) -> list:
     align_len = (len(lst) + size - 1) // size * size
     return lst[:] + [value] * (align_len - len(lst))
+
+
+def _build_multi_item_extend_positions(
+    tokens: np.ndarray, delimiter_token_id: int, dtype: np.dtype
+) -> np.ndarray:
+    """Build RoPE positions with per-item reset for multi-item scoring.
+
+    Layout:
+      query<d>item1<d>item2<d>...<d>
+
+    Query keeps standard causal positions [0..query_len-1].
+    For each item block, positions reset at the block delimiter:
+      delimiter -> query_len
+      first item token -> query_len + 1
+      ...
+    """
+    if tokens.size == 0:
+        return np.array([], dtype=dtype)
+
+    delimiter_indices = np.flatnonzero(tokens == delimiter_token_id)
+    if delimiter_indices.size == 0:
+        raise ValueError(
+            f"Multi-item scoring sequence must contain delimiter token {delimiter_token_id}."
+        )
+
+    query_len = int(delimiter_indices[0])
+    if query_len <= 0:
+        raise ValueError("Multi-item scoring requires a non-empty query prefix before delimiter.")
+
+    positions = np.empty(tokens.shape[0], dtype=dtype)
+    positions[:query_len] = np.arange(query_len, dtype=dtype)
+
+    suffix_idx = np.arange(query_len, tokens.shape[0], dtype=np.int32)
+    seg_ids = np.searchsorted(delimiter_indices, suffix_idx, side="right") - 1
+    seg_starts = delimiter_indices[seg_ids]
+    positions[suffix_idx] = query_len + (suffix_idx - seg_starts)
+    return positions
+
+
+def _build_extend_positions_for_req(
+    req: Req, seq_len: int, prefix_len: int, dtype: np.dtype
+) -> np.ndarray:
+    if req.is_multi_item_scoring and req.multi_item_scoring_delimiter is not None:
+        if prefix_len != 0:
+            raise ValueError(
+                "Multi-item scoring requires extend mode without cached prefix "
+                f"(got prefix_len={prefix_len})."
+            )
+        req_tokens = np.asarray(req.fill_ids[prefix_len:seq_len], dtype=np.int32)
+        positions = _build_multi_item_extend_positions(
+            req_tokens, req.multi_item_scoring_delimiter, dtype
+        )
+        expected_len = seq_len - prefix_len
+        if len(positions) != expected_len:
+            raise ValueError(
+                f"Invalid multi-item position shape: expected {expected_len}, got {len(positions)}."
+            )
+        return positions
+
+    return np.arange(prefix_len, seq_len, dtype=dtype)
 
 
 def _extract_mm_value(mm_inputs: Any, key: str):
@@ -2007,8 +2155,10 @@ class ModelWorkerBatch:
     # extend_num_tokens: Optional[int]
     extend_seq_lens: np.ndarray | None
     extend_prefix_lens: np.ndarray | None
-    extend_logprob_start_lens: list[int] | None
+    extend_logprob_start_lens: np.ndarray | None
     extend_input_logprob_token_ids: np.ndarray | None
+    # Start location of each sequence in the flattened extend array
+    extend_start_loc: np.ndarray | None
 
     # For padding
     real_bs: int
@@ -2039,7 +2189,7 @@ class ModelWorkerBatch:
     speculative_eagle_topk: int = 0
     speculative_num_draft_tokens: int = 0
     # If set, the output of the batch contains the hidden states of the run.
-    capture_hidden_mode: CaptureHiddenMode = None
+    # capture_hidden_mode: CaptureHiddenMode = None
 
     tree_cache: BasePrefixCache = None
 
@@ -2049,6 +2199,11 @@ class ModelWorkerBatch:
 
     # MRoPE position information [3, total_tokens]
     mrope_positions: np.ndarray | None = None
+
+    # Scoring flags
+    is_prefill_only: bool = False
+    multi_item_scoring_flags: np.ndarray | None = None
+    multi_item_scoring_delimiter: int | None = None
 
     def get_original_input_len(self):
         """
@@ -2063,22 +2218,42 @@ class ModelWorkerBatch:
 
 
 def get_last_loc(
+    req_to_token: jax.Array | np.ndarray,
+    req_pool_indices: np.ndarray,
+    prefix_lens: np.ndarray,
+) -> np.ndarray:
+    if isinstance(req_to_token, np.ndarray):
+        return get_last_loc_np(req_to_token, req_pool_indices, prefix_lens)
+    return get_last_loc_jax(req_to_token, req_pool_indices, prefix_lens)
+
+
+def get_last_loc_np(
     req_to_token: np.ndarray,
     req_pool_indices: np.ndarray,
     prefix_lens: np.ndarray,
 ) -> np.ndarray:
-    impl = get_last_loc_jax
-
-    return impl(req_to_token, req_pool_indices, prefix_lens)
+    """CPU implementation using numpy indexing."""
+    res = []
+    for i in range(len(req_pool_indices)):
+        idx = req_pool_indices[i]
+        plen = prefix_lens[i]
+        if plen > 0:
+            res.append(req_to_token[idx, plen - 1])
+        else:
+            res.append(-1)
+    return np.array(res, dtype=np.int32)
 
 
 def get_last_loc_jax(
-    req_to_token: np.ndarray,
+    req_to_token: jax.Array,
     req_pool_indices: np.ndarray,
     prefix_lens: np.ndarray,
-) -> np.ndarray:
-    return np.where(
-        prefix_lens > 0,
-        req_to_token[req_pool_indices, prefix_lens - 1],
-        np.full_like(prefix_lens, -1),
-    )
+) -> jax.Array:
+    def _get_single_last_loc(req_pool_idx, prefix_len):
+        return jax.lax.cond(
+            prefix_len > 0,
+            lambda: req_to_token[req_pool_idx, prefix_len - 1],
+            lambda: -1,
+        )
+
+    return jax.vmap(_get_single_last_loc)(req_pool_indices, prefix_lens)
