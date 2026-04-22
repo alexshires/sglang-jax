@@ -215,7 +215,9 @@ class TestScoreAPI(CustomTestCase):
                 last_token_logits = outputs.logits[0, -1]
 
                 # Get logits for just our target tokens
-                target_logits = last_token_logits[label_token_ids]
+                import jax.numpy as jnp
+
+                target_logits = last_token_logits[jnp.asarray(label_token_ids)]
 
                 # Apply softmax over just the target tokens using JAX
                 target_probs = jax.nn.softmax(target_logits, axis=-1)
