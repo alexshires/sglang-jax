@@ -538,6 +538,29 @@ class TokenizerManager(TokenizerScoringMixin):
                         f"Request is disconnected from the client side (type 3). Abort request {obj.rid=}"
                     )
 
+    def _send_batch_requests(
+        self,
+        objs: list[GenerateReqInput | EmbeddingReqInput],
+        tokenized_objs: list[TokenizedGenerateReqInput | TokenizedEmbeddingReqInput],
+        created_time: float | None = None,
+    ) -> list[ReqState]:
+        if len(objs) != len(tokenized_objs):
+            raise ValueError("objs and tokenized_objs must have the same length")
+        if not objs:
+            return []
+
+        self._raise_if_scheduler_unavailable()
+        payload = tokenized_objs[0] if len(tokenized_objs) == 1 else tokenized_objs
+        self.send_to_scheduler.send_pyobj(payload)
+
+        states: list[ReqState] = []
+        for obj in objs:
+            state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
+            rid_key = obj.rid[0] if isinstance(obj.rid, list) else obj.rid
+            self.rid_to_state[rid_key] = state
+            states.append(state)
+        return states
+
     async def _handle_batch_request(
         self,
         obj: GenerateReqInput | EmbeddingReqInput,
@@ -555,19 +578,42 @@ class TokenizerManager(TokenizerScoringMixin):
 
                 tokenized_objs = await self._batch_tokenize_and_process(batch_size, obj)
 
-                for i, tokenized_obj in enumerate(tokenized_objs):
-                    tmp_obj = obj[i]
-                    state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
-                    generators.append(self._wait_one_response(tmp_obj, state, request))
-                    rids.append(tmp_obj.rid)
+                batched_objs = [obj[i] for i in range(batch_size)]
+                if self.server_args.enable_tokenizer_batch_send:
+                    states = self._send_batch_requests(
+                        batched_objs,
+                        tokenized_objs,
+                        created_time,
+                    )
+                    for tmp_obj, state in zip(batched_objs, states, strict=True):
+                        generators.append(self._wait_one_response(tmp_obj, state, request))
+                        rids.append(tmp_obj.rid)
+                else:
+                    for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
+                        state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
+                        generators.append(self._wait_one_response(tmp_obj, state, request))
+                        rids.append(tmp_obj.rid)
             else:
                 # Sequential tokenization and processing
-                for i in range(batch_size):
-                    tmp_obj = obj[i]
-                    tokenized_obj = await self._tokenize_one_request(tmp_obj)
-                    state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
-                    generators.append(self._wait_one_response(tmp_obj, state, request))
-                    rids.append(tmp_obj.rid)
+                batched_objs = [obj[i] for i in range(batch_size)]
+                tokenized_objs = []
+                for tmp_obj in batched_objs:
+                    tokenized_objs.append(await self._tokenize_one_request(tmp_obj))
+
+                if self.server_args.enable_tokenizer_batch_send:
+                    states = self._send_batch_requests(
+                        batched_objs,
+                        tokenized_objs,
+                        created_time,
+                    )
+                    for tmp_obj, state in zip(batched_objs, states, strict=True):
+                        generators.append(self._wait_one_response(tmp_obj, state, request))
+                        rids.append(tmp_obj.rid)
+                else:
+                    for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
+                        state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
+                        generators.append(self._wait_one_response(tmp_obj, state, request))
+                        rids.append(tmp_obj.rid)
         else:
             # FIXME: When using batch and parallel_sample_num together, the perf is not optimal.
             if batch_size > 128:
@@ -1342,39 +1388,108 @@ class SignalHandler:
         kill_process_tree(os.getpid())
 
 
+@dataclasses.dataclass
+class _CorrelatedWaiter[T]:
+    event: asyncio.Event
+    values: list[T]
+
+
+class _CorrelatedCommunicator[T]:
+    """Allow multiple in-flight RPCs by correlating responses with `rid`."""
+
+    def __init__(self, sender, fan_out: int):
+        self._sender = sender
+        self._fan_out = fan_out
+        self._pending: dict[str, _CorrelatedWaiter[T]] = {}
+
+    async def __call__(self, obj, timeout: float | None = None):
+        rid = getattr(obj, "rid", None)
+        if not rid:
+            raise ValueError(
+                "Correlated communicator requires request objects with non-empty `rid`."
+            )
+        if rid in self._pending:
+            raise RuntimeError(f"Duplicate in-flight correlated request rid={rid!r}.")
+
+        waiter = _CorrelatedWaiter(event=asyncio.Event(), values=[])
+        self._pending[rid] = waiter
+        try:
+            if obj is not None:
+                self._sender.send_pyobj(obj)
+
+            wait_coro = waiter.event.wait()
+            if timeout is not None and timeout > 0:
+                await asyncio.wait_for(wait_coro, timeout=timeout)
+            else:
+                await wait_coro
+            return list(waiter.values)
+        finally:
+            self._pending.pop(rid, None)
+
+    def handle_recv(self, recv_obj: T):
+        rid = getattr(recv_obj, "rid", None)
+        if not rid:
+            logger.warning(
+                "Dropping correlated communicator response missing rid. type=%s",
+                type(recv_obj).__name__,
+            )
+            return
+
+        waiter = self._pending.get(rid)
+        if waiter is None:
+            logger.warning(
+                "Dropping correlated communicator response with no active waiter. rid=%s type=%s",
+                rid,
+                type(recv_obj).__name__,
+            )
+            return
+
+        waiter.values.append(recv_obj)
+        if len(waiter.values) >= self._fan_out:
+            waiter.event.set()
+
+
 class _Communicator[T]:
     """Note: The communicator now only run up to 1 in-flight request at any time."""
 
     def __init__(self, sender, fan_out: int):
         self._sender = sender
         self._fan_out = fan_out
+        self._lock = asyncio.Lock()
         self._result_event: asyncio.Event | None = None
         self._result_values: list[T] | None = None
-        self._ready_queue: deque[asyncio.Future] = deque()
 
-    async def __call__(self, obj):
-        ready_event = asyncio.Event()
-        if self._result_event is not None or len(self._ready_queue) > 0:
-            self._ready_queue.append(ready_event)
-            await ready_event.wait()
-            assert self._result_event is None
-            assert self._result_values is None
+    async def __call__(self, obj, timeout: float | None = None):
+        async with self._lock:
+            if self._result_event is not None or self._result_values is not None:
+                raise RuntimeError(
+                    "Communicator received a new call while a previous call is still active."
+                )
 
-        if obj:
-            self._sender.send_pyobj(obj)
+            self._result_event = asyncio.Event()
+            self._result_values = []
+            try:
+                if obj is not None:
+                    self._sender.send_pyobj(obj)
 
-        self._result_event = asyncio.Event()
-        self._result_values = []
-        await self._result_event.wait()
-        result_values = self._result_values
-        self._result_event = self._result_values = None
+                wait_coro = self._result_event.wait()
+                if timeout is not None and timeout > 0:
+                    await asyncio.wait_for(wait_coro, timeout=timeout)
+                else:
+                    await wait_coro
 
-        if len(self._ready_queue) > 0:
-            self._ready_queue.popleft().set()
-
-        return result_values
+                return list(self._result_values)
+            finally:
+                self._result_event = None
+                self._result_values = None
 
     def handle_recv(self, recv_obj: T):
+        if self._result_values is None or self._result_event is None:
+            logger.warning(
+                "Dropping communicator response with no active waiter. type=%s",
+                type(recv_obj).__name__,
+            )
+            return
         self._result_values.append(recv_obj)
-        if len(self._result_values) == self._fan_out:
+        if len(self._result_values) >= self._fan_out:
             self._result_event.set()
