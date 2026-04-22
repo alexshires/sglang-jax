@@ -20,6 +20,7 @@ sglang-jax specific features:
 - xai_temperature support for Grok-style models
 - cu_kv_lens-based page_indices offset computation
 """
+
 import functools
 import inspect as _inspect
 import logging
@@ -109,9 +110,9 @@ def ref_ragged_paged_attention(
 ):
     """Reference implementation for ragged paged attention."""
     if not causal:
-        assert (
-            custom_mask is not None and custom_mask.size > jnp.cumsum(kv_lens)[-1]
-        ), f"use custom_mask, custom_mask length {custom_mask.size=} must larger than total kv length {jnp.cumsum(kv_lens)[-1]=}"
+        assert custom_mask is not None and custom_mask.size > jnp.cumsum(kv_lens)[-1], (
+            f"use custom_mask, custom_mask length {custom_mask.size=} must larger than total kv length {jnp.cumsum(kv_lens)[-1]=}"
+        )
     if mask_value is None:
         mask_value = DEFAULT_MASK_VALUE
     _, _, num_kv_heads, head_dim = k_pages.shape
@@ -1015,7 +1016,6 @@ def _ragged_paged_attention_kernel_loop(
                                     pl.ds(bkv_start, bkv_csz),
                                     0,
                                 ]
-
                             # Slice xai temperature for this compute sub-block
                             cur_xai_temp = None
                             if xai_temperature_reg is not None:
@@ -1325,7 +1325,7 @@ def static_validate_inputs(
 
     if actual_num_q_heads % actual_num_kv_heads != 0:
         raise ValueError(
-            f"Expected {actual_num_q_heads=} to be divisible by" f" {actual_num_kv_heads=}."
+            f"Expected {actual_num_q_heads=} to be divisible by {actual_num_kv_heads=}."
         )
 
     if kv_cache_fused is not None:
@@ -1347,10 +1347,9 @@ def static_validate_inputs(
             f"Expected int32 dtype for {kv_lens.dtype=}, {page_indices.dtype=},"
             f" {cu_q_lens.dtype=}, {cu_kv_lens.dtype=}, {distribution.dtype=}"
         )
-
     if not (len(kv_lens.shape) == len(page_indices.shape) == len(cu_q_lens.shape) == 1):
         raise ValueError(
-            f"Expected 1D array for {kv_lens.shape=}, {page_indices.shape=}," f" {cu_q_lens.shape=}"
+            f"Expected 1D array for {kv_lens.shape=}, {page_indices.shape=}, {cu_q_lens.shape=}"
         )
 
     max_num_seqs = kv_lens.shape[0]
@@ -1398,7 +1397,6 @@ def static_validate_inputs(
 
     if vmem_limit_bytes is not None and vmem_limit_bytes <= 0:
         raise ValueError(f"{vmem_limit_bytes=} must be positive.")
-
     del sm_scale
     del mask_value
     del q_scale
@@ -1453,8 +1451,7 @@ def dynamic_validate_inputs(
             page_idx = int(page_indices[seq_idx * pages_per_seq + p])
             if page_idx < 0 or page_idx >= total_num_pages:
                 raise ValueError(
-                    f"Sequence {seq_idx}, page {p}: index={page_idx} "
-                    f"out of [0, {total_num_pages})"
+                    f"Sequence {seq_idx}, page {p}: index={page_idx} out of [0, {total_num_pages})"
                 )
 
 

@@ -101,6 +101,152 @@ class FlashAttention(AttentionBackend):
         self.mesh = mesh
         self.swa_index_mapping = None
 
+    @staticmethod
+    def _build_causal_extend_mask(q_len: int, kv_len: int) -> np.ndarray:
+        """Build causal mask for extend requests where q corresponds to suffix tokens."""
+        mask = np.zeros((q_len, kv_len), dtype=np.int32)
+        prefix_len = kv_len - q_len
+        for q_pos in range(q_len):
+            mask[q_pos, : prefix_len + q_pos + 1] = 1
+        return mask
+
+    @staticmethod
+    @jax.jit
+    def _calculate_row_seg_starts_jit(tokens: jax.Array, delimiter_token_id: int):
+        """JIT-optimized version of multi-item segment layout calculation."""
+        is_delim = tokens == delimiter_token_id
+        indices = jnp.arange(tokens.shape[0])
+
+        def scan_fn(last_start, x):
+            is_d, idx = x
+            current_start = last_start
+            next_start = jnp.where(is_d, idx + 1, last_start)
+            return next_start, current_start
+
+        _, row_seg_starts = jax.lax.scan(scan_fn, jnp.int32(0), (is_delim, indices))
+
+        # First delimiter and everything before it belongs to the shared prefix (start=0)
+        first_delim_idx = jnp.argmax(is_delim)
+        row_seg_starts = jnp.where(indices <= first_delim_idx, 0, row_seg_starts)
+        prefix_end = first_delim_idx + 1
+
+        return prefix_end, row_seg_starts
+
+    @staticmethod
+    @jax.jit
+    def _build_multi_item_attention_mask_jit(
+        tokens: jax.Array, delimiter_token_id: int
+    ) -> jax.Array:
+        """Vectorized mask builder optimized for XLA static compilation."""
+        q_len = tokens.shape[0]
+
+        # 1. Identify delimiter positions (Query <d1> Item1 <d2> ...)
+        is_delimiter = tokens == delimiter_token_id
+        block_ids = jnp.cumsum(is_delimiter)  # Query=0, d1=1, Item1=1, d2=2...
+
+        row_blocks = block_ids[:, None]
+        col_blocks = block_ids[None, :]
+
+        # 2. Basic Causal Visibility
+        indices = jnp.arange(q_len)
+        causal_mask = indices[:, None] >= indices[None, :]
+
+        # 3. Multi-Item Scoring Logic:
+        # A token can see a column if it is Causal AND (is Shared Prefix OR is Same Block)
+        # Shared Prefix is block_id 0 (query) and block_id 1 (first delimiter)
+        is_visible = (col_blocks <= 1) | (row_blocks == col_blocks)
+
+        return (causal_mask & is_visible).astype(jnp.int32)
+
+    @staticmethod
+    def _build_multi_item_attention_mask(tokens: np.ndarray, delimiter_token_id: int) -> np.ndarray:
+        """Build shared-prefix + block-diagonal mask for a single multi-item sequence.
+
+        Layout: query<d1>item1<d2>item2<d3>...itemN<d{N+1}>
+
+        - Shared prefix is query + first delimiter d1.
+        - Each item block is isolated from other item blocks.
+        - Delimiter after each item belongs to the same block as that item.
+        """
+        q_len = tokens.shape[0]
+        kv_len = q_len
+        delimiter_indices = np.flatnonzero(tokens == delimiter_token_id)
+        if delimiter_indices.size == 0:
+            raise ValueError(
+                f"Multi-item scoring sequence must contain delimiter token {delimiter_token_id}."
+            )
+
+        query_len = int(delimiter_indices[0])
+        if query_len <= 0:
+            raise ValueError(
+                "Multi-item scoring requires a non-empty query prefix before delimiter."
+            )
+        if delimiter_indices.size < 2:
+            raise ValueError("Multi-item scoring sequence must contain at least two delimiters.")
+
+        # Shared prefix includes query plus the first delimiter.
+        prefix_end = query_len + 1
+
+        mask = np.zeros((q_len, kv_len), dtype=np.int32)
+
+        # Causal attention in the shared prefix.
+        for q_pos in range(prefix_end):
+            mask[q_pos, : q_pos + 1] = 1
+
+        # For block i:
+        #   start = delimiter_indices[i] + 1         (first token of item i+1)
+        #   end_d = delimiter_indices[i + 1]         (delimiter after item i+1)
+        # Tokens in [start, end_d] attend to shared prefix + causal within [start, end_d].
+        for i in range(delimiter_indices.size - 1):
+            seg_start = int(delimiter_indices[i]) + 1
+            seg_end_delim = int(delimiter_indices[i + 1])
+            if seg_start > seg_end_delim:
+                raise ValueError("Invalid multi-item delimiter layout: empty item block boundary.")
+
+            for q_pos in range(seg_start, seg_end_delim + 1):
+                mask[q_pos, :prefix_end] = 1
+                mask[q_pos, seg_start : q_pos + 1] = 1
+
+        return mask
+
+    @staticmethod
+    def _build_multi_item_segment_layout(
+        tokens: np.ndarray,
+        delimiter_token_id: int,
+    ) -> tuple[int, np.ndarray]:
+        """Build per-row segment metadata for shared-prefix multi-item masking.
+
+        Returns:
+            prefix_end: shared prefix end (exclusive).
+            row_seg_starts: for each query row, the first key index of its item segment.
+        """
+        q_len = tokens.shape[0]
+        delimiter_indices = np.flatnonzero(tokens == delimiter_token_id)
+        if delimiter_indices.size == 0:
+            raise ValueError(
+                f"Multi-item scoring sequence must contain delimiter token {delimiter_token_id}."
+            )
+
+        query_len = int(delimiter_indices[0])
+        if query_len <= 0:
+            raise ValueError(
+                "Multi-item scoring requires a non-empty query prefix before delimiter."
+            )
+        if delimiter_indices.size < 2:
+            raise ValueError("Multi-item scoring sequence must contain at least two delimiters.")
+
+        prefix_end = query_len + 1
+        row_seg_starts = np.zeros((q_len,), dtype=np.int32)
+
+        for i in range(delimiter_indices.size - 1):
+            seg_start = int(delimiter_indices[i]) + 1
+            seg_end_delim = int(delimiter_indices[i + 1])
+            if seg_start > seg_end_delim:
+                raise ValueError("Invalid multi-item delimiter layout: empty item block boundary.")
+            row_seg_starts[seg_start : seg_end_delim + 1] = seg_start
+
+        return prefix_end, row_seg_starts
+
     def get_forward_metadata(
         self,
         batch: ModelWorkerBatch,
@@ -156,7 +302,9 @@ class FlashAttention(AttentionBackend):
         else:
             raise ValueError(f"Invalid forward mode: {batch.forward_mode}")
 
+        sharding = NamedSharding(self.mesh, P()) if jax.process_count() == 1 else None
         (
+            metadata.num_seqs,
             metadata.cu_q_lens,
             metadata.cu_kv_lens,
             metadata.page_indices,
@@ -164,9 +312,18 @@ class FlashAttention(AttentionBackend):
             metadata.seq_lens,
             metadata.distribution,
         ) = device_array(
-            (cu_q_lens, cu_kv_lens, page_indices, swa_page_indices, seq_lens, distribution),
-            sharding=(NamedSharding(self.mesh, P()) if jax.process_count() == 1 else None),
+            (
+                np.array([num_seqs], dtype=np.int32),
+                cu_q_lens,
+                cu_kv_lens,
+                page_indices,
+                swa_page_indices,
+                seq_lens,
+                distribution,
+            ),
+            sharding=sharding,
         )
+        metadata.custom_mask = None
         return metadata
 
     def get_eagle_forward_metadata(self, batch: ModelWorkerBatch):
@@ -511,6 +668,7 @@ class FlashAttention(AttentionBackend):
                 xai_temperature_len=(
                     layer.xai_temperature_len if layer.xai_temperature_len > 0 else None
                 ),
+                vmem_limit_bytes=self.vmem_limit_bytes,
             )
 
             return result, updated_kv_cache_fused
@@ -554,7 +712,7 @@ class FlashAttention(AttentionBackend):
     def get_max_running_reqests(max_context_len: int, page_size: int) -> int:
         num_page_per_req = cdiv(max_context_len, page_size)
         res = 1024 * 1024 // 2 // num_page_per_req // 4
-        assert (
-            res > 0
-        ), f"max running requests: {res} must larger than 0, please increase page size or decrease max context length"
+        assert res > 0, (
+            f"max running requests: {res} must larger than 0, please increase page size or decrease max context length"
+        )
         return res

@@ -172,6 +172,8 @@ class Req:
         multimodal_embedding: list[list[float]] | None = None,
         deepstack_visual_embedding: list[list[float]] | None = None,
         deepstack_visual_pos_mask: list[int] | None = None,
+        cache_for_scoring: bool = False,
+        extend_from_cache: str | None = None,
     ):
         # Input and output info
         self.rid = rid
@@ -198,6 +200,8 @@ class Req:
         # Sampling info
         self.sampling_params = sampling_params
         self.return_hidden_states = return_hidden_states
+        self.cache_for_scoring = cache_for_scoring
+        self.extend_from_cache = extend_from_cache
 
         # Extra key for cache namespace isolation (e.g., cache_salt, lora_id)
         if lora_id is not None:
@@ -1329,14 +1333,23 @@ class ScheduleBatch:
 
         # Calculate positions after padding
         if self.forward_mode.is_extend():
-            # For prefill: create positions for each token in sequences
-            # Calculate total tokens without padding first
-            total_tokens_before_padding = sum([extend_len for extend_len in self.extend_lens])
-            positions_cpu = np.concatenate(
-                [
-                    np.arange(prefix_len, seq_len, dtype=seq_lens_cpu.dtype)
-                    for seq_len, prefix_len in zip(seq_lens_cpu, self.prefix_lens)
-                ]
+            # For prefill: create positions for each token in sequences.
+            # Multi-item scoring requests use delimiter-reset positions to remove
+            # length-coupled position drift across item blocks.
+            total_tokens_before_padding = sum(self.extend_lens)
+            position_chunks = [
+                _build_extend_positions_for_req(
+                    req=req,
+                    seq_len=int(seq_len),
+                    prefix_len=int(prefix_len),
+                    dtype=seq_lens_cpu.dtype,
+                )
+                for req, seq_len, prefix_len in zip(self.reqs, seq_lens_cpu, self.prefix_lens)
+            ]
+            positions_cpu = (
+                np.concatenate(position_chunks)
+                if position_chunks
+                else np.array([], dtype=seq_lens_cpu.dtype)
             )
 
             # If input_ids was padded, pad positions too
@@ -1565,7 +1578,6 @@ class ScheduleBatch:
         else:
             self.apply_for_deepstack = False
             self.deepstack_visual_embedding = None
-
         return ModelWorkerBatch(
             bid=bid,
             forward_mode=self.forward_mode,
@@ -1578,6 +1590,7 @@ class ScheduleBatch:
             return_output_logprob_only=self.return_output_logprob_only,
             top_logprobs_nums=self.top_logprobs_nums,
             token_ids_logprobs=self.token_ids_logprobs,
+            is_prefill_only=self.is_prefill_only,
             sampling_info=sampling_info,
             positions=positions_cpu,
             mrope_positions=mrope_positions_cpu,
@@ -1643,19 +1656,20 @@ class ScheduleBatch:
             # For prefill: create positions for each token in sequences
             # Calculate total tokens without padding first
             if positions_cpu is None:
-                lengths = seq_lens_cpu - self.prefix_lens
-                if len(lengths) > 0:
-                    repeats = lengths
-                    total_len = np.sum(repeats)
-                    # Generate range [0, 1, ... len-1] for each sequence
-                    block_starts = np.concatenate(([0], np.cumsum(repeats)[:-1]))
-                    shifts = np.repeat(block_starts, repeats)
-                    ranges = np.arange(total_len) - shifts
-                    # Add prefix_len to each range
-                    positions_cpu = np.repeat(self.prefix_lens, repeats) + ranges
-                    positions_cpu = positions_cpu.astype(seq_lens_cpu.dtype)
-                else:
-                    positions_cpu = np.array([], dtype=seq_lens_cpu.dtype)
+                position_chunks = [
+                    _build_extend_positions_for_req(
+                        req=req,
+                        seq_len=int(seq_len),
+                        prefix_len=int(prefix_len),
+                        dtype=seq_lens_cpu.dtype,
+                    )
+                    for req, seq_len, prefix_len in zip(self.reqs, seq_lens_cpu, self.prefix_lens)
+                ]
+                positions_cpu = (
+                    np.concatenate(position_chunks)
+                    if position_chunks
+                    else np.array([], dtype=seq_lens_cpu.dtype)
+                )
         else:
             if positions_cpu is None:
                 # For decode: each sequence contributes one token at the next position (seq_len)
@@ -1744,7 +1758,6 @@ class ScheduleBatch:
             self._generate_trace_info(real_bs, bid)
         # Extract lora_ids from requests
         lora_ids = [req.lora_id for req in self.reqs]
-
         return ModelWorkerBatch(
             bid=bid,
             forward_mode=self.forward_mode,
@@ -1757,6 +1770,7 @@ class ScheduleBatch:
             return_output_logprob_only=self.return_output_logprob_only,
             top_logprobs_nums=self.top_logprobs_nums,
             token_ids_logprobs=self.token_ids_logprobs,
+            is_prefill_only=self.is_prefill_only,
             sampling_info=self.sampling_info,
             positions=positions_cpu,
             mrope_positions=mrope_positions_cpu,
@@ -1874,6 +1888,12 @@ class ScheduleBatch:
 def align_to_size(lst: list, size: int, value: int = 0) -> list:
     align_len = (len(lst) + size - 1) // size * size
     return lst[:] + [value] * (align_len - len(lst))
+
+
+def _build_extend_positions_for_req(
+    req: Req, seq_len: int, prefix_len: int, dtype: np.dtype
+) -> np.ndarray:
+    return np.arange(prefix_len, seq_len, dtype=dtype)
 
 
 def _extract_mm_value(mm_inputs: Any, key: str):
@@ -2002,6 +2022,7 @@ class ModelWorkerBatch:
     return_output_logprob_only: bool
     top_logprobs_nums: list[int] | None
     token_ids_logprobs: list[list[int]] | None
+    is_prefill_only: bool
 
     # For extend
     # extend_num_tokens: Optional[int]
@@ -2012,6 +2033,7 @@ class ModelWorkerBatch:
 
     # For padding
     real_bs: int
+    extend_start_loc: np.ndarray | None = None
 
     # For LoRA
     lora_ids: list[str] | None = None

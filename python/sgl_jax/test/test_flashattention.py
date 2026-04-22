@@ -296,6 +296,7 @@ def create_test_data(
         return_output_logprob_only=False,
         top_logprobs_nums=None,
         token_ids_logprobs=None,
+        is_prefill_only=(forward_mode == ForwardMode.EXTEND),
         extend_logprob_start_lens=None,
         extend_input_logprob_token_ids=None,
         real_bs=seq_lens.shape[0],
@@ -1056,6 +1057,19 @@ class TestAttention(CustomTestCase):
             max_total_token_size=200000,
             attention_sink=attention_sink,
         )
+
+    def test_build_causal_extend_mask_with_prefix(self):
+        # kv has 2 prefix tokens + 3 extend tokens.
+        mask = FlashAttention._build_causal_extend_mask(q_len=3, kv_len=5)
+        expected = np.array(
+            [
+                [1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 0],
+                [1, 1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        self.assertTrue(np.array_equal(mask, expected))
 
 
 if __name__ == "__main__":
