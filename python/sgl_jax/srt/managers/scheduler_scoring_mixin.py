@@ -76,7 +76,19 @@ class SchedulerScoringMixin:
         print_mem("score_from_cache_v2 start")
         score_start = time.perf_counter()
         total_items = len(recv_req.items_2d)
-        items_per_step = 16  # Default batch size for scoring
+        items_per_step = getattr(recv_req, "items_per_step", 16) or 16
+
+        max_running_requests = int(getattr(self.server_args, "max_running_requests", 0) or 0)
+        if max_running_requests > 0 and not getattr(self.server_args, "score_v2_allow_reqpool_oversubscribe", False):
+            items_per_step = min(items_per_step, max_running_requests)
+
+        req_to_token_pool = getattr(self, "req_to_token_pool", None)
+        if req_to_token_pool is not None and hasattr(req_to_token_pool, "available_size"):
+            try:
+                req_pool_available = int(req_to_token_pool.available_size())
+                items_per_step = min(items_per_step, req_pool_available)
+            except Exception:
+                pass
 
         entry = self.scoring_cache_nodes.get(recv_req.cache_handle)
         if entry is None:

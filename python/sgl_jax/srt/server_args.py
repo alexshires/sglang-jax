@@ -135,6 +135,7 @@ class ServerArgs:
     enable_precision_tracer: bool = False
     enable_gc_freeze: bool = False
     gc_freeze_rollback: bool = False
+    score_v2_allow_reqpool_oversubscribe: bool = False
 
     # Kernel backend
     attention_backend: str | None = "fa"
@@ -883,6 +884,11 @@ class ServerArgs:
             "--gc-freeze-rollback",
             action="store_true",
             help="Immediately rollback gc.freeze via gc.unfreeze after warmup/precompile. Useful as a safety valve when validating freeze behavior.",
+        )
+        parser.add_argument(
+            "--score-v2-allow-reqpool-oversubscribe",
+            action="store_true",
+            help="Allow oversubscribing request pool for scoring workloads.",
         )
         parser.add_argument(
             "--enable-expert-balance-debug",
