@@ -108,6 +108,7 @@ class TestScoreAPIBench(unittest.TestCase):
                 "fa",
                 "--port",
                 "30000",
+                "--skip-server-warmup",
             ]
 
         cmd = ["python3", "-m", "sgl_jax.launch_server"] + flags
@@ -126,6 +127,29 @@ class TestScoreAPIBench(unittest.TestCase):
                 resp = requests.get(url, timeout=1)
                 if resp.status_code == 200:
                     logging.info("Server is ready!")
+                    logging.info("Waiting 15 seconds for warmup to drain...")
+                    time.sleep(15)
+                    
+                    # Warmup with 3 scoring requests
+                    logging.info("Sending 3 scoring warmup requests...")
+                    warmup_payload = {
+                        "query": "warmup",
+                        "items": ["warmup_item_1", "warmup_item_2"],
+                        "label_token_ids": LABEL_TOKEN_IDS,
+                        "model": MODEL_NAME,
+                        "apply_softmax": True,
+                    }
+                    for i in range(3):
+                        try:
+                            resp = requests.post(
+                                f"{API_URL}/v1/score",
+                                json=warmup_payload,
+                                timeout=60,
+                            )
+                            logging.info(f"Warmup request {i+1} status: {resp.status_code}")
+                        except Exception as e:
+                            logging.warning(f"Warmup request {i+1} failed: {e}")
+                    
                     break
             except requests.exceptions.ConnectionError:
                 pass
@@ -229,6 +253,24 @@ class TestScoreAPIBench(unittest.TestCase):
         logger.info(f"IPS:              {items_per_second:.2f}")
         logger.info(f"Telemetry:        {telemetry}")
         logger.info("=" * 40)
+
+        # Save results to JSON file for validation script
+        results_data = {
+            "name": name,
+            "total_time": total_time,
+            "successful_requests": successful_requests,
+            "num_requests": num_requests,
+            "rps": rps,
+            "ips": items_per_second,
+            "telemetry": telemetry,
+        }
+        try:
+            import json
+            with open("/tmp/bench_results.json", "w") as f:
+                json.dump(results_data, f)
+            logger.info("Saved results to /tmp/bench_results.json")
+        except Exception as e:
+            logger.error(f"Failed to save results to JSON: {e}")
 
         self.assertGreater(successful_requests, 0, "All requests failed!")
 
