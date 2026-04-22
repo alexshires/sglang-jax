@@ -70,6 +70,8 @@ Debugging Failed Tests:
 """
 
 import os
+
+os.environ["JAX_PLATFORMS"] = "cpu"
 import unittest
 from unittest.mock import patch
 
