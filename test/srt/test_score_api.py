@@ -81,6 +81,7 @@ os.environ["JAX_PLATFORMS"] = "tpu"
 import unittest
 from unittest.mock import patch
 
+import pytest
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from sgl_jax.srt.entrypoints.engine import Engine
@@ -312,6 +313,7 @@ class TestScoreAPI(CustomTestCase):
                 msg=f"SGLang scores don't sum to 1 ({case_name}): {sum(sglang_score_list):.6f}",
             )
 
+    @pytest.mark.skip(reason="OOM in pod environment due to double model loading")
     def test_score_consistency(self):
         """Test that SGLang scoring matches direct HuggingFace model scoring.
 
