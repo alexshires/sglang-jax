@@ -1322,11 +1322,11 @@ class TokenizerManager:
 
             # Apply softmax to logprobs if needed
             if apply_softmax:
-                import jax
-                import jax.numpy as jnp
+                import numpy as np
 
-                with jax.default_device(jax.devices("cpu")[0]):
-                    score_list = jax.nn.softmax(jnp.asarray(score_list), axis=0).tolist()
+                scores_np = np.asarray(score_list, dtype=np.float64)
+                e_x = np.exp(scores_np - np.max(scores_np))
+                score_list = (e_x / e_x.sum()).tolist()
             else:
                 # Convert logprobs to probabilities if not using softmax
                 score_list = [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
