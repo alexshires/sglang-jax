@@ -132,6 +132,8 @@ class ServerArgs:
     multi_item_score_label_only_logprob: bool = False
     disable_overlap_schedule: bool = False
     enable_precision_tracer: bool = False
+    enable_gc_freeze: bool = False
+    gc_freeze_rollback: bool = False
 
     # Kernel backend
     attention_backend: str | None = "fa"
@@ -865,6 +867,16 @@ class ServerArgs:
             "--enable-precision-tracer",
             action="store_true",
             help="Enable precision tracer for debugging tensor values. May have performance impact.",
+        )
+        parser.add_argument(
+            "--enable-gc-freeze",
+            action="store_true",
+            help="Freeze long-lived Python GC objects after scheduler warmup/precompile.",
+        )
+        parser.add_argument(
+            "--gc-freeze-rollback",
+            action="store_true",
+            help="Immediately rollback gc.freeze via gc.unfreeze after warmup/precompile. Useful as a safety valve when validating freeze behavior.",
         )
         parser.add_argument(
             "--enable-expert-balance-debug",
