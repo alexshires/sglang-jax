@@ -13,3 +13,4 @@ multi-item-score-from-cache-v2-items-per-step: 64
 disable-overlap-schedule: true
 enable-gc-freeze: true
 enable-tokenizer-batch-send: true
+score-v2-allow-reqpool-oversubscribe: true
