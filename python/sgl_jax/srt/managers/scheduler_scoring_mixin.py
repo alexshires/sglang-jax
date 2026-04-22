@@ -22,6 +22,51 @@ def print_mem(label):
 
 
 class SchedulerScoringMixin:
+
+    def _build_score_from_cache_v2_chunk_reqs(
+        self,
+        cache_handle: str,
+        chunk_items: list[list[int]],
+        label_token_ids: list[int],
+        cached_last_node,
+        cached_prefix_indices,
+        prefix_ids: list[int],
+        cached_extra_key: str | None,
+        return_label_logprobs: bool,
+    ) -> list[Req]:
+        reqs: list[Req] = []
+        chunk_uid = time.time_ns()
+        for local_idx, item_ids in enumerate(chunk_items):
+            sampling_params = SamplingParams(max_new_tokens=0)
+            sampling_params.stop_strs = []
+            sampling_params.stop_str_max_len = 0
+
+            rid = f"{cache_handle}-scorev2-{chunk_uid}-{local_idx}"
+            req = Req(
+                rid=rid,
+                origin_input_text=None,
+                origin_input_ids=prefix_ids + item_ids,
+                sampling_params=sampling_params,
+                return_logprob=return_label_logprobs,
+                return_output_logprob_only=False,
+                top_logprobs_num=0,
+                token_ids_logprob=label_token_ids if return_label_logprobs else None,
+                stream=False,
+                extra_key=cached_extra_key,
+                eos_token_ids=self.model_config.hf_eos_token_id,
+                vocab_size=self.model_config.vocab_size,
+                cache_for_scoring=False,
+            )
+            req.extend_from_cache = cache_handle
+            req.tokenizer = self.tokenizer
+            req.logprob_start_len = len(req.origin_input_ids) - 1
+            req.cached_last_node = cached_last_node
+            req.cached_last_host_node = cached_last_node
+            req.cached_prefix_indices = cached_prefix_indices
+            req.cached_host_hit_length = 0
+            reqs.append(req)
+        return reqs
+
     def score_from_cache_v2(self, recv_req):
         # Simple sequential chunking loop
         print_mem("score_from_cache_v2 start")
