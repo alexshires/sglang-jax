@@ -367,3 +367,47 @@ class SchedulerScoringMixin:
                     req.rid,
                 )
             req.req_pool_idx = None
+
+    def _record_scoring_cache_lookup(self, path: str, hit: bool) -> None:
+        if not hasattr(self, "scoring_cache_lookup_queries"):
+            self.scoring_cache_lookup_queries = 0
+            self.scoring_cache_lookup_hits = 0
+            self.scoring_cache_lookup_misses = 0
+            self.scoring_cache_lookup_by_path = {}
+
+        self.scoring_cache_lookup_queries += 1
+        if hit:
+            self.scoring_cache_lookup_hits += 1
+        else:
+            self.scoring_cache_lookup_misses += 1
+
+        bucket = self.scoring_cache_lookup_by_path.setdefault(
+            path,
+            {"queries": 0, "hits": 0, "misses": 0},
+        )
+        bucket["queries"] += 1
+        if hit:
+            bucket["hits"] += 1
+        else:
+            bucket["misses"] += 1
+
+    def _scoring_cache_metrics_snapshot(self) -> dict:
+        query_total = getattr(self, "scoring_cache_lookup_queries", 0)
+        hit_total = getattr(self, "scoring_cache_lookup_hits", 0)
+        miss_total = getattr(self, "scoring_cache_lookup_misses", 0)
+        hit_rate = float(hit_total / query_total) if query_total > 0 else 0.0
+        
+        scoring_cache_nodes = getattr(self, "scoring_cache_nodes", {})
+        
+        return {
+            "active_handles": len(scoring_cache_nodes),
+            "handles_created": getattr(self, "scoring_cache_handles_created", 0),
+            "handles_released_total": getattr(self, "scoring_cache_handles_released", 0),
+            "handles_released_manual": getattr(self, "scoring_cache_handles_released_manual", 0),
+            "handles_released_expired": getattr(self, "scoring_cache_handles_released_expired", 0),
+            "lookup_queries": query_total,
+            "lookup_hits": hit_total,
+            "lookup_misses": miss_total,
+            "lookup_hit_rate": hit_rate,
+            "lookup_by_path": getattr(self, "scoring_cache_lookup_by_path", {}),
+        }
