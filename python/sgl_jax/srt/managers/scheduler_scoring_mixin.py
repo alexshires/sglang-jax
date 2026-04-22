@@ -60,6 +60,9 @@ class SchedulerScoringMixin:
             req.extend_from_cache = cache_handle
             req.tokenizer = self.tokenizer
             req.logprob_start_len = len(req.origin_input_ids) - 1
+            assert (
+                req.extend_from_cache is not None
+            ), f"DEBUG: extend_from_cache is None in Mixin for rid {req.rid}"
             req.cached_last_node = cached_last_node
             req.cached_last_host_node = cached_last_node
             req.cached_prefix_indices = cached_prefix_indices
