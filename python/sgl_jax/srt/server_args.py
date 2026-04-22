@@ -130,6 +130,7 @@ class ServerArgs:
     multi_item_extend_batch_size: int = 64
     multi_item_score_from_cache_v2_items_per_step: int = 64
     multi_item_score_label_only_logprob: bool = False
+    enable_tokenizer_batch_send: bool = False
     disable_overlap_schedule: bool = False
     enable_precision_tracer: bool = False
     enable_gc_freeze: bool = False
