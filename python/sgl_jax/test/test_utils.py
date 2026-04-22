@@ -29,7 +29,7 @@ from sgl_jax.srt.server_args import ServerArgs
 from sgl_jax.srt.utils.common_utils import get_bool_env_var, retry
 
 DEFAULT_MODEL_NAME_FOR_TEST = "Qwen/Qwen3-8B"
-DEFAULT_SMALL_MODEL_NAME_FOR_TEST = "Qwen/Qwen3-1.7B"
+DEFAULT_SMALL_MODEL_NAME_FOR_TEST = "/models/Qwen/Qwen3-0.6B"
 QWEN3_8B = "Qwen/Qwen3-8B"
 QWEN_7B = "Qwen/Qwen-7B"
 
