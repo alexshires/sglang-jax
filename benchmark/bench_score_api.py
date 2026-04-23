@@ -123,6 +123,11 @@ class TestScoreAPIBench(unittest.TestCase):
         url = "http://127.0.0.1:30000/get_model_info"
         logging.info("Waiting for server to be ready...")
         for _ in range(60):  # Wait up to 5 minutes (5s intervals)
+            # Check if server process died
+            exit_code = cls.server_proc.poll()
+            if exit_code is not None:
+                raise RuntimeError(f"Server process died with exit code {exit_code}. Check /tmp/server_auto.log for errors.")
+                
             try:
                 resp = requests.get(url, timeout=1)
                 if resp.status_code == 200:
