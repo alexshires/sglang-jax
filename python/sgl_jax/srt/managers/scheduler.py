@@ -427,6 +427,7 @@ class Scheduler(
                 (SetInternalStateReq, self.set_internal_state),
                 (PauseGenerationReqInput, self.pause_generation),
                 (ContinueGenerationReqInput, self.continue_generation),
+                (ScoreFromCacheReqInput, self.score_from_cache_v2),
             ]
         )
 
