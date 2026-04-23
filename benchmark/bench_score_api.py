@@ -13,12 +13,15 @@
 # limitations under the License.
 
 import concurrent.futures
+import dataclasses
+from dataclasses import field
 import logging
 import os
 import time
 import unittest
 from typing import Any
 
+import numpy as np
 import requests
 import subprocess
 import yaml
@@ -27,6 +30,48 @@ import yaml
 API_URL = os.getenv("SGLANG_API_URL", "http://127.0.0.1:30000")
 MODEL_NAME = os.getenv("SGLANG_MODEL_NAME", "qwen3-0-6b")
 LABEL_TOKEN_IDS = [9693, 2152]  # Default label IDs
+
+@dataclasses.dataclass
+class BenchmarkResult:
+    name: str
+    total_time_sec: float
+    num_items: int
+    prompt_len: int
+    candidate_len: int
+    num_candidates: int = 0
+    latencies: list[float] = field(default_factory=list)
+
+    def report(self, telemetry=""):
+        throughput = self.num_items / self.total_time_sec
+        avg_lat_item = (self.total_time_sec * 1000) / self.num_items
+        tokens_per_sec = throughput * self.candidate_len
+        reqs_per_sec = (
+            throughput / max(1, self.num_candidates)
+            if self.num_candidates > 0
+            else throughput
+        )
+        if self.latencies:
+            avg_lat_req = np.mean(self.latencies)
+        else:
+            avg_lat_req = self.total_time_sec * 1000
+
+        config_str = f"{self.prompt_len}p/"
+        if self.num_candidates > 0:
+            config_str += f"{self.num_candidates}x{self.candidate_len}i"
+        else:
+            config_str += f"{self.candidate_len}i"
+
+        rep = (
+            f"[{self.name}] Results: {telemetry} "
+            f"Config: {config_str} | "
+            f"Throughput: {throughput:.2f} i/s | Tokens/s: {tokens_per_sec:.2f} t/s | Reqs/s: {reqs_per_sec:.2f} r/s | "
+            f"Lat/Item: {avg_lat_item:.2f} ms | Lat/Req: {avg_lat_req:.2f} ms"
+        )
+        if self.latencies:
+            p50_req = np.percentile(self.latencies, 50)
+            p99_req = np.percentile(self.latencies, 99)
+            rep += f" | P50_Req: {p50_req:.2f} ms | P99_Req: {p99_req:.2f} ms"
+        logging.info(rep)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -206,10 +251,13 @@ class TestScoreAPIBench(unittest.TestCase):
         start_time = time.perf_counter()
         successful_requests = 0
 
+        latencies = []
         def send_request():
             try:
+                s = time.perf_counter()
                 resp = requests.post(f"{API_URL}/v1/score", json=payload, timeout=300)
                 resp.raise_for_status()
+                latencies.append((time.perf_counter() - s) * 1000)
                 return True
             except Exception as e:
                 logger.debug(f"Request failed: {e}")
@@ -247,15 +295,17 @@ class TestScoreAPIBench(unittest.TestCase):
         rps = successful_requests / total_time
         items_per_second = (successful_requests * num_items) / total_time
 
-        logger.info("\n" + "=" * 40)
-        logger.info(f"📊 RESULTS for {name}")
-        logger.info("=" * 40)
-        logger.info(f"Total Time:       {total_time:.4f} s")
-        logger.info(f"Success Rate:     {successful_requests}/{num_requests}")
-        logger.info(f"RPS:              {rps:.2f}")
-        logger.info(f"IPS:              {items_per_second:.2f}")
-        logger.info(f"Telemetry:        {telemetry}")
-        logger.info("=" * 40)
+        # Use BenchmarkResult for beautiful reporting
+        result = BenchmarkResult(
+            name=name,
+            total_time_sec=total_time,
+            num_items=successful_requests * num_items,
+            prompt_len=query_len,
+            candidate_len=item_len,
+            num_candidates=num_items,
+            latencies=latencies,
+        )
+        result.report(telemetry)
 
         # Save results to JSON file for validation script
         results_data = {
