@@ -265,6 +265,12 @@ class Req:
         self.swa_uuid_for_lock: int | None = None
         # The prefix length of the last prefix matching
         self.last_matched_prefix_len: int = 0
+        # Optional fast-path prefix context for extend-from-cache requests.
+        # When populated, init_next_round_input can skip an expensive radix match.
+        self.cached_prefix_indices: np.ndarray | None = None
+        self.cached_last_node: Any = None
+        self.cached_last_host_node: Any = None
+        self.cached_host_hit_length: int = 0
 
         # Whether or not if it is chunked. It increments whenever
         # it is chunked, and decrement whenever chunked request is
@@ -343,6 +349,10 @@ class Req:
         self.has_log_time_stats: bool = False
         self.queue_time_start = None
         self.queue_time_end = None
+        self.queue_wait_time_s: float = 0.0
+        self.device_compute_time_s: float = 0.0
+        self.host_overhead_time_s: float = 0.0
+        self.scheduler_dispatch_count: int = 0
 
         # the start index of the sent kv cache
         # We want to send it chunk by chunk for chunked prefill.
@@ -391,14 +401,28 @@ class Req:
     ):
         self.fill_ids = self.origin_input_ids + self.output_ids
         if tree_cache is not None:
-            (
-                self.prefix_indices,
-                self.last_node,
-                self.last_host_node,
-                self.host_hit_length,
-            ) = tree_cache.match_prefix(
-                key=RadixKey(self.adjust_max_prefix_ids(), self.extra_key),
-            )
+            if (
+                self.extend_from_cache
+                and self.cached_prefix_indices is not None
+                and self.cached_last_node is not None
+            ):
+                self.prefix_indices = self.cached_prefix_indices
+                self.last_node = self.cached_last_node
+                self.last_host_node = (
+                    self.cached_last_host_node
+                    if self.cached_last_host_node is not None
+                    else self.cached_last_node
+                )
+                self.host_hit_length = self.cached_host_hit_length
+            else:
+                (
+                    self.prefix_indices,
+                    self.last_node,
+                    self.last_host_node,
+                    self.host_hit_length,
+                ) = tree_cache.match_prefix(
+                    key=RadixKey(self.adjust_max_prefix_ids(), self.extra_key),
+                )
             self.last_matched_prefix_len = len(self.prefix_indices)
         self.extend_input_len = len(self.fill_ids) - len(self.prefix_indices)
 
@@ -672,7 +696,7 @@ class ScheduleBatch:
         is_hybrid = False
         if isinstance(token_to_kv_pool_allocator, SWATokenToKVPoolAllocator):
             assert tree_cache is None or isinstance(
-                tree_cache, (SWARadixCache, ChunkCache)
+                tree_cache, SWARadixCache | ChunkCache
             ), "SWARadixCache or ChunkCache is required for SWATokenToKVPoolAllocator"
             is_hybrid = True
 
@@ -938,6 +962,10 @@ class ScheduleBatch:
         self.seq_lens_sum = sum(seq_lens)
 
         if self.return_logprob:
+            self.top_logprobs_nums = [r.top_logprobs_num for r in reqs]
+            self.token_ids_logprobs = [r.token_ids_logprob for r in reqs]
+        elif self.return_output_logprob_only:
+            # Output-only logprobs may still request specific token-id logprobs.
             self.top_logprobs_nums = [r.top_logprobs_num for r in reqs]
             self.token_ids_logprobs = [r.token_ids_logprob for r in reqs]
 
@@ -1209,7 +1237,7 @@ class ScheduleBatch:
         self.output_ids = self.output_ids[keep_indices] if self.output_ids is not None else None
         self.return_logprob = any(req.return_logprob for req in self.reqs)
         self.return_output_logprob_only = any(req.return_output_logprob_only for req in self.reqs)
-        if self.return_logprob:
+        if self.return_logprob or self.return_output_logprob_only:
             self.top_logprobs_nums = [self.top_logprobs_nums[i] for i in keep_indices]
             self.token_ids_logprobs = [self.token_ids_logprobs[i] for i in keep_indices]
         else:
@@ -1250,13 +1278,15 @@ class ScheduleBatch:
                     other.output_ids[: len(other.seq_lens)],
                 ]
             )
-        if self.return_logprob and other.return_logprob:
+        self_needs_sampling_logprob = self.return_logprob or self.return_output_logprob_only
+        other_needs_sampling_logprob = other.return_logprob or other.return_output_logprob_only
+        if self_needs_sampling_logprob and other_needs_sampling_logprob:
             self.top_logprobs_nums.extend(other.top_logprobs_nums)
             self.token_ids_logprobs.extend(other.token_ids_logprobs)
-        elif self.return_logprob:
+        elif self_needs_sampling_logprob:
             self.top_logprobs_nums.extend([0] * len(other.reqs))
             self.token_ids_logprobs.extend([None] * len(other.reqs))
-        elif other.return_logprob:
+        elif other_needs_sampling_logprob:
             self.top_logprobs_nums = [0] * len(self.reqs) + other.top_logprobs_nums
             self.token_ids_logprobs = [None] * len(self.reqs) + other.token_ids_logprobs
         self.reqs.extend(other.reqs)
@@ -1295,7 +1325,7 @@ class ScheduleBatch:
             extend_prefix_lens = np.array(self.prefix_lens, dtype=np.int32)
             bs_paddings = bs_paddings[-1:]
             cache_loc_paddings = cache_loc_paddings[-1:]
-            extend_logprob_start_lens = self.extend_logprob_start_lens
+            extend_logprob_start_lens = np.array(self.extend_logprob_start_lens, dtype=np.int32)
 
         bid = acc_global_bid()
 
@@ -1998,7 +2028,7 @@ def _extract_mm_value(mm_inputs: Any, key: str):
 def _as_int_scalar(value: Any, default: int = 0) -> int:
     if value is None:
         return default
-    if isinstance(value, (np.ndarray, jax.Array)):
+    if isinstance(value, np.ndarray | jax.Array):
         arr = np.asarray(value)
         if arr.size == 0:
             return default
@@ -2135,6 +2165,9 @@ class ModelWorkerBatch:
     lora_ranks: np.ndarray | None = None
 
     capture_hidden_mode: CaptureHiddenMode = None
+    next_token_token_ids_logprob_only: bool = False
+    next_token_shared_token_ids: np.ndarray | None = None
+    next_token_token_ids_logprob_only_chunk_size: int = 4096
 
     # For logits and logprobs post processing
     temp_scaled_logprobs: bool = False

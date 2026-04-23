@@ -1,9 +1,11 @@
 import dataclasses
+from functools import partial
 from typing import TYPE_CHECKING
 
 import jax
 import jax.nn as nn
 import jax.numpy as jnp
+import jax.scipy.special as jsp
 import numpy as np
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
@@ -20,6 +22,102 @@ if TYPE_CHECKING:
         CaptureHiddenMode,
         ForwardMode,
     )
+
+
+_NEXT_TOKEN_TOKEN_IDS_LOGPROB_ONLY_CHUNK_SIZE = 4096
+
+
+def _apply_soft_cap(logits: jax.Array, soft_cap: float | None) -> jax.Array:
+    if not soft_cap:
+        return logits
+    soft_cap_arr = jnp.asarray(soft_cap, dtype=logits.dtype)
+    return soft_cap_arr * jnp.tanh(logits / soft_cap_arr)
+
+
+@partial(jax.jit, static_argnames=("chunk_size", "soft_cap"))
+def _compute_next_token_logsumexp_chunked(
+    hidden_states: jax.Array,
+    lm_head_embedding: jax.Array,
+    *,
+    chunk_size: int,
+    soft_cap: float | None,
+) -> jax.Array:
+    vocab_size, _ = lm_head_embedding.shape
+    chunk_size = max(1, int(chunk_size))
+    pad_tokens = (-vocab_size) % chunk_size
+    if pad_tokens > 0:
+        lm_head_embedding = jnp.pad(lm_head_embedding, ((0, pad_tokens), (0, 0)))
+    num_chunks = (vocab_size + chunk_size - 1) // chunk_size
+
+    def _scan_body(carry: jax.Array, chunk_idx: jax.Array):
+        chunk_start = chunk_idx * chunk_size
+        chunk_embedding = jax.lax.dynamic_slice_in_dim(
+            lm_head_embedding,
+            chunk_start,
+            chunk_size,
+            axis=0,
+        )
+        chunk_logits = jnp.einsum("bd,kd->bk", hidden_states, chunk_embedding)
+        chunk_logits = _apply_soft_cap(chunk_logits, soft_cap).astype(jnp.float32)
+        chunk_valid_vocab = jnp.arange(chunk_size) < jnp.clip(
+            vocab_size - chunk_start,
+            min=0,
+            max=chunk_size,
+        )
+        chunk_logits = jnp.where(chunk_valid_vocab[None, :], chunk_logits, -jnp.inf)
+        chunk_logsumexp = jsp.logsumexp(chunk_logits, axis=-1)
+        return jnp.logaddexp(carry, chunk_logsumexp), None
+
+    normalizer_init = jnp.full((hidden_states.shape[0],), -jnp.inf, dtype=jnp.float32)
+    normalizer, _ = jax.lax.scan(
+        _scan_body,
+        normalizer_init,
+        jnp.arange(num_chunks, dtype=jnp.int32),
+    )
+    return normalizer
+
+
+@partial(jax.jit, static_argnames=("chunk_size", "soft_cap"))
+def _compute_next_token_token_ids_logprobs_chunked(
+    hidden_states: jax.Array,
+    lm_head_embedding: jax.Array,
+    selected_embeddings: jax.Array,
+    token_mask: jax.Array,
+    *,
+    chunk_size: int,
+    soft_cap: float | None,
+) -> jax.Array:
+    selected_logits = jnp.einsum("bd,bkd->bk", hidden_states, selected_embeddings)
+    selected_logits = _apply_soft_cap(selected_logits, soft_cap).astype(jnp.float32)
+    normalizer = _compute_next_token_logsumexp_chunked(
+        hidden_states,
+        lm_head_embedding,
+        chunk_size=chunk_size,
+        soft_cap=soft_cap,
+    )
+    label_logprobs = selected_logits - normalizer[:, None]
+    return jnp.where(token_mask, label_logprobs, jnp.zeros_like(label_logprobs))
+
+
+@partial(jax.jit, static_argnames=("chunk_size", "soft_cap"))
+def _compute_next_token_shared_token_ids_logprobs_chunked(
+    hidden_states: jax.Array,
+    lm_head_embedding: jax.Array,
+    selected_embeddings: jax.Array,
+    *,
+    chunk_size: int,
+    soft_cap: float | None,
+) -> jax.Array:
+    selected_logits = jnp.einsum("bd,kd->bk", hidden_states, selected_embeddings)
+    selected_logits = _apply_soft_cap(selected_logits, soft_cap).astype(jnp.float32)
+    normalizer = _compute_next_token_logsumexp_chunked(
+        hidden_states,
+        lm_head_embedding,
+        chunk_size=chunk_size,
+        soft_cap=soft_cap,
+    )
+    label_logprobs = selected_logits - normalizer[:, None]
+    return label_logprobs
 
 
 @register_pytree_node_class
@@ -101,6 +199,11 @@ class LogitsMetadata:
     extend_return_logprob: bool = False
     extend_return_top_logprob: bool = False
     extend_token_ids_logprob: bool = False
+    next_token_token_ids_logprob_only: bool = False
+    next_token_token_ids_logprob_only_chunk_size: int = (
+        _NEXT_TOKEN_TOKEN_IDS_LOGPROB_ONLY_CHUNK_SIZE
+    )
+    next_token_shared_token_ids_device: jax.Array | None = None
     extend_seq_lens: jax.Array | None = None
     accept_lens: jax.Array | None = None
     extend_seq_lens_cpu: list[int] | None = None
@@ -118,6 +221,7 @@ class LogitsMetadata:
 
     def tree_flatten(self):
         children = (
+            self.next_token_shared_token_ids_device,
             self.extend_seq_lens,
             self.accept_lens,
             self.extend_input_logprob_token_ids_device,
@@ -131,6 +235,10 @@ class LogitsMetadata:
             "extend_return_logprob": self.extend_return_logprob,
             "extend_return_top_logprob": self.extend_return_top_logprob,
             "extend_token_ids_logprob": self.extend_token_ids_logprob,
+            "next_token_token_ids_logprob_only": self.next_token_token_ids_logprob_only,
+            "next_token_token_ids_logprob_only_chunk_size": (
+                self.next_token_token_ids_logprob_only_chunk_size
+            ),
             "extend_seq_lens_cpu": self.extend_seq_lens_cpu,
             "extend_logprob_start_lens_cpu": self.extend_logprob_start_lens_cpu,
             "extend_logprob_pruned_lens_cpu": self.extend_logprob_pruned_lens_cpu,
@@ -146,17 +254,22 @@ class LogitsMetadata:
     def tree_unflatten(cls, aux_data, children):
         obj = cls.__new__(cls)
 
-        obj.extend_seq_lens = children[0]
-        obj.accept_lens = children[1]
-        obj.extend_input_logprob_token_ids_device = children[2]
-        obj.temperature = children[3]
-        obj.top_p = children[4]
+        obj.next_token_shared_token_ids_device = children[0]
+        obj.extend_seq_lens = children[1]
+        obj.accept_lens = children[2]
+        obj.extend_input_logprob_token_ids_device = children[3]
+        obj.temperature = children[4]
+        obj.top_p = children[5]
 
         obj.forward_mode = aux_data["forward_mode"]
         obj.capture_hidden_mode = aux_data["capture_hidden_mode"]
         obj.extend_return_logprob = aux_data["extend_return_logprob"]
         obj.extend_return_top_logprob = aux_data["extend_return_top_logprob"]
         obj.extend_token_ids_logprob = aux_data["extend_token_ids_logprob"]
+        obj.next_token_token_ids_logprob_only = aux_data["next_token_token_ids_logprob_only"]
+        obj.next_token_token_ids_logprob_only_chunk_size = aux_data[
+            "next_token_token_ids_logprob_only_chunk_size"
+        ]
         obj.extend_seq_lens_cpu = aux_data["extend_seq_lens_cpu"]
         obj.extend_logprob_start_lens_cpu = aux_data["extend_logprob_start_lens_cpu"]
         obj.extend_logprob_pruned_lens_cpu = aux_data["extend_logprob_pruned_lens_cpu"]
@@ -188,6 +301,10 @@ class LogitsMetadata:
             extend_logprob_pruned_lens_cpu = extend_seq_lens_cpu = None
 
         sharding = NamedSharding(mesh, P()) if jax.process_count() == 1 else None
+        next_token_shared_token_ids = getattr(batch, "next_token_shared_token_ids", None)
+        shared_token_ids_sharding = (
+            NamedSharding(mesh, P(None)) if jax.process_count() == 1 else None
+        )
 
         return cls(
             forward_mode=batch.forward_mode,
@@ -195,6 +312,28 @@ class LogitsMetadata:
             extend_return_logprob=extend_return_logprob,
             extend_return_top_logprob=extend_return_top_logprob,
             extend_token_ids_logprob=extend_token_ids_logprob,
+            next_token_token_ids_logprob_only=bool(
+                getattr(batch, "next_token_token_ids_logprob_only", False)
+            ),
+            next_token_token_ids_logprob_only_chunk_size=max(
+                1,
+                int(
+                    getattr(
+                        batch,
+                        "next_token_token_ids_logprob_only_chunk_size",
+                        _NEXT_TOKEN_TOKEN_IDS_LOGPROB_ONLY_CHUNK_SIZE,
+                    )
+                    or _NEXT_TOKEN_TOKEN_IDS_LOGPROB_ONLY_CHUNK_SIZE
+                ),
+            ),
+            next_token_shared_token_ids_device=(
+                device_array(
+                    np.asarray(next_token_shared_token_ids, dtype=np.int32),
+                    sharding=shared_token_ids_sharding,
+                )
+                if next_token_shared_token_ids is not None
+                else None
+            ),
             extend_seq_lens=device_array(batch.extend_seq_lens, sharding=sharding),
             accept_lens=(
                 device_array(batch.spec_info.accept_length, sharding=sharding)
@@ -301,9 +440,9 @@ class LogitsProcessor(nnx.Module):
                 np.array(input_logprob_indices, dtype=np.int64),
             )
 
-        # Compute logits for both input and sampled tokens.
-        logits = self._get_logits(pruned_states, lm_head)
-        sampled_logits = logits[sample_indices] if sample_indices is not None else logits
+        sampled_states = (
+            pruned_states[sample_indices] if sample_indices is not None else pruned_states
+        )
 
         hidden_states_to_store: jax.Array | None = None
         if logits_metadata.capture_hidden_mode.need_capture():
@@ -317,7 +456,6 @@ class LogitsProcessor(nnx.Module):
                 # pruned states only contain the last tokens already.
                 if aux_hidden_states is not None:
                     aux_pruned_states = jnp.concat(aux_pruned_states, axis=-1)
-
                     hidden_states_to_store = (
                         aux_pruned_states[sample_indices]
                         if sample_indices is not None
@@ -325,14 +463,136 @@ class LogitsProcessor(nnx.Module):
                     )
 
                 else:
-                    hidden_states_to_store = (
-                        pruned_states[sample_indices]
-                        if sample_indices is not None
-                        else pruned_states
-                    )
+                    hidden_states_to_store = sampled_states
                     assert True, f"hidden_states_to_store {hidden_states_to_store[:100]}"
             else:
                 raise AssertionError("This branch should not be reached")
+
+        mesh_shape = getattr(self.mesh, "shape", None)
+        tensor_parallel_size = int(mesh_shape.get("tensor", 1) or 1) if mesh_shape else 1
+        can_use_next_token_token_ids_only = (
+            logits_metadata.forward_mode.is_extend()
+            and not logits_metadata.extend_return_logprob
+            and bool(logits_metadata.next_token_token_ids_logprob_only)
+            and tensor_parallel_size == 1
+        )
+        if can_use_next_token_token_ids_only:
+            chunk_size = max(
+                1,
+                int(
+                    getattr(
+                        logits_metadata,
+                        "next_token_token_ids_logprob_only_chunk_size",
+                        _NEXT_TOKEN_TOKEN_IDS_LOGPROB_ONLY_CHUNK_SIZE,
+                    )
+                    or _NEXT_TOKEN_TOKEN_IDS_LOGPROB_ONLY_CHUNK_SIZE
+                ),
+            )
+            sampled_states_for_logits, lm_head_embedding = lm_head.promote_dtype(
+                (sampled_states, lm_head.embedding.value),
+                dtype=lm_head.dtype,
+            )
+            lm_head_embedding = lm_head_embedding[: self.vocab_size]
+            shared_token_ids_device = logits_metadata.next_token_shared_token_ids_device
+            if shared_token_ids_device is not None and shared_token_ids_device.shape[0] > 0:
+                selected_embedding_out_sharding = (
+                    NamedSharding(self.mesh, P(None, lm_head.kernel_axes[-1]))
+                    if jax.process_count() == 1
+                    else None
+                )
+                selected_embeddings = lm_head_embedding.at[shared_token_ids_device].get(
+                    out_sharding=selected_embedding_out_sharding
+                )
+                next_token_token_ids_logprobs = (
+                    _compute_next_token_shared_token_ids_logprobs_chunked(
+                        sampled_states_for_logits,
+                        lm_head_embedding,
+                        selected_embeddings,
+                        chunk_size=chunk_size,
+                        soft_cap=self.soft_cap,
+                    )
+                )
+                next_token_token_ids_indices = jnp.broadcast_to(
+                    shared_token_ids_device[None, :],
+                    (
+                        sampled_states_for_logits.shape[0],
+                        shared_token_ids_device.shape[0],
+                    ),
+                )
+                return LogitsProcessorOutput(
+                    next_token_logits=jnp.zeros(
+                        (sampled_states_for_logits.shape[0], 0),
+                        dtype=sampled_states_for_logits.dtype,
+                    ),
+                    hidden_states=hidden_states_to_store,
+                    next_token_token_ids_logprobs_val=next_token_token_ids_logprobs,
+                    next_token_token_ids_logprobs_idx=next_token_token_ids_indices,
+                )
+
+            token_id_lists = logits_metadata.token_ids_logprobs[: sampled_states.shape[0]]
+            max_token_ids_len = max(
+                (len(token_ids) for token_ids in token_id_lists if token_ids is not None),
+                default=0,
+            )
+            if (
+                logits_metadata.token_ids_logprobs is not None
+                and max_token_ids_len > 0
+                and len(token_id_lists) == sampled_states.shape[0]
+            ):
+                token_ids_cpu = np.zeros(
+                    (sampled_states.shape[0], max_token_ids_len),
+                    dtype=np.int32,
+                )
+                token_mask_cpu = np.zeros(
+                    (sampled_states.shape[0], max_token_ids_len),
+                    dtype=np.bool_,
+                )
+                for row_idx, token_ids in enumerate(token_id_lists):
+                    if not token_ids:
+                        continue
+                    width = len(token_ids)
+                    token_ids_cpu[row_idx, :width] = np.asarray(token_ids, dtype=np.int32)
+                    token_mask_cpu[row_idx, :width] = True
+
+                sharding = (
+                    NamedSharding(self.mesh, P(None, None)) if jax.process_count() == 1 else None
+                )
+                token_ids_device = device_array(token_ids_cpu, sharding=sharding)
+                token_mask_device = device_array(token_mask_cpu, sharding=sharding)
+                safe_token_ids_device = jnp.where(token_mask_device, token_ids_device, 0)
+                selected_embedding_out_sharding = (
+                    NamedSharding(self.mesh, P(None, None, lm_head.kernel_axes[-1]))
+                    if jax.process_count() == 1
+                    else None
+                )
+                selected_embeddings = lm_head_embedding.at[safe_token_ids_device].get(
+                    out_sharding=selected_embedding_out_sharding
+                )
+                next_token_token_ids_logprobs = _compute_next_token_token_ids_logprobs_chunked(
+                    sampled_states_for_logits,
+                    lm_head_embedding,
+                    selected_embeddings,
+                    token_mask_device,
+                    chunk_size=chunk_size,
+                    soft_cap=self.soft_cap,
+                )
+                next_token_token_ids_indices = device_array(
+                    np.where(token_mask_cpu, token_ids_cpu, -1),
+                    sharding=sharding,
+                )
+                return LogitsProcessorOutput(
+                    next_token_logits=jnp.zeros(
+                        (sampled_states_for_logits.shape[0], 0),
+                        dtype=sampled_states_for_logits.dtype,
+                    ),
+                    hidden_states=hidden_states_to_store,
+                    next_token_token_ids_logprobs_val=next_token_token_ids_logprobs,
+                    next_token_token_ids_logprobs_idx=next_token_token_ids_indices,
+                )
+
+        # Compute logits for both input and sampled tokens.
+        logits = self._get_logits(pruned_states, lm_head)
+        sampled_logits = logits[sample_indices] if sample_indices is not None else logits
 
         if not logits_metadata.extend_return_logprob:
             # Decode mode or extend mode without return_logprob.
@@ -406,26 +666,63 @@ class LogitsProcessor(nnx.Module):
     ):
         out_sharding = NamedSharding(mesh, P(None))
         input_token_ids_logprobs_val, input_token_ids_logprobs_idx = [], []
+        max_pruned_len = max(logits_metadata.extend_logprob_pruned_lens_cpu)
+        max_token_ids_len = max(
+            (
+                len(token_ids)
+                for token_ids in logits_metadata.token_ids_logprobs
+                if token_ids is not None
+            ),
+            default=0,
+        )
         pt = 0
         for token_ids, pruned_len in zip(
             logits_metadata.token_ids_logprobs,
             logits_metadata.extend_logprob_pruned_lens_cpu,
         ):
-            if pruned_len <= 0:
-                input_token_ids_logprobs_val.append([])
-                input_token_ids_logprobs_idx.append([])
-                continue
+            token_ids = token_ids or []
+            token_ids_len = len(token_ids)
+
+            if pruned_len > 0 and token_ids_len > 0:
+                token_ids_logprobs_val = jnp.stack(
+                    [
+                        all_logprobs.at[pt + j, token_ids].get(out_sharding=out_sharding)
+                        for j in range(pruned_len)
+                    ]
+                )
+                token_ids_logprobs_idx = jnp.tile(
+                    jnp.array(token_ids, dtype=jnp.int32), reps=(pruned_len, 1)
+                )
+            else:
+                token_ids_logprobs_val = jnp.zeros(
+                    (max(pruned_len, 0), token_ids_len), dtype=all_logprobs.dtype
+                )
+                token_ids_logprobs_idx = jnp.zeros(
+                    (max(pruned_len, 0), token_ids_len), dtype=jnp.int32
+                )
 
             input_token_ids_logprobs_val.append(
-                [
-                    all_logprobs.at[pt + j, token_ids].get(out_sharding=out_sharding)
-                    for j in range(pruned_len)
-                ]
+                jnp.pad(
+                    token_ids_logprobs_val,
+                    (
+                        (0, max_pruned_len - max(pruned_len, 0)),
+                        (0, max_token_ids_len - token_ids_len),
+                    ),
+                )
             )
-            input_token_ids_logprobs_idx.append([token_ids for _ in range(pruned_len)])
-            pt += pruned_len
+            input_token_ids_logprobs_idx.append(
+                jnp.pad(
+                    token_ids_logprobs_idx,
+                    (
+                        (0, max_pruned_len - max(pruned_len, 0)),
+                        (0, max_token_ids_len - token_ids_len),
+                    ),
+                    constant_values=-1,
+                )
+            )
+            pt += max(pruned_len, 0)
 
-        return jnp.array(input_token_ids_logprobs_val), jnp.array(input_token_ids_logprobs_idx)
+        return jnp.stack(input_token_ids_logprobs_val), jnp.stack(input_token_ids_logprobs_idx)
 
     @staticmethod
     def get_top_logprobs(all_logprobs: jax.Array, logits_metadata: LogitsMetadata):
@@ -433,22 +730,36 @@ class LogitsProcessor(nnx.Module):
         values, indices = jax.lax.top_k(all_logprobs, max_k)
 
         input_top_logprobs_val, input_top_logprobs_idx = [], []
+        max_pruned_len = max(logits_metadata.extend_logprob_pruned_lens_cpu)
 
         pt = 0
         for k, pruned_len in zip(
             logits_metadata.top_logprobs_nums,
             logits_metadata.extend_logprob_pruned_lens_cpu,
         ):
-            if pruned_len <= 0:
-                input_top_logprobs_val.append([])
-                input_top_logprobs_idx.append([])
-                continue
+            if pruned_len > 0 and k > 0:
+                top_logprobs_val = values[pt : pt + pruned_len, :k]
+                top_logprobs_idx = indices[pt : pt + pruned_len, :k]
+            else:
+                top_logprobs_val = jnp.zeros((max(pruned_len, 0), k), dtype=values.dtype)
+                top_logprobs_idx = jnp.zeros((max(pruned_len, 0), k), dtype=indices.dtype)
 
-            input_top_logprobs_val.append([values[pt + j][:k] for j in range(pruned_len)])
-            input_top_logprobs_idx.append([indices[pt + j][:k] for j in range(pruned_len)])
-            pt += pruned_len
+            input_top_logprobs_val.append(
+                jnp.pad(
+                    top_logprobs_val,
+                    ((0, max_pruned_len - max(pruned_len, 0)), (0, max_k - k)),
+                )
+            )
+            input_top_logprobs_idx.append(
+                jnp.pad(
+                    top_logprobs_idx,
+                    ((0, max_pruned_len - max(pruned_len, 0)), (0, max_k - k)),
+                    constant_values=-1,
+                )
+            )
+            pt += max(pruned_len, 0)
 
-        return jnp.array(input_top_logprobs_val), jnp.array(input_top_logprobs_idx)
+        return jnp.stack(input_top_logprobs_val), jnp.stack(input_top_logprobs_idx)
 
     def compute_temp_top_p_normalized_logprobs(
         self, last_logits: jax.Array, logits_metadata: LogitsMetadata

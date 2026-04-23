@@ -3,6 +3,7 @@
 import concurrent.futures as futures
 import dataclasses
 import faulthandler
+import gc
 import logging
 import os
 import pickle
@@ -28,6 +29,9 @@ from sgl_jax.srt.constrained.base_grammar_backend import (
     create_grammar_backend,
 )
 from sgl_jax.srt.hf_transformers_utils import get_tokenizer
+from sgl_jax.srt.kernels.ragged_paged_attention.tuned_block_sizes import (
+    set_logical_device_count_override,
+)
 from sgl_jax.srt.layers.logits_processor import LogitsProcessorOutput
 from sgl_jax.srt.managers.communication import CommunicationBackend
 from sgl_jax.srt.managers.io_struct import (
@@ -39,6 +43,8 @@ from sgl_jax.srt.managers.io_struct import (
     GetInternalStateReqOutput,
     PauseGenerationReqInput,
     ProfileReq,
+    ReleaseScoringCacheReqInput,
+    ScoreFromCacheReqInput,
     SetInternalStateReq,
     SetInternalStateReqOutput,
     TokenizedGenerateReqInput,
@@ -60,6 +66,7 @@ from sgl_jax.srt.managers.scheduler_output_processor_mixin import (
     SchedulerOutputProcessorMixin,
 )
 from sgl_jax.srt.managers.scheduler_profiler_mixing import SchedulerProfilerMixin
+from sgl_jax.srt.managers.scheduler_scoring_mixin import SchedulerScoringMixin
 from sgl_jax.srt.managers.tp_worker import ModelWorker
 from sgl_jax.srt.managers.tp_worker_overlap_thread import ModelWorkerClient
 from sgl_jax.srt.managers.utils import validate_input_length
@@ -95,13 +102,29 @@ class SyncError(Exception):
     pass
 
 
+def _set_scheduler_logical_device_count(
+    server_args: ServerArgs,
+    *,
+    update_env: bool,
+) -> None:
+    logical_device_count = None
+    if server_args.device_indexes is not None:
+        logical_device_count = len(server_args.device_indexes)
+    set_logical_device_count_override(logical_device_count)
+    if not update_env:
+        return
+    if logical_device_count is None:
+        os.environ.pop("SGLANG_LOGICAL_DEVICE_COUNT", None)
+    else:
+        os.environ["SGLANG_LOGICAL_DEVICE_COUNT"] = str(logical_device_count)
+
+
 class SendDataError(Exception):
     pass
 
 
 class ReceiveDataError(Exception):
     pass
-
 
 @dataclass
 class GenerationBatchResult:
@@ -119,7 +142,10 @@ class GenerationBatchResult:
     accept_lens: np.ndarray | None = None
 
 
+
+
 class Scheduler(
+    SchedulerScoringMixin,
     SchedulerOutputProcessorMixin,
     SchedulerProfilerMixin,
     SchedulerMetricsMixin,
@@ -354,6 +380,7 @@ class Scheduler(
 
         # Init pause/continue state
         self._engine_paused = False
+        self.init_scoring_state(server_args)
 
         # Init schedule policy and new token estimation
         self.policy = SchedulePolicy(
@@ -391,6 +418,8 @@ class Scheduler(
                 (AbortReq, self.abort_request),
                 (ProfileReq, self.profile),
                 (FlushCacheReqInput, self.flush_cache_wrapped),
+                (ReleaseScoringCacheReqInput, self.release_scoring_cache),
+                (ScoreFromCacheReqInput, self.score_from_cache_v2),
                 (GetInternalStateReq, self.get_internal_state),
                 (SetInternalStateReq, self.set_internal_state),
                 (PauseGenerationReqInput, self.pause_generation),
@@ -407,6 +436,11 @@ class Scheduler(
                 logger.info("[Scheduler] Begins to run spec_decode worker precompile.")
                 self.draft_worker.run_spec_decode_precompile()
                 logger.info("[Scheduler] Completes spec_decode worker precompile.")
+
+        if self._score_direct_warmup_spec() is not None:
+            logger.info("[Scheduler] Begins direct bulk score warmup.")
+            self._run_score_direct_label_only_warmup()
+            logger.info("[Scheduler] Completes direct bulk score warmup.")
 
     def sync_pub(self):
         logger.info(
@@ -644,44 +678,90 @@ class Scheduler(
                 raise ReceiveDataError(f"[Subscriber {self.node_rank}] Fails to receive data")
         return recv_reqs
 
-    def recv_requests(self) -> list[Req]:
-        """Receive results at node_rank = 0 and broadcast it to all other Node ranks."""
-        if self.node_rank == 0:
-            recv_reqs = []
+    @staticmethod
 
-            while True:
-                try:
-                    recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
-                except zmq.ZMQError:
-                    break
-                recv_reqs.append(recv_req)
+    @staticmethod
 
-            while True:
-                try:
-                    recv_rpc = self.recv_from_rpc.recv_pyobj(zmq.NOBLOCK)
-                except zmq.ZMQError:
-                    break
-                recv_reqs.append(recv_rpc)
-        else:
-            recv_reqs = None
+    @staticmethod
 
-        if self.nnodes > 1:
-            recv_reqs = self.broadcast_pyobj(recv_reqs)
-        return recv_reqs
+    @staticmethod
 
-    def process_input_requests(self, recv_reqs: list):
-        for recv_req in recv_reqs:
-            output = self._request_dispatcher(recv_req)
-            if output is not None:
-                if self._comm_backend is not None:
-                    self._comm_backend.send_pyobj(output)
-                else:
-                    self.send_to_tokenizer.send_pyobj(output)
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    @staticmethod
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+
+
+
+
+
 
     def handle_generate_request(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        if self.server_args.log_requests:
+            logger.debug(
+                "Handle request: rid=%s, max_new_tokens=%s, token_ids_logprob=%s",
+                recv_req.rid,
+                recv_req.sampling_params.max_new_tokens,
+                recv_req.token_ids_logprob,
+            )
+
+        cached_prefix_ctx, cache_lookup_error = self._resolve_extend_from_cache(recv_req)
+
         # Create a new request
         req = Req(
             recv_req.rid,
@@ -699,8 +779,25 @@ class Scheduler(
             vocab_size=self.model_config.vocab_size,
             return_routed_experts=recv_req.return_routed_experts,
             return_hidden_states=recv_req.return_hidden_states,
+            is_multi_item_scoring=recv_req.is_multi_item_scoring,
+            multi_item_scoring_delimiter=recv_req.multi_item_scoring_delimiter,
+            multi_item_algorithm=getattr(recv_req, "multi_item_algorithm", None),
+            multi_item_mask_mode=getattr(recv_req, "multi_item_mask_mode", None),
+            cache_for_scoring=recv_req.cache_for_scoring,
+            extend_from_cache=recv_req.extend_from_cache,
         )
         req.tokenizer = self.tokenizer
+        if cache_lookup_error is not None:
+            req.set_finish_with_abort(cache_lookup_error)
+            self._add_request_to_queue(req)
+            return
+
+        if cached_prefix_ctx is not None:
+            cached_last_node, cached_prefix_indices = cached_prefix_ctx
+            req.cached_last_node = cached_last_node
+            req.cached_last_host_node = cached_last_node
+            req.cached_prefix_indices = cached_prefix_indices
+            req.cached_host_hit_length = 0
         if hasattr(recv_req, "mm_inputs") and recv_req.mm_inputs:
             req.mm_inputs = recv_req.mm_inputs
             multimodal_embedding = recv_req.mm_inputs.get("multimodal_embedding")
@@ -886,6 +983,7 @@ class Scheduler(
         ret["forward_ct_decode"] = self.forward_ct_decode
         ret["new_token_ratio"] = self.new_token_ratio
         ret["init_new_token_ratio"] = self.init_new_token_ratio
+        self.add_scoring_internal_state(ret)
 
         return GetInternalStateReqOutput(internal_state=ret)
 
@@ -1032,9 +1130,15 @@ class Scheduler(
 
     def _add_request_to_queue(self, req: Req):
         req.queue_time_start = time.perf_counter()
+        req.queue_time_end = None
         self.waiting_queue.append(req)
 
     def _extend_requests_to_queue(self, reqs: list[Req], is_retracted: bool = False):
+        if is_retracted:
+            now = time.perf_counter()
+            for req in reqs:
+                req.queue_time_start = now
+                req.queue_time_end = None
         self.waiting_queue.extend(reqs)
 
     def check_memory(self):
@@ -1168,6 +1272,11 @@ class Scheduler(
         if self.grammar_queue:
             self.move_ready_grammar_requests()
 
+        # `batch_is_full` is a soft throttle flag. If nothing is running, clear it so
+        # prefill admission can resume and we don't get stuck in a full-but-idle state.
+        if self.running_batch.is_empty() and self.running_batch.batch_is_full:
+            self.running_batch.batch_is_full = False
+
         # Handle the cases where prefill is not allowed
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
@@ -1177,6 +1286,16 @@ class Scheduler(
         running_bs = len(self.running_batch.reqs)
         if running_bs >= self.max_running_requests:
             self.running_batch.batch_is_full = True
+            return None
+
+        # ReqToTokenPool slots gate how many requests can enter EXTEND in this round.
+        # Under prefill+extend scoring, a single user request can fan out into many
+        # internal requests. If we ignore current slot pressure here, prepare_for_extend()
+        # can raise and kill the scheduler process.
+        req_slots_budget = self.req_to_token_pool.available_size()
+        if req_slots_budget <= 0:
+            self.running_batch.batch_is_full = True
+            logger.debug("Deferring prefill: no req slots available in ReqToTokenPool.")
             return None
 
         # Get priority queue
@@ -1205,11 +1324,36 @@ class Scheduler(
                 else set([])
             )
 
+        lane_inflight = Scheduler._running_lane_counts(self)
+        lane_waiting_counts = Scheduler._waiting_lane_counts(self, self.waiting_queue)
+        lane_waiting_max = Scheduler._lane_counter(self, "score_scheduler_lane_waiting_max")
+        for lane_name, lane_count in lane_waiting_counts.items():
+            lane_waiting_max[lane_name] = max(lane_waiting_max.get(lane_name, 0), lane_count)
+        lane_inflight_max = Scheduler._lane_counter(self, "score_scheduler_lane_inflight_max")
+        for lane_name, lane_count in lane_inflight.items():
+            lane_inflight_max[lane_name] = max(lane_inflight_max.get(lane_name, 0), lane_count)
+        lane_admitted = Scheduler._lane_counter(self, "score_scheduler_lane_admission_admitted")
+        lane_skipped = Scheduler._lane_counter(self, "score_scheduler_lane_admission_skipped")
+        ordered_waiting_queue = Scheduler._iter_waiting_queue(self, self.waiting_queue)
+
         # Get requests from the waiting queue to a new prefill batch
-        for req in self.waiting_queue:
+        for req in ordered_waiting_queue:
+            if len(adder.can_run_list) >= req_slots_budget:
+                self.running_batch.batch_is_full = True
+                break
+
             if running_bs + len(adder.can_run_list) >= self.max_running_requests:
                 self.running_batch.batch_is_full = True
                 break
+
+            lane_name = Scheduler._admission_lane(self, req)
+            self.score_scheduler_lane_admission_attempted = (
+                int(getattr(self, "score_scheduler_lane_admission_attempted", 0)) + 1
+            )
+            lane_cap = Scheduler._lane_cap(self, lane_name)
+            if lane_cap > 0 and lane_inflight.get(lane_name, 0) >= lane_cap:
+                lane_skipped[lane_name] = lane_skipped.get(lane_name, 0) + 1
+                continue
 
             # Check LoRA constraint: ensure we don't exceed max_loras_per_batch
             if (
@@ -1229,19 +1373,25 @@ class Scheduler(
                     self.running_batch.batch_is_full = True
                 break
 
+            lane_inflight[lane_name] = lane_inflight.get(lane_name, 0) + 1
+            lane_inflight_max[lane_name] = max(
+                lane_inflight_max.get(lane_name, 0),
+                lane_inflight[lane_name],
+            )
+            lane_admitted[lane_name] = lane_admitted.get(lane_name, 0) + 1
+
         # Update waiting queue
         can_run_list: list[Req] = adder.can_run_list
         if len(can_run_list) == 0:
             return None
 
-        self.waiting_queue = [x for x in self.waiting_queue if x not in set(can_run_list)]
-
-        if adder.new_chunked_req is not None:
-            assert self.chunked_req is None
-            self.chunked_req = adder.new_chunked_req
-
-        if self.chunked_req:
-            self.chunked_req.is_chunked += 1
+        admit_ts = time.perf_counter()
+        for req in can_run_list:
+            if req.queue_time_start is None:
+                continue
+            req.queue_time_end = admit_ts
+            req.queue_wait_time_s += max(0.0, req.queue_time_end - req.queue_time_start)
+            req.queue_time_start = None
 
         self.log_prefill_stats(adder, can_run_list, running_bs)
 
@@ -1260,6 +1410,17 @@ class Scheduler(
         )
 
         new_batch.prepare_for_extend()
+
+        # Update waiting queue and chunked request state only after we
+        # successfully allocate req slots in prepare_for_extend().
+        self.waiting_queue = [x for x in self.waiting_queue if x not in set(can_run_list)]
+
+        if adder.new_chunked_req is not None and adder.new_chunked_req in set(can_run_list):
+            assert self.chunked_req is None
+            self.chunked_req = adder.new_chunked_req
+
+        if self.chunked_req:
+            self.chunked_req.is_chunked += 1
 
         # Mixed-style chunked prefill
         if (
@@ -1327,11 +1488,21 @@ class Scheduler(
         """Run a batch."""
         self.forward_ct += 1
 
+        if self.server_args.log_requests:
+            logger.debug(
+                "Run batch: mode=%s, bs=%d, return_logprob=%s",
+                batch.forward_mode,
+                batch.batch_size(),
+                batch.return_logprob,
+            )
+
         # Whether to run the profiler
         self._profile_batch_predicate(batch)
 
         # Run forward
         assert self.is_generation
+        batch_wall_start = time.perf_counter()
+        forward_start = time.perf_counter()
         (
             precompile_token_paddings,
             precompile_bs_paddings,
@@ -1345,6 +1516,7 @@ class Scheduler(
                 self.page_size,
                 self.server_args.enable_static_lora,
             )
+            skip_sample = self._can_skip_sample_for_prefill_batch(batch)
 
             if self.enable_overlap:
                 with jax.profiler.TraceAnnotation(
@@ -1353,19 +1525,26 @@ class Scheduler(
 
                     logits_output, next_token_ids, cache_miss_count = (
                         self.tp_worker.forward_batch_generation(
-                            model_worker_batch, sampling_metadata=None
+                            model_worker_batch,
+                            sampling_metadata=None,
+                            skip_sample=skip_sample,
                         )
                     )
                 next_token_ids = next_token_ids[: model_worker_batch.real_bs]
             else:
                 logits_output, next_token_ids_device, cache_miss_count = (
                     self.tp_worker.forward_batch_generation(
-                        model_worker_batch, sampling_metadata=None
+                        model_worker_batch,
+                        skip_sample=skip_sample,
+                        sampling_metadata=None,
                     )
                 )
-                next_token_ids = np.array(jax.device_get(next_token_ids_device))[
-                    : model_worker_batch.real_bs
-                ]
+                if skip_sample:
+                    next_token_ids = []
+                else:
+                    next_token_ids = np.array(jax.device_get(next_token_ids_device))[
+                        : model_worker_batch.real_bs
+                    ]
         else:
             model_worker_batch = batch.get_spec_model_worker_batch(
                 precompile_token_paddings,
@@ -1387,8 +1566,17 @@ class Scheduler(
             next_token_ids = batch_output.next_token_ids
             logits_output = batch_output.logits_output
             cache_miss_count = batch_output.cache_miss_count
+        forward_end = time.perf_counter()
+        batch_wall_end = time.perf_counter()
         bid = model_worker_batch.bid
         batch.output_ids = next_token_ids
+
+        device_compute_s = max(0.0, forward_end - forward_start)
+        host_overhead_s = max(0.0, (batch_wall_end - batch_wall_start) - device_compute_s)
+        for req in batch.reqs:
+            req.device_compute_time_s += device_compute_s
+            req.host_overhead_time_s += host_overhead_s
+            req.scheduler_dispatch_count += 1
 
         # These 2 values are needed for processing the output, but the values can be
         # modified by overlap schedule. So we have to copy them here so that
@@ -1404,7 +1592,11 @@ class Scheduler(
 
         ret = GenerationBatchResult(
             logits_output=logits_output,
-            next_token_ids=next_token_ids.tolist(),
+            next_token_ids=(
+                next_token_ids.tolist()
+                if hasattr(next_token_ids, "tolist")
+                else list(next_token_ids)
+            ),
             extend_input_len_per_req=extend_input_len_per_req,
             extend_logprob_start_len_per_req=extend_logprob_start_len_per_req,
             bid=bid,
@@ -1523,6 +1715,11 @@ class Scheduler(
                 logger.debug("Abort running request. rid=%s", req.rid)
                 req.to_finish = FINISH_ABORT()
 
+        # Abort method 4: Release cached nodes for prefill+extend
+        self._release_scoring_cache_nodes(recv_req.rid, recv_req.abort_all)
+
+
+
     def pause_generation(self, recv_req: PauseGenerationReqInput):
         self._engine_paused = True
 
@@ -1558,10 +1755,52 @@ def run_scheduler_process(
     dp_rank: int | None,
     pipe_writer,
 ):
+    def maybe_freeze_gc_after_warmup():
+        if not getattr(server_args, "enable_gc_freeze", False):
+            return
+        if not hasattr(gc, "freeze"):
+            logger.warning(
+                "GC freeze requested but gc.freeze is unavailable on this Python runtime."
+            )
+            return
+        try:
+            freeze_before = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+            collected = gc.collect()
+            gc.freeze()
+            freeze_after = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+            logger.info(
+                "Applied gc.freeze after warmup/precompile. collected=%d freeze_before=%d freeze_after=%d gc_count=%s",
+                collected,
+                freeze_before,
+                freeze_after,
+                gc.get_count(),
+            )
+            if getattr(server_args, "gc_freeze_rollback", False):
+                if hasattr(gc, "unfreeze"):
+                    gc.unfreeze()
+                    rollback_count = (
+                        gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+                    )
+                    logger.warning(
+                        "Rolled back gc.freeze due to --gc-freeze-rollback. freeze_count_after_rollback=%d gc_count=%s",
+                        rollback_count,
+                        gc.get_count(),
+                    )
+                else:
+                    logger.warning(
+                        "GC freeze rollback requested but gc.unfreeze is unavailable on this Python runtime."
+                    )
+        except Exception:
+            logger.exception("Failed to apply gc.freeze after warmup/precompile.")
+
     # Generate the prefix
     prefix = ""
     if server_args.nnodes > 1:
         prefix += f" NP{server_args.node_rank}"
+    if dp_rank is not None:
+        prefix += f" DP{dp_rank}"
+
+    _set_scheduler_logical_device_count(server_args, update_env=True)
 
     # Config the process
     kill_itself_when_parent_died()
@@ -1575,6 +1814,7 @@ def run_scheduler_process(
     # Create a scheduler and run the event loop
     try:
         scheduler = Scheduler(server_args, port_args)
+        maybe_freeze_gc_after_warmup()
         pipe_writer.send(
             {
                 "status": "ready",
@@ -1597,14 +1837,55 @@ def run_scheduler_process(
 def run_scheduler_loop_thread_after_create(
     server_args: ServerArgs,
     port_args: PortArgs,
+    dp_rank: int | None = None,
 ):
+    def maybe_freeze_gc_after_warmup():
+        if not getattr(server_args, "enable_gc_freeze", False):
+            return
+        if not hasattr(gc, "freeze"):
+            logger.warning(
+                "GC freeze requested but gc.freeze is unavailable on this Python runtime."
+            )
+            return
+        try:
+            freeze_before = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+            collected = gc.collect()
+            gc.freeze()
+            freeze_after = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+            logger.info(
+                "Applied gc.freeze after warmup/precompile. collected=%d freeze_before=%d freeze_after=%d gc_count=%s",
+                collected,
+                freeze_before,
+                freeze_after,
+                gc.get_count(),
+            )
+            if getattr(server_args, "gc_freeze_rollback", False):
+                if hasattr(gc, "unfreeze"):
+                    gc.unfreeze()
+                    rollback_count = (
+                        gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+                    )
+                    logger.warning(
+                        "Rolled back gc.freeze due to --gc-freeze-rollback. freeze_count_after_rollback=%d gc_count=%s",
+                        rollback_count,
+                        gc.get_count(),
+                    )
+                else:
+                    logger.warning(
+                        "GC freeze rollback requested but gc.unfreeze is unavailable on this Python runtime."
+                    )
+        except Exception:
+            logger.exception("Failed to apply gc.freeze after warmup/precompile.")
+
     current_process = psutil.Process()
     # Create a scheduler and run the event loop
     try:
+        _set_scheduler_logical_device_count(server_args, update_env=False)
         scheduler = Scheduler(server_args, port_args)
+        maybe_freeze_gc_after_warmup()
         scheduler_thread = threading.Thread(
             target=scheduler_loop_after_create,
-            args=(server_args, scheduler),
+            args=(server_args, scheduler, dp_rank),
             daemon=True,
         )
         scheduler_thread.start()
@@ -1613,6 +1894,7 @@ def run_scheduler_loop_thread_after_create(
             "max_total_num_tokens": scheduler.max_total_num_tokens,
             "max_req_input_len": scheduler.max_req_input_len,
             "scheduler": scheduler,
+            "scheduler_thread": scheduler_thread,
         }
     except Exception:
         traceback = get_exception_traceback()
@@ -1620,11 +1902,13 @@ def run_scheduler_loop_thread_after_create(
         current_process.send_signal(signal.SIGQUIT)
 
 
-def scheduler_loop_after_create(server_args, scheduler):
+def scheduler_loop_after_create(server_args, scheduler, dp_rank: int | None = None):
     # Generate the prefix
     prefix = ""
     if server_args.nnodes > 1:
         prefix += f" NP{server_args.node_rank}"
+    if dp_rank is not None:
+        prefix += f" DP{dp_rank}"
 
     # Config the process
     current_thread = threading.current_thread()
@@ -1635,6 +1919,7 @@ def scheduler_loop_after_create(server_args, scheduler):
     # Configure the logger
     configure_logger(server_args, prefix=prefix)
     try:
+        _set_scheduler_logical_device_count(server_args, update_env=False)
         if scheduler.enable_overlap:
             scheduler.event_loop_overlap()
         else:
