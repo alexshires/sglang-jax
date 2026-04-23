@@ -355,6 +355,14 @@ class TestScoreAPIBench(unittest.TestCase):
         """Medium Scan 2."""
         self._run_http_bench("scan_p1000_n250_i50", 1000, 250, 50)
 
+    def test_scan_p650_n128_i53(self):
+        """Production S1 Mean."""
+        self._run_http_bench("scan_p650_n128_i53", 650, 128, 53)
+
+    def test_scan_p1265_n128_i50(self):
+        """Production S2 Mean."""
+        self._run_http_bench("scan_p1265_n128_i50", 1265, 128, 50)
+
 
 if __name__ == "__main__":
     unittest.main()
