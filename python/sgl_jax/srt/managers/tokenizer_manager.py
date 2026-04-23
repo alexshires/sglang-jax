@@ -129,6 +129,11 @@ class TokenizerManager(TokenizerScoringMixin):
             else None
         )
         self.crash_dump_folder = server_args.crash_dump_folder
+        
+        # For scheduler health check
+        self.scheduler_unavailable_error = None
+        self.health_check_failed = False
+        self.scheduler_pids = []
         self.crash_dump_performed = False  # Flag to ensure dump is only called once
         self.event_loop = None  # Store the event loop to use
 
