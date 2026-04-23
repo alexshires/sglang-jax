@@ -666,6 +666,7 @@ class SchedulerScoringDispatchMixin:
                 )
         return True, "", ""
 
+    @staticmethod
     def _score_from_cache_v2_probs_from_logprobs(
         row_logprobs: list[float], apply_softmax: bool
     ) -> list[float]:
@@ -681,6 +682,7 @@ class SchedulerScoringDispatchMixin:
             return [x / denom for x in exps]
         return [math.exp(x) if x != float("-inf") else 0.0 for x in row_logprobs]
 
+    @staticmethod
     def _label_only_parity_metrics(
         baseline_logprobs: np.ndarray,
         candidate_logprobs: np.ndarray,
@@ -692,6 +694,7 @@ class SchedulerScoringDispatchMixin:
             return 0.0, 0.0
         return float(np.max(diffs)), float(np.mean(diffs))
 
+    @staticmethod
     def _estimate_score_from_cache_v2_words(prefix_len: int, items: list[list[int]]) -> int:
         # Conservative host-side int32-sized tensor estimate for this chunk.
         total_item_tokens = sum(len(item) for item in items)
@@ -708,6 +711,7 @@ class SchedulerScoringDispatchMixin:
             + (bs * prefix_len)
         )
 
+    @staticmethod
     def _build_score_from_cache_v2_chunk_plan(
         items_2d: list[list[int]],
         items_per_step: int,
