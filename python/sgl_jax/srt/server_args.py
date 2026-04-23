@@ -126,7 +126,10 @@ class ServerArgs:
     disable_radix_cache: bool = False
     allow_auto_truncate: bool = False
     enable_tokenizer_batch_encode: bool = False
+    enable_tokenizer_batch_send: bool = False
     disable_overlap_schedule: bool = False
+    enable_gc_freeze: bool = False
+    gc_freeze_rollback: bool = False
     enable_precision_tracer: bool = False
 
     # Kernel backend
@@ -159,6 +162,107 @@ class ServerArgs:
 
     # For sampling
     use_sort_for_toppk_minp: bool = False
+
+    # Scoring configuration
+    # Delimiter token ID used to combine query and items into a single sequence for
+    # multi-item scoring:
+    # query<delimiter>item1<delimiter>item2<delimiter>...
+    multi_item_scoring_delimiter: int | None = None
+    # Maximum allowed total sequence length for multi-item scoring requests.
+    # This bounds O(seq^2) custom-mask memory usage in attention.
+    max_multi_item_seq_len: int = 32768
+    # Maximum number of items allowed in a single multi-item scoring request.
+    max_multi_item_count: int = 512
+    # Maximum number of items processed in a single multi-item scoring forward pass.
+    # Requests with more items are split into multiple multi-item chunks.
+    # Set to 0 to disable chunking and process all items in one pass.
+    # Benchmark showed chunk_size=32 provides 10.8x speedup over serial with safe memory.
+    # See: sglang-jax-dev-scripts/investigations/multi-item-chunk-size-benchmark.md
+    multi_item_scoring_chunk_size: int = 32
+    # Attention mask implementation for multi-item scoring:
+    # - auto: prefer segment metadata path when safe, otherwise fallback to dense mask.
+    # - dense: force the existing dense custom mask path.
+    # - segment: force segment metadata path.
+    multi_item_mask_impl: str = "auto"
+    # In auto mode, use dense masks above this padded token length.
+    multi_item_segment_fallback_threshold: int = 32768
+    # Prefill+extend scoring path.
+    multi_item_enable_prefill_extend: bool = False
+    multi_item_extend_batch_size: int = 32
+    multi_item_prefill_extend_cache_timeout: float = 60.0
+    # Experimental score-from-cache fastpath v2.
+    # This path uses a dedicated internal score RPC with chunked worker execution.
+    # Default OFF to preserve production behavior.
+    multi_item_enable_score_from_cache_v2: bool = False
+    # Number of items executed per internal fastpath step.
+    multi_item_score_from_cache_v2_items_per_step: int = 64
+    # Enable per-request items_per_step downshift from token budget.
+    multi_item_score_from_cache_v2_adaptive_chunk_by_token_budget: bool = False
+    # Target token budget per score-from-cache v2 dispatch.
+    # A value <= 0 disables token-budget sizing.
+    multi_item_score_from_cache_v2_token_budget: int = 0
+    # Floor for adaptive items_per_step.
+    multi_item_score_from_cache_v2_min_items_per_step: int = 1
+    # Compute score probabilities from label-only logprobs in fastpath v2.
+    multi_item_score_label_only_logprob: bool = False
+    # Keep label-only score probability math on device in fastpath v2.
+    multi_item_score_label_only_fused_kernel: bool = True
+    # Use a dedicated direct bulk label-only score path in score-from-cache v2.
+    multi_item_score_direct_label_only: bool = False
+    # Optional fixed hot-shape paddings for the direct bulk label-only path.
+    multi_item_score_direct_hot_shape_bs: int = 0
+    multi_item_score_direct_hot_shape_tokens: int = 0
+    # Optional rounding used to clamp direct hot-shape token padding closer to
+    # the real extend token count while preserving a stable precompile shape.
+    multi_item_score_direct_hot_shape_token_rounding: int = 0
+    # Optional floor on the configured hot-token shape before token rounding is
+    # allowed to shrink it.
+    multi_item_score_direct_hot_shape_token_rounding_min_hot_tokens: int = 0
+    # Experimental opt-in: compute label-only next-token logprobs without
+    # materializing full-vocab logits in the direct scoring path.
+    multi_item_score_direct_token_ids_logprob_only: bool = False
+    # Experimental auto-gate for the direct token-id-only scorer. This keeps the
+    # scorer on the smaller-shape lanes where it helps and leaves the larger
+    # page-size/high-MRR lanes on the fused path.
+    multi_item_score_direct_token_ids_logprob_only_auto: bool = False
+    multi_item_score_direct_token_ids_logprob_only_auto_max_page_size: int = 32
+    multi_item_score_direct_token_ids_logprob_only_auto_max_running_requests: int = 32
+    # Chunk size for the exact shared-token vocab reduction in the direct
+    # token-id-only scorer.
+    multi_item_score_direct_token_ids_logprob_only_chunk_size: int = 4096
+    # For single-process engines, allow direct scheduler-thread score RPC only
+    # above this item-count threshold.
+    multi_item_score_local_rpc_min_items: int = 256
+    # Optional score-only warmup for the direct bulk label-only path.
+    multi_item_score_direct_warmup_enable: bool = False
+    multi_item_score_direct_warmup_prefix_len: int = 0
+    multi_item_score_direct_warmup_item_len: int = 0
+    multi_item_score_direct_warmup_batch_size: int = 0
+    multi_item_score_direct_warmup_label_count: int = 1
+    multi_item_score_direct_warmup_apply_softmax: bool = False
+    # Emit per-request score-path metrics to logs.
+    multi_item_score_fastpath_log_metrics: bool = False
+    # Optional ingress coalescing window for score-path traffic.
+    score_scheduler_global_microbatch_window_ms: float = 0.0
+    score_scheduler_global_microbatch_poll_interval_ms: float = 0.5
+    # Lane-aware fairness knobs for score-path admission.
+    score_scheduler_short_prompt_tokens_threshold: int = 2048
+    score_scheduler_short_lane_max_inflight: int = 0
+    score_scheduler_long_lane_max_inflight: int = 0
+    score_scheduler_enable_lane_isolation: bool = False
+    score_scheduler_lane_isolation_short_burst: int = 2
+    score_scheduler_lane_isolation_long_burst: int = 1
+    score_scheduler_dynamic_items_per_step_enable: bool = False
+    score_scheduler_dynamic_items_per_step_pressure_threshold: int = 64
+    score_scheduler_dynamic_items_per_step_short_lane_bias: float = 1.0
+    score_scheduler_dynamic_items_per_step_long_lane_bias: float = 0.75
+    score_scheduler_dynamic_items_per_step_short_lane_min: int = 32
+    score_scheduler_dynamic_items_per_step_long_lane_min: int = 16
+    # Prefer cache-reusable score requests during admission.
+    score_scheduler_cache_admission_bias_enable: bool = False
+    score_scheduler_cache_admission_bias_require_hit: bool = True
+    # Allow radix cache specifically for scoring requests.
+    enable_scoring_cache: bool = False
 
     # LoRA
     enable_lora: bool | None = None
@@ -836,6 +940,27 @@ class ServerArgs:
             help="Enable batch tokenization for improved performance when processing multiple text inputs. Do not use with image inputs, pre-tokenized input_ids, or input_embeds.",
         )
         parser.add_argument(
+            "--enable-tokenizer-batch-send",
+            action="store_true",
+            help=(
+                "Send tokenized batch requests to scheduler as a single ZMQ payload. "
+                "Only affects batch inputs after tokenization."
+            ),
+        )
+        parser.add_argument(
+            "--enable-gc-freeze",
+            action="store_true",
+            help="Freeze long-lived Python GC objects after scheduler warmup/precompile.",
+        )
+        parser.add_argument(
+            "--gc-freeze-rollback",
+            action="store_true",
+            help=(
+                "Immediately rollback gc.freeze via gc.unfreeze after warmup/precompile. "
+                "Useful as a safety valve when validating freeze behavior."
+            ),
+        )
+        parser.add_argument(
             "--enable-precision-tracer",
             action="store_true",
             help="Enable precision tracer for debugging tensor values. May have performance impact.",
@@ -1003,6 +1128,372 @@ class ServerArgs:
         )
 
         parser.add_argument(
+            "--multi-item-scoring-delimiter",
+            type=int,
+            default=ServerArgs.multi_item_scoring_delimiter,
+            help="Delimiter token ID for multi-item scoring. Used to combine query and items into a single sequence: query<delimiter>item1<delimiter>item2<delimiter>...",
+        )
+        parser.add_argument(
+            "--max-multi-item-seq-len",
+            type=int,
+            default=ServerArgs.max_multi_item_seq_len,
+            help="Maximum allowed total sequence length for multi-item scoring requests.",
+        )
+        parser.add_argument(
+            "--multi-item-scoring-chunk-size",
+            type=int,
+            default=ServerArgs.multi_item_scoring_chunk_size,
+            help="Maximum number of items per multi-item scoring chunk. Set 0 to disable chunking.",
+        )
+        parser.add_argument(
+            "--max-multi-item-count",
+            type=int,
+            default=ServerArgs.max_multi_item_count,
+            help="Maximum number of items allowed in a single multi-item scoring request.",
+        )
+        parser.add_argument(
+            "--multi-item-mask-impl",
+            type=str,
+            choices=["auto", "dense", "segment"],
+            default=ServerArgs.multi_item_mask_impl,
+            help="Multi-item mask implementation: auto, dense, or segment.",
+        )
+        parser.add_argument(
+            "--multi-item-segment-fallback-threshold",
+            type=int,
+            default=ServerArgs.multi_item_segment_fallback_threshold,
+            help="In auto mode, fallback to dense mask above this padded token length.",
+        )
+        parser.add_argument(
+            "--multi-item-enable-prefill-extend",
+            action="store_true",
+            help="Enable prefill+extend scoring strategy for multi-item scoring.",
+        )
+        parser.add_argument(
+            "--multi-item-extend-batch-size",
+            type=int,
+            default=ServerArgs.multi_item_extend_batch_size,
+            help="Batch size for extend requests in prefill+extend scoring.",
+        )
+        parser.add_argument(
+            "--multi-item-prefill-extend-cache-timeout",
+            type=float,
+            default=ServerArgs.multi_item_prefill_extend_cache_timeout,
+            help=(
+                "TTL in seconds for prefill+extend cached query handles. "
+                "Set 0 to disable automatic expiration."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-enable-score-from-cache-v2",
+            action="store_true",
+            help="Enable experimental v2 score-from-cache fastpath.",
+        )
+        parser.add_argument(
+            "--multi-item-score-from-cache-v2-items-per-step",
+            type=int,
+            default=ServerArgs.multi_item_score_from_cache_v2_items_per_step,
+            help="Internal chunk size for score-from-cache v2 fastpath.",
+        )
+        parser.add_argument(
+            "--multi-item-score-from-cache-v2-adaptive-chunk-by-token-budget",
+            action="store_true",
+            help=(
+                "Enable per-request score-from-cache v2 chunk-size adaptation "
+                "using token-budget controls."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-from-cache-v2-token-budget",
+            type=int,
+            default=ServerArgs.multi_item_score_from_cache_v2_token_budget,
+            help=(
+                "Target token budget per score-from-cache v2 dispatch "
+                "(<=0 disables adaptive budget sizing)."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-from-cache-v2-min-items-per-step",
+            type=int,
+            default=ServerArgs.multi_item_score_from_cache_v2_min_items_per_step,
+            help="Minimum items_per_step floor for adaptive score-from-cache v2 sizing.",
+        )
+        parser.add_argument(
+            "--multi-item-score-label-only-logprob",
+            action="store_true",
+            help=(
+                "Use label-only logprob math in score-from-cache v2 "
+                "(logit[label]-logsumexp(logits))."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-label-only-fused-kernel",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.multi_item_score_label_only_fused_kernel,
+            help=(
+                "When true, compute label-only score probabilities fully on device "
+                "for score-from-cache v2. Disable to use legacy host-side postprocessing."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-label-only",
+            action="store_true",
+            help="Use the dedicated direct bulk label-only score path in score-from-cache v2.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-hot-shape-bs",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_hot_shape_bs,
+            help=(
+                "Optional fixed batch-size padding for the direct bulk label-only "
+                "score path (<=0 disables)."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-hot-shape-tokens",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_hot_shape_tokens,
+            help=(
+                "Optional fixed total-token padding for the direct bulk label-only "
+                "score path (<=0 disables)."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-hot-shape-token-rounding",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_hot_shape_token_rounding,
+            help=(
+                "Optional token-rounding multiple used to clamp direct bulk "
+                "hot-shape token padding closer to the real extend token count "
+                "(<=0 disables)."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-hot-shape-token-rounding-min-hot-tokens",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_hot_shape_token_rounding_min_hot_tokens,
+            help=(
+                "Only allow direct bulk hot-shape token rounding when the "
+                "configured hot-token shape is at least this large "
+                "(<=0 disables the floor)."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-token-ids-logprob-only",
+            action="store_true",
+            default=ServerArgs.multi_item_score_direct_token_ids_logprob_only,
+            help=(
+                "Experimental: compute direct label-only next-token logprobs "
+                "without materializing full-vocab logits."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-token-ids-logprob-only-auto",
+            action="store_true",
+            default=ServerArgs.multi_item_score_direct_token_ids_logprob_only_auto,
+            help=(
+                "Experimental: auto-enable the direct token-id-only scorer only "
+                "for smaller-shape lanes where it is expected to help."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-token-ids-logprob-only-auto-max-page-size",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_token_ids_logprob_only_auto_max_page_size,
+            help=(
+                "Auto mode: allow the direct token-id-only scorer when page size "
+                "is at or below this value."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-token-ids-logprob-only-auto-max-running-requests",
+            type=int,
+            default=(
+                ServerArgs.multi_item_score_direct_token_ids_logprob_only_auto_max_running_requests
+            ),
+            help=(
+                "Auto mode: allow the direct token-id-only scorer when "
+                "max-running-requests is at or below this value."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-token-ids-logprob-only-chunk-size",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_token_ids_logprob_only_chunk_size,
+            help=(
+                "Chunk size for the exact shared-token vocab reduction used by "
+                "the direct token-id-only scorer."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-local-rpc-min-items",
+            type=int,
+            default=ServerArgs.multi_item_score_local_rpc_min_items,
+            help=(
+                "Minimum item count required before single-process score-from-cache "
+                "requests bypass local ZMQ and submit directly to the scheduler thread."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-enable",
+            action="store_true",
+            help="Run a score-only warmup for the direct bulk label-only scorer at startup.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-prefix-len",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_warmup_prefix_len,
+            help="Synthetic query length used for direct bulk scorer warmup.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-item-len",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_warmup_item_len,
+            help="Synthetic item length used for direct bulk scorer warmup.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-batch-size",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_warmup_batch_size,
+            help=(
+                "Synthetic item count used for direct bulk scorer warmup. "
+                "Set 0 to fall back to the direct hot-shape batch size or items-per-step."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-label-count",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_warmup_label_count,
+            help="Number of synthetic labels used for direct bulk scorer warmup.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-apply-softmax",
+            action="store_true",
+            help="Compile the apply_softmax=True direct bulk scorer variant during warmup.",
+        )
+        parser.add_argument(
+            "--multi-item-score-fastpath-log-metrics",
+            action="store_true",
+            help="Emit per-/v1/score path metrics including fastpath counters and timings.",
+        )
+        parser.add_argument(
+            "--score-scheduler-global-microbatch-window-ms",
+            type=float,
+            default=ServerArgs.score_scheduler_global_microbatch_window_ms,
+            help=(
+                "Optional ingress coalescing window in milliseconds for score-path traffic. "
+                "Set 0 to disable."
+            ),
+        )
+        parser.add_argument(
+            "--score-scheduler-global-microbatch-poll-interval-ms",
+            type=float,
+            default=ServerArgs.score_scheduler_global_microbatch_poll_interval_ms,
+            help="Polling interval in milliseconds used during score microbatch coalescing.",
+        )
+        parser.add_argument(
+            "--score-scheduler-short-prompt-tokens-threshold",
+            type=int,
+            default=ServerArgs.score_scheduler_short_prompt_tokens_threshold,
+            help="Prompt-token threshold used to classify score requests into short/long lanes.",
+        )
+        parser.add_argument(
+            "--score-scheduler-short-lane-max-inflight",
+            type=int,
+            default=ServerArgs.score_scheduler_short_lane_max_inflight,
+            help=("Max in-flight requests for the short score lane. " "Set 0 to disable lane cap."),
+        )
+        parser.add_argument(
+            "--score-scheduler-long-lane-max-inflight",
+            type=int,
+            default=ServerArgs.score_scheduler_long_lane_max_inflight,
+            help=("Max in-flight requests for the long score lane. " "Set 0 to disable lane cap."),
+        )
+        parser.add_argument(
+            "--score-scheduler-enable-lane-isolation",
+            action="store_true",
+            help=(
+                "Enable score-lane isolation with short/long lane runnable pools and "
+                "anti-head-of-line admission ordering."
+            ),
+        )
+        parser.add_argument(
+            "--score-scheduler-lane-isolation-short-burst",
+            type=int,
+            default=ServerArgs.score_scheduler_lane_isolation_short_burst,
+            help="Consecutive short-lane admissions attempted per isolation cycle.",
+        )
+        parser.add_argument(
+            "--score-scheduler-lane-isolation-long-burst",
+            type=int,
+            default=ServerArgs.score_scheduler_lane_isolation_long_burst,
+            help="Consecutive long-lane admissions attempted per isolation cycle.",
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-enable",
+            action="store_true",
+            help=(
+                "Enable queue-depth-aware dynamic items_per_step control for "
+                "score-from-cache v2 chunk dispatch."
+            ),
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-pressure-threshold",
+            type=int,
+            default=ServerArgs.score_scheduler_dynamic_items_per_step_pressure_threshold,
+            help=(
+                "Queue-pressure threshold used to start reducing score-from-cache v2 "
+                "items_per_step."
+            ),
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-short-lane-bias",
+            type=float,
+            default=ServerArgs.score_scheduler_dynamic_items_per_step_short_lane_bias,
+            help="Scaling bias applied to dynamic items_per_step in short lane.",
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-long-lane-bias",
+            type=float,
+            default=ServerArgs.score_scheduler_dynamic_items_per_step_long_lane_bias,
+            help="Scaling bias applied to dynamic items_per_step in long lane.",
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-short-lane-min",
+            type=int,
+            default=ServerArgs.score_scheduler_dynamic_items_per_step_short_lane_min,
+            help="Minimum dynamic items_per_step floor for short lane.",
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-long-lane-min",
+            type=int,
+            default=ServerArgs.score_scheduler_dynamic_items_per_step_long_lane_min,
+            help="Minimum dynamic items_per_step floor for long lane.",
+        )
+        parser.add_argument(
+            "--score-scheduler-cache-admission-bias-enable",
+            action="store_true",
+            help=(
+                "Enable cache-aware score admission ordering. Requests that can reuse "
+                "an existing scoring cache handle are admitted earlier within each lane."
+            ),
+        )
+        parser.add_argument(
+            "--score-scheduler-cache-admission-bias-require-hit",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.score_scheduler_cache_admission_bias_require_hit,
+            help=(
+                "When true, only proven scoring-cache hits are biased. "
+                "When false, cache-handle requests with unknown state may also be biased."
+            ),
+        )
+        parser.add_argument(
+            "--enable-scoring-cache",
+            action="store_true",
+            help="Enable radix cache specifically for scoring requests.",
+        )
+
+        parser.add_argument(
             "--multimodal",
             action="store_true",
             help="Enable multimodal HTTP server.",
@@ -1147,6 +1638,156 @@ class ServerArgs:
                 "Speculative decoding does not support overlap scheduler. "
                 "Please pass --disable-overlap-schedule when using --speculative-algorithm."
             )
+
+        # Check multi-item scoring constraints
+        if self.multi_item_scoring_delimiter is not None:
+            # Packed multi-item mode requires radix cache disabled.
+            # Prefill+extend mode can opt into scoring cache explicitly.
+            if not self.enable_scoring_cache:
+                assert self.disable_radix_cache, (
+                    "Multi-item scoring requires radix cache to be disabled. "
+                    "Please set --disable-radix-cache when using --multi-item-scoring-delimiter, "
+                    "or pass --enable-scoring-cache for prefill+extend mode."
+                )
+            assert self.chunked_prefill_size == -1, (
+                "Multi-item scoring requires chunked prefill to be disabled. "
+                "Please set --chunked-prefill-size -1 when using --multi-item-scoring-delimiter."
+            )
+            assert self.speculative_algorithm is None, (
+                "Multi-item scoring does not support speculative decoding. "
+                "Please unset --speculative-algorithm when using --multi-item-scoring-delimiter."
+            )
+            assert self.attention_backend == "fa", (
+                "Multi-item scoring requires flashattention backend. "
+                "Please set --attention-backend fa when using --multi-item-scoring-delimiter."
+            )
+            assert self.max_multi_item_seq_len > 0, "--max-multi-item-seq-len must be positive"
+            assert (
+                self.multi_item_scoring_chunk_size >= 0
+            ), "--multi-item-scoring-chunk-size must be non-negative"
+            assert self.max_multi_item_count > 0, "--max-multi-item-count must be positive"
+            assert self.multi_item_mask_impl in (
+                "auto",
+                "dense",
+                "segment",
+            ), "--multi-item-mask-impl must be one of: auto, dense, segment"
+            assert (
+                self.multi_item_segment_fallback_threshold >= 0
+            ), "--multi-item-segment-fallback-threshold must be non-negative"
+            assert (
+                self.multi_item_extend_batch_size > 0
+            ), "--multi-item-extend-batch-size must be positive"
+            assert (
+                self.multi_item_prefill_extend_cache_timeout >= 0
+            ), "--multi-item-prefill-extend-cache-timeout must be non-negative"
+            assert (
+                self.multi_item_score_from_cache_v2_items_per_step > 0
+            ), "--multi-item-score-from-cache-v2-items-per-step must be positive"
+            assert (
+                self.multi_item_score_from_cache_v2_token_budget >= 0
+            ), "--multi-item-score-from-cache-v2-token-budget must be non-negative"
+            assert (
+                self.multi_item_score_from_cache_v2_min_items_per_step > 0
+            ), "--multi-item-score-from-cache-v2-min-items-per-step must be positive"
+            if self.multi_item_score_from_cache_v2_adaptive_chunk_by_token_budget:
+                assert self.multi_item_score_from_cache_v2_token_budget > 0, (
+                    "Adaptive token-budget chunk sizing requires "
+                    "--multi-item-score-from-cache-v2-token-budget > 0."
+                )
+            if self.multi_item_enable_score_from_cache_v2:
+                assert self.multi_item_enable_prefill_extend, (
+                    "score-from-cache v2 requires prefill+extend to be enabled. "
+                    "Please pass --multi-item-enable-prefill-extend."
+                )
+                assert self.enable_scoring_cache, (
+                    "score-from-cache v2 requires scoring cache. "
+                    "Please pass --enable-scoring-cache."
+                )
+            if self.multi_item_score_label_only_logprob:
+                assert self.multi_item_enable_score_from_cache_v2, (
+                    "label-only logprob mode requires score-from-cache v2. "
+                    "Please pass --multi-item-enable-score-from-cache-v2."
+                )
+            assert (
+                self.multi_item_score_direct_hot_shape_bs >= 0
+            ), "--multi-item-score-direct-hot-shape-bs must be non-negative"
+            assert (
+                self.multi_item_score_direct_hot_shape_tokens >= 0
+            ), "--multi-item-score-direct-hot-shape-tokens must be non-negative"
+            assert (
+                self.multi_item_score_direct_hot_shape_token_rounding >= 0
+            ), "--multi-item-score-direct-hot-shape-token-rounding must be non-negative"
+            assert (
+                self.multi_item_score_local_rpc_min_items >= 0
+            ), "--multi-item-score-local-rpc-min-items must be non-negative"
+            assert (
+                self.multi_item_score_direct_warmup_prefix_len >= 0
+            ), "--multi-item-score-direct-warmup-prefix-len must be non-negative"
+            assert (
+                self.multi_item_score_direct_warmup_item_len >= 0
+            ), "--multi-item-score-direct-warmup-item-len must be non-negative"
+            assert (
+                self.multi_item_score_direct_warmup_batch_size >= 0
+            ), "--multi-item-score-direct-warmup-batch-size must be non-negative"
+            assert (
+                self.multi_item_score_direct_warmup_label_count > 0
+            ), "--multi-item-score-direct-warmup-label-count must be positive"
+            if self.multi_item_score_direct_label_only:
+                assert self.multi_item_score_label_only_logprob, (
+                    "Direct bulk label-only scoring requires label-only logprob mode. "
+                    "Please pass --multi-item-score-label-only-logprob."
+                )
+            if self.multi_item_score_direct_warmup_enable:
+                assert self.multi_item_score_direct_label_only, (
+                    "Direct bulk scorer warmup requires the direct label-only path. "
+                    "Please pass --multi-item-score-direct-label-only."
+                )
+                assert self.multi_item_score_direct_warmup_prefix_len > 0, (
+                    "Direct bulk scorer warmup requires a positive "
+                    "--multi-item-score-direct-warmup-prefix-len."
+                )
+                assert self.multi_item_score_direct_warmup_item_len > 0, (
+                    "Direct bulk scorer warmup requires a positive "
+                    "--multi-item-score-direct-warmup-item-len."
+                )
+
+        # Score-scheduler admission controls.
+        assert (
+            self.score_scheduler_global_microbatch_window_ms >= 0
+        ), "--score-scheduler-global-microbatch-window-ms must be non-negative"
+        assert (
+            self.score_scheduler_global_microbatch_poll_interval_ms > 0
+        ), "--score-scheduler-global-microbatch-poll-interval-ms must be positive"
+        assert (
+            self.score_scheduler_short_prompt_tokens_threshold > 0
+        ), "--score-scheduler-short-prompt-tokens-threshold must be positive"
+        assert (
+            self.score_scheduler_short_lane_max_inflight >= 0
+        ), "--score-scheduler-short-lane-max-inflight must be non-negative"
+        assert (
+            self.score_scheduler_long_lane_max_inflight >= 0
+        ), "--score-scheduler-long-lane-max-inflight must be non-negative"
+        assert (
+            self.score_scheduler_lane_isolation_short_burst > 0
+        ), "--score-scheduler-lane-isolation-short-burst must be positive"
+        assert (
+            self.score_scheduler_lane_isolation_long_burst > 0
+        ), "--score-scheduler-lane-isolation-long-burst must be positive"
+        assert (
+            self.score_scheduler_dynamic_items_per_step_pressure_threshold > 0
+        ), "--score-scheduler-dynamic-items-per-step-pressure-threshold must be positive"
+        assert (
+            self.score_scheduler_dynamic_items_per_step_short_lane_bias > 0
+        ), "--score-scheduler-dynamic-items-per-step-short-lane-bias must be positive"
+        assert (
+            self.score_scheduler_dynamic_items_per_step_long_lane_bias > 0
+        ), "--score-scheduler-dynamic-items-per-step-long-lane-bias must be positive"
+        assert (
+            self.score_scheduler_dynamic_items_per_step_short_lane_min > 0
+        ), "--score-scheduler-dynamic-items-per-step-short-lane-min must be positive"
+        assert (
+            self.score_scheduler_dynamic_items_per_step_long_lane_min > 0
+        ), "--score-scheduler-dynamic-items-per-step-long-lane-min must be positive"
 
     def check_lora_server_args(self):
         """Validate and normalize LoRA-related server arguments."""
