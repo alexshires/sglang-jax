@@ -865,6 +865,11 @@ class ServerArgs:
             help="Enable batch tokenization for improved performance when processing multiple text inputs. Do not use with image inputs, pre-tokenized input_ids, or input_embeds.",
         )
         parser.add_argument(
+            "--enable-tokenizer-batch-send",
+            action="store_true",
+            help="Enable batch sending of requests from tokenizer to scheduler.",
+        )
+        parser.add_argument(
             "--enable-precision-tracer",
             action="store_true",
             help="Enable precision tracer for debugging tensor values. May have performance impact.",
