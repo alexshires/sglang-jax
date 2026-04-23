@@ -31,6 +31,44 @@ from sgl_jax.srt.validation import (
 
 logger = logging.getLogger(__name__)
 
+
+@dataclasses.dataclass
+class ReqState:
+    """Store the state a request."""
+
+    out_list: list[dict[Any, Any]]
+    finished: bool
+    event: asyncio.Event
+    obj: GenerateReqInput | EmbeddingReqInput
+
+    # For metrics
+    created_time: float
+    event_loop: asyncio.AbstractEventLoop | None = None
+    finished_time: float = 0.0
+    first_token_time: float = 0.0
+    last_time: float = 0.0
+    last_completion_tokens: int = 1
+
+    # For streaming output
+    last_output_offset: int = 0
+    expected_finish_count: int = 1
+    observed_finish_count: int = 0
+
+    text: str = ""
+    output_ids: list[int] = dataclasses.field(default_factory=list)
+    input_token_logprobs_val: list[float] = dataclasses.field(default_factory=list)
+    input_token_logprobs_idx: list[int] = dataclasses.field(default_factory=list)
+    output_token_logprobs_val: list[float] = dataclasses.field(default_factory=list)
+    output_token_logprobs_idx: list[int] = dataclasses.field(default_factory=list)
+    input_top_logprobs_val: list[list[float]] = dataclasses.field(default_factory=list)
+    input_top_logprobs_idx: list[list[int]] = dataclasses.field(default_factory=list)
+    output_top_logprobs_val: list[list[float]] = dataclasses.field(default_factory=list)
+    output_top_logprobs_idx: list[list[int]] = dataclasses.field(default_factory=list)
+    input_token_ids_logprobs_val: list = dataclasses.field(default_factory=list)
+    input_token_ids_logprobs_idx: list = dataclasses.field(default_factory=list)
+    output_token_ids_logprobs_val: list = dataclasses.field(default_factory=list)
+    output_token_ids_logprobs_idx: list = dataclasses.field(default_factory=list)
+
 def _stable_softmax(values: list[float]) -> list[float]:
     if not values:
         return []
