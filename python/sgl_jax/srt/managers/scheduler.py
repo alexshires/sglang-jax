@@ -427,10 +427,6 @@ class Scheduler(
                 (SetInternalStateReq, self.set_internal_state),
                 (PauseGenerationReqInput, self.pause_generation),
                 (ContinueGenerationReqInput, self.continue_generation),
-<<<<<<< HEAD
-=======
-
->>>>>>> 3059863 (Remove remaining leaked scoring cache code from scheduler.py on branch 1c)
             ]
         )
 
