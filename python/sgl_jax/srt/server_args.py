@@ -175,6 +175,9 @@ class ServerArgs:
     multi_item_enable_score_from_cache_v2: bool = False
     # Internal chunk size. 64 matches the measured high-parallelism scorer page size.
     multi_item_score_from_cache_v2_items_per_step: int = 64
+    # Allow score-from-cache v2 to use the live request-pool size instead of
+    # clamping to max_running_requests.
+    score_v2_allow_reqpool_oversubscribe: bool = False
     # Enable per-request items_per_step downshift from token budget.
     multi_item_score_from_cache_v2_adaptive_chunk_by_token_budget: bool = False
     # Target token budget per score-from-cache v2 dispatch.
@@ -1115,6 +1118,14 @@ class ServerArgs:
             type=int,
             default=ServerArgs.multi_item_score_from_cache_v2_items_per_step,
             help="Internal chunk size for score-from-cache v2 fastpath.",
+        )
+        parser.add_argument(
+            "--score-v2-allow-reqpool-oversubscribe",
+            action="store_true",
+            help=(
+                "Allow score-from-cache v2 to use the live request-pool capacity "
+                "instead of clamping to max_running_requests."
+            ),
         )
         parser.add_argument(
             "--multi-item-score-from-cache-v2-adaptive-chunk-by-token-budget",

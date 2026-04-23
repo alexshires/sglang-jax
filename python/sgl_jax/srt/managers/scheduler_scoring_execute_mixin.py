@@ -254,11 +254,15 @@ class SchedulerScoringExecuteMixin:
         )
 
         capacity_caps: list[int] = []
+        allow_reqpool_oversubscribe = bool(
+            SCORE_V2_ALLOW_REQPOOL_OVERSUBSCRIBE
+            or getattr(self.server_args, "score_v2_allow_reqpool_oversubscribe", False)
+        )
         max_running_requests = int(getattr(self.server_args, "max_running_requests", 0) or 0)
         if (
             not use_direct_label_only
             and max_running_requests > 0
-            and not SCORE_V2_ALLOW_REQPOOL_OVERSUBSCRIBE
+            and not allow_reqpool_oversubscribe
         ):
             capacity_caps.append(max_running_requests)
         req_to_token_pool = getattr(self, "req_to_token_pool", None)
