@@ -31,6 +31,7 @@ from sgl_jax.srt.managers.tokenizer_score_cache_mixin import TokenizerScoreCache
 from sgl_jax.srt.managers.tokenizer_score_common import (
     _CorrelatedCommunicator,
     _SchedulerSender,
+    ReqState,
 )
 from sgl_jax.srt.managers.tokenizer_score_routing_mixin import TokenizerScoreRoutingMixin
 from sgl_jax.srt.managers.io_struct import (
