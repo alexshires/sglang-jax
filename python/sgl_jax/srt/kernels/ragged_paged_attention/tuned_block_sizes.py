@@ -1,6 +1,7 @@
 """Auto-tuned block sizes for ragged paged attention."""
 
 import logging
+import threading
 
 import jax.numpy as jnp
 
@@ -9,6 +10,17 @@ from sgl_jax.srt.utils.common_utils import next_power_of_2
 from sgl_jax.srt.utils.jax_utils import get_device_name
 
 logger = logging.getLogger(__name__)
+_LOGICAL_DEVICE_COUNT_OVERRIDE = threading.local()
+
+
+def set_logical_device_count_override(logical_device_count: int | None) -> None:
+    if logical_device_count is None:
+        if hasattr(_LOGICAL_DEVICE_COUNT_OVERRIDE, "value"):
+            delattr(_LOGICAL_DEVICE_COUNT_OVERRIDE, "value")
+        return
+    _LOGICAL_DEVICE_COUNT_OVERRIDE.value = int(logical_device_count)
+
+
 # key
 #   - device_name
 #     - q dtype
