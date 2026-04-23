@@ -14,14 +14,13 @@ import sys
 import threading
 import time
 import uuid
+import zlib
 from collections import deque
 from datetime import datetime
 from http import HTTPStatus
 from typing import Any
 
 import fastapi
-import jax
-import jax.numpy as jnp
 import uvloop
 import zmq
 import zmq.asyncio
@@ -53,8 +52,12 @@ from sgl_jax.srt.managers.io_struct import (
     ProfileReqType,
     ReleaseMemoryOccupationReqInput,
     ReleaseMemoryOccupationReqOutput,
+    ReleaseScoringCacheReqInput,
+    ReleaseScoringCacheReqOutput,
     ResumeMemoryOccupationReqInput,
     ResumeMemoryOccupationReqOutput,
+    ScoreFromCacheReqInput,
+    ScoreFromCacheReqOutput,
     SetInternalStateReq,
     SetInternalStateReqOutput,
     TokenizedEmbeddingReqInput,
@@ -69,11 +72,53 @@ from sgl_jax.srt.utils import (
     get_zmq_socket,
     kill_process_tree,
 )
+from sgl_jax.srt.validation import (
+    ValidationError,
+    validate_multi_item_scoring_request,
+    validate_score_request,
+)
 from sgl_jax.utils import TypeBasedDispatcher, get_exception_traceback
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_softmax(values: list[float]) -> list[float]:
+    if not values:
+        return []
+    max_value = max(values)
+    exp_values = [math.exp(value - max_value) for value in values]
+    total = sum(exp_values)
+    if total == 0:
+        return [0.0 for _ in exp_values]
+    return [value / total for value in exp_values]
+
+
+class _SchedulerSender:
+    """Route tokenizer requests to one or more scheduler sockets."""
+
+    def __init__(self, senders: list[Any]):
+        if not senders:
+            raise ValueError("At least one scheduler sender is required.")
+        self._senders = list(senders)
+        self._rr_index = 0
+
+    @property
+    def fan_out(self) -> int:
+        return len(self._senders)
+
+    def send_pyobj(self, obj):
+        sender = self._senders[self._rr_index % len(self._senders)]
+        self._rr_index = (self._rr_index + 1) % len(self._senders)
+        sender.send_pyobj(obj)
+
+    def send_pyobj_to(self, scheduler_idx: int, obj):
+        self._senders[scheduler_idx].send_pyobj(obj)
+
+    def send_pyobj_all(self, obj):
+        for sender in self._senders:
+            sender.send_pyobj(obj)
 
 
 @dataclasses.dataclass
@@ -95,6 +140,8 @@ class ReqState:
 
     # For streaming output
     last_output_offset: int = 0
+    expected_finish_count: int = 1
+    observed_finish_count: int = 0
 
     text: str = ""
     output_ids: list[int] = dataclasses.field(default_factory=list)
@@ -118,7 +165,7 @@ class TokenizerManager:
     def __init__(
         self,
         server_args: ServerArgs,
-        port_args: PortArgs,
+        port_args: PortArgs | list[PortArgs],
     ):
         # Parse args
         self.server_args = server_args
@@ -134,14 +181,23 @@ class TokenizerManager:
         self.event_loop = None  # Store the event loop to use
 
         # Init inter-process communication
+        scheduler_port_args = port_args if isinstance(port_args, list) else [port_args]
+        if not scheduler_port_args:
+            raise ValueError("TokenizerManager requires at least one PortArgs entry.")
+        primary_port_args = scheduler_port_args[0]
         context = zmq.asyncio.Context(2)
         self.recv_from_detokenizer = get_zmq_socket(
-            context, zmq.PULL, port_args.tokenizer_ipc_name, True
+            context, zmq.PULL, primary_port_args.tokenizer_ipc_name, True
         )
+        scheduler_senders = [
+            get_zmq_socket(context, zmq.PUSH, scheduler_port_arg.scheduler_input_ipc_name, True)
+            for scheduler_port_arg in scheduler_port_args
+        ]
+        self.send_to_scheduler = _SchedulerSender(scheduler_senders)
+        self.scheduler_port_count = self.send_to_scheduler.fan_out
+        self.score_replica_lane_count = self.scheduler_port_count
 
-        self.send_to_scheduler = get_zmq_socket(
-            context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
-        )
+        self.send_to_rpc = get_zmq_socket(context, zmq.DEALER, primary_port_args.rpc_ipc_name, True)
 
         # Read model args
         self.model_path = server_args.model_path
@@ -175,6 +231,7 @@ class TokenizerManager:
                 revision=server_args.revision,
                 sub_dir=tokenizer_subdir,
             )
+        self._validate_multi_item_delimiter_token()
 
         # Store states
         self.no_create_loop = False
@@ -203,6 +260,12 @@ class TokenizerManager:
             self.send_to_scheduler, server_args.dp_size
         )
         self.flush_cache_communicator = _Communicator(self.send_to_scheduler, server_args.dp_size)
+        self.release_scoring_cache_communicator = _Communicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
+        self.score_from_cache_v2_communicator = _CorrelatedCommunicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
         self.profile_communicator = _Communicator(self.send_to_scheduler, server_args.dp_size)
         self.get_internal_state_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
@@ -210,6 +273,12 @@ class TokenizerManager:
         self.set_internal_state_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
+        self.local_rpc_submitter = None
+        self.local_request_submitter = None
+        self.score_fastpath_attempted = 0
+        self.score_fastpath_succeeded = 0
+        self.score_fastpath_fallback = 0
+        self.score_fastpath_fallback_reasons: dict[str, int] = {}
 
         # LoRA
         self.lora_registry = LoRARegistry(self.server_args.lora_paths)
@@ -239,6 +308,14 @@ class TokenizerManager:
                     self.flush_cache_communicator.handle_recv,
                 ),
                 (
+                    ReleaseScoringCacheReqOutput,
+                    self.release_scoring_cache_communicator.handle_recv,
+                ),
+                (
+                    ScoreFromCacheReqOutput,
+                    self.score_from_cache_v2_communicator.handle_recv,
+                ),
+                (
                     ProfileReqOutput,
                     self.profile_communicator.handle_recv,
                 ),
@@ -254,6 +331,76 @@ class TokenizerManager:
             ]
         )
         self.wait_timeout = int(os.environ.get("SGLANG_WAIT_TIMEOUT", "4"))
+        self.scheduler_pids: list[int] = []
+        self.scheduler_unavailable_error: str | None = None
+
+    def _validate_multi_item_delimiter_token(self):
+        delimiter_token_id = self.server_args.multi_item_scoring_delimiter
+        if delimiter_token_id is None or self.tokenizer is None:
+            return
+
+        try:
+            token_count = len(self.tokenizer)
+        except Exception:
+            return
+
+        if not (0 <= delimiter_token_id < token_count):
+            raise ValueError(
+                f"Invalid multi-item scoring delimiter token id {delimiter_token_id}: "
+                f"must be in [0, {token_count - 1}]"
+            )
+
+    def _scheduler_sender_fan_out(self) -> int:
+        return int(getattr(self.send_to_scheduler, "fan_out", 1) or 1)
+
+    def _score_lane_scheduler_index(self, cache_handle: str | None) -> int | None:
+        fan_out = self._scheduler_sender_fan_out()
+        if fan_out <= 1 or not cache_handle:
+            return None
+        return zlib.crc32(cache_handle.encode("utf-8")) % fan_out
+
+    def _can_use_local_score_rpc(self, total_items: int | None = None) -> bool:
+        if not callable(getattr(self, "local_rpc_submitter", None)):
+            return False
+        if self._scheduler_sender_fan_out() > 1:
+            return False
+        if total_items is None:
+            return True
+        min_items = int(getattr(self.server_args, "multi_item_score_local_rpc_min_items", 256) or 0)
+        if min_items <= 0:
+            min_items = 256
+        return int(total_items) >= min_items
+
+    def _can_use_local_request_ingress(self, tokenized_obj) -> bool:
+        if not callable(getattr(self, "local_request_submitter", None)):
+            return False
+        if self._scheduler_sender_fan_out() > 1:
+            return False
+        return bool(getattr(tokenized_obj, "cache_for_scoring", False))
+
+    async def _submit_local_score_rpc(self, req_obj, timeout: float | None = None):
+        submitter = getattr(self, "local_rpc_submitter", None)
+        if not callable(submitter):
+            raise RuntimeError("TokenizerManager local_rpc_submitter is not configured.")
+
+        future = submitter(req_obj)
+        wait_coro = asyncio.wrap_future(future)
+        if timeout is not None and timeout > 0:
+            result = await asyncio.wait_for(wait_coro, timeout=timeout)
+        else:
+            result = await wait_coro
+        return [result]
+
+    @staticmethod
+    def _build_multi_item_token_sequence(
+        query_tokens: list[int], item_tokens: list[list[int]], delimiter_token_id: int
+    ) -> list[int]:
+        combined = query_tokens[:]
+        for tokens in item_tokens:
+            combined.append(delimiter_token_id)
+            combined.extend(tokens)
+        combined.append(delimiter_token_id)
+        return combined
 
     async def generate_request(
         self,
@@ -366,19 +513,25 @@ class TokenizerManager:
         # Build return object
 
         tokenized_obj = TokenizedGenerateReqInput(
-            obj.rid,
-            input_text,
-            input_ids,
-            sampling_params,
-            obj.return_logprob,
-            obj.return_output_logprob_only,
-            obj.logprob_start_len,
-            obj.top_logprobs_num,
-            obj.token_ids_logprob,
-            obj.stream,
-            obj.lora_id,
-            obj.extra_key,
-            obj.return_routed_experts,
+            rid=obj.rid,
+            text=input_text,
+            input_ids=input_ids,
+            sampling_params=sampling_params,
+            return_logprob=obj.return_logprob,
+            return_output_logprob_only=obj.return_output_logprob_only,
+            logprob_start_len=obj.logprob_start_len,
+            top_logprobs_num=obj.top_logprobs_num,
+            token_ids_logprob=obj.token_ids_logprob,
+            stream=obj.stream,
+            lora_id=obj.lora_id,
+            extra_key=obj.extra_key,
+            return_routed_experts=obj.return_routed_experts,
+            is_multi_item_scoring=bool(obj.is_multi_item_scoring),
+            multi_item_scoring_delimiter=obj.multi_item_scoring_delimiter,
+            multi_item_algorithm=obj.multi_item_algorithm,
+            multi_item_mask_mode=obj.multi_item_mask_mode,
+            cache_for_scoring=bool(obj.cache_for_scoring),
+            extend_from_cache=obj.extend_from_cache,
         )
         # note: When only `return_logprob` is specified, we assume that only the output probability is required.
         if (
@@ -439,16 +592,60 @@ class TokenizerManager:
         tokenized_obj: TokenizedGenerateReqInput | TokenizedEmbeddingReqInput,
         created_time: float | None = None,
     ):
-        self.send_to_scheduler.send_pyobj(tokenized_obj)
-        # Capture the caller's event loop so that _notify_state_event can use
-        # call_soon_threadsafe when handle_loop runs on a different thread
-        # (e.g. enable_engine_loop_run_forever_daemon mode).
+        self._raise_if_scheduler_unavailable()
         try:
             caller_loop = asyncio.get_running_loop()
         except RuntimeError:
             caller_loop = None
+        can_use_local_request_ingress = getattr(
+            self, "_can_use_local_request_ingress", lambda _tokenized_obj: False
+        )
+        scheduler_sender_fan_out = getattr(
+            self,
+            "_scheduler_sender_fan_out",
+            lambda: getattr(self.send_to_scheduler, "fan_out", 1),
+        )
+        score_lane_scheduler_index = getattr(
+            self, "_score_lane_scheduler_index", lambda _extend_from_cache: None
+        )
+        use_local_ingress = can_use_local_request_ingress(tokenized_obj)
+        expected_finish_count = 1
+        if use_local_ingress:
+            state = ReqState(
+                [],
+                False,
+                asyncio.Event(),
+                obj,
+                created_time=created_time,
+                event_loop=caller_loop,
+                expected_finish_count=expected_finish_count,
+            )
+            rid_key = obj.rid[0] if isinstance(obj.rid, list) else obj.rid
+            self.rid_to_state[rid_key] = state
+            self.local_request_submitter(tokenized_obj)
+            return state
+        if (
+            bool(getattr(tokenized_obj, "cache_for_scoring", False))
+            and scheduler_sender_fan_out() > 1
+        ):
+            self.send_to_scheduler.send_pyobj_all(tokenized_obj)
+            expected_finish_count = scheduler_sender_fan_out()
+        else:
+            scheduler_idx = score_lane_scheduler_index(
+                getattr(tokenized_obj, "extend_from_cache", None)
+            )
+            if scheduler_idx is not None:
+                self.send_to_scheduler.send_pyobj_to(scheduler_idx, tokenized_obj)
+            else:
+                self.send_to_scheduler.send_pyobj(tokenized_obj)
         state = ReqState(
-            [], False, asyncio.Event(), obj, created_time=created_time, event_loop=caller_loop
+            [],
+            False,
+            asyncio.Event(),
+            obj,
+            created_time=created_time,
+            event_loop=caller_loop,
+            expected_finish_count=expected_finish_count,
         )
         # Handle rid being a list (single element) or string
         rid_key = obj.rid[0] if isinstance(obj.rid, list) else obj.rid
@@ -471,6 +668,152 @@ class TokenizerManager:
                 loop.call_soon_threadsafe(state.event.set)
         else:
             state.event.set()
+
+    def _send_batch_requests(
+        self,
+        objs: list[GenerateReqInput | EmbeddingReqInput],
+        tokenized_objs: list[TokenizedGenerateReqInput | TokenizedEmbeddingReqInput],
+        created_time: float | None = None,
+    ) -> list[ReqState]:
+        if len(objs) != len(tokenized_objs):
+            raise ValueError("objs and tokenized_objs must have the same length")
+        if not objs:
+            return []
+
+        self._raise_if_scheduler_unavailable()
+        try:
+            caller_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            caller_loop = None
+        can_use_local_request_ingress = getattr(
+            self, "_can_use_local_request_ingress", lambda _tokenized_obj: False
+        )
+        score_lane_scheduler_index = getattr(
+            self, "_score_lane_scheduler_index", lambda _extend_from_cache: None
+        )
+
+        if len(tokenized_objs) == 1 and can_use_local_request_ingress(tokenized_objs[0]):
+            states: list[ReqState] = []
+            for obj in objs:
+                state = ReqState(
+                    [],
+                    False,
+                    asyncio.Event(),
+                    obj,
+                    created_time=created_time,
+                    event_loop=caller_loop,
+                )
+                rid_key = obj.rid[0] if isinstance(obj.rid, list) else obj.rid
+                self.rid_to_state[rid_key] = state
+                states.append(state)
+            self.local_request_submitter(tokenized_objs[0])
+            return states
+
+        payload = tokenized_objs[0] if len(tokenized_objs) == 1 else tokenized_objs
+        scheduler_idx = None
+        if tokenized_objs:
+            extend_from_cache = getattr(tokenized_objs[0], "extend_from_cache", None)
+            if extend_from_cache and all(
+                getattr(tokenized_obj, "extend_from_cache", None) == extend_from_cache
+                for tokenized_obj in tokenized_objs
+            ):
+                scheduler_idx = score_lane_scheduler_index(extend_from_cache)
+        if scheduler_idx is not None:
+            self.send_to_scheduler.send_pyobj_to(scheduler_idx, payload)
+        else:
+            self.send_to_scheduler.send_pyobj(payload)
+
+        states: list[ReqState] = []
+        for obj in objs:
+            state = ReqState(
+                [],
+                False,
+                asyncio.Event(),
+                obj,
+                created_time=created_time,
+                event_loop=caller_loop,
+            )
+            rid_key = obj.rid[0] if isinstance(obj.rid, list) else obj.rid
+            self.rid_to_state[rid_key] = state
+            states.append(state)
+        return states
+
+    @staticmethod
+    def _is_process_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _build_scheduler_unavailable_message(self) -> str | None:
+        if not self.scheduler_pids:
+            return None
+        dead_pids = [pid for pid in self.scheduler_pids if not self._is_process_alive(pid)]
+        if not dead_pids:
+            return None
+        return (
+            "Scheduler subprocess is unavailable "
+            f"(dead pid(s): {', '.join(str(pid) for pid in dead_pids)}). "
+            "Please restart the server."
+        )
+
+    def _fail_pending_requests(self, message: str) -> None:
+        for rid, state in list(self.rid_to_state.items()):
+            if state.finished:
+                continue
+            state.finished = True
+            state.out_list.append(
+                {
+                    "text": "",
+                    "meta_info": {
+                        "id": rid,
+                        "finish_reason": {
+                            "type": "abort",
+                            "message": message,
+                            "status_code": HTTPStatus.SERVICE_UNAVAILABLE,
+                        },
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                    },
+                }
+            )
+            notify_state_event = getattr(self, "_notify_state_event", None)
+            if notify_state_event is not None:
+                notify_state_event(state)
+            else:
+                state.event.set()
+            self.rid_to_state.pop(rid, None)
+
+    def _mark_scheduler_unavailable(self, message: str) -> None:
+        if self.scheduler_unavailable_error is None:
+            logger.error(message)
+        self.scheduler_unavailable_error = message
+        self.health_check_failed = True
+        self._fail_pending_requests(message)
+
+    def _check_scheduler_health(self) -> bool:
+        if self.scheduler_unavailable_error is not None:
+            return False
+        message = self._build_scheduler_unavailable_message()
+        if message is None:
+            return True
+        self._mark_scheduler_unavailable(message)
+        return False
+
+    def _raise_if_scheduler_unavailable(self) -> None:
+        if self._check_scheduler_health():
+            return
+        raise ValueError(
+            self.scheduler_unavailable_error
+            or "Scheduler subprocess is unavailable. Please restart the server."
+        )
 
     async def _wait_one_response(
         self,
@@ -495,6 +838,11 @@ class TokenizerManager:
                         raise ValueError(
                             f"Request is disconnected from the client side (type 1). Abort request rid={obj.rid}"
                         ) from e
+                if not self._check_scheduler_health():
+                    raise ValueError(
+                        self.scheduler_unavailable_error
+                        or "Scheduler subprocess is unavailable. Please restart the server."
+                    ) from None
                 continue
 
             out = state.out_list[-1]
@@ -509,11 +857,10 @@ class TokenizerManager:
                 # Check if this was an abort/error created by scheduler
                 if isinstance(out["meta_info"].get("finish_reason"), dict):
                     finish_reason = out["meta_info"]["finish_reason"]
-                    if (
-                        finish_reason.get("type") == "abort"
-                        and finish_reason.get("status_code") == HTTPStatus.BAD_REQUEST
-                    ):
-                        raise ValueError(finish_reason["message"])
+                    if finish_reason.get("type") == "abort":
+                        raise ValueError(
+                            finish_reason.get("message") or "Request aborted by scheduler."
+                        )
 
                 yield out
                 break
@@ -547,20 +894,42 @@ class TokenizerManager:
                 self._validate_batch_tokenization_constraints(batch_size, obj)
 
                 tokenized_objs = await self._batch_tokenize_and_process(batch_size, obj)
-
-                for i, tokenized_obj in enumerate(tokenized_objs):
-                    tmp_obj = obj[i]
-                    state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
-                    generators.append(self._wait_one_response(tmp_obj, state, request))
-                    rids.append(tmp_obj.rid)
+                batched_objs = [obj[i] for i in range(batch_size)]
+                if self.server_args.enable_tokenizer_batch_send:
+                    states = self._send_batch_requests(
+                        batched_objs,
+                        tokenized_objs,
+                        created_time,
+                    )
+                    for tmp_obj, state in zip(batched_objs, states, strict=True):
+                        generators.append(self._wait_one_response(tmp_obj, state, request))
+                        rids.append(tmp_obj.rid)
+                else:
+                    for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
+                        state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
+                        generators.append(self._wait_one_response(tmp_obj, state, request))
+                        rids.append(tmp_obj.rid)
             else:
                 # Sequential tokenization and processing
-                for i in range(batch_size):
-                    tmp_obj = obj[i]
-                    tokenized_obj = await self._tokenize_one_request(tmp_obj)
-                    state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
-                    generators.append(self._wait_one_response(tmp_obj, state, request))
-                    rids.append(tmp_obj.rid)
+                batched_objs = [obj[i] for i in range(batch_size)]
+                tokenized_objs = []
+                for tmp_obj in batched_objs:
+                    tokenized_objs.append(await self._tokenize_one_request(tmp_obj))
+
+                if self.server_args.enable_tokenizer_batch_send:
+                    states = self._send_batch_requests(
+                        batched_objs,
+                        tokenized_objs,
+                        created_time,
+                    )
+                    for tmp_obj, state in zip(batched_objs, states, strict=True):
+                        generators.append(self._wait_one_response(tmp_obj, state, request))
+                        rids.append(tmp_obj.rid)
+                else:
+                    for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
+                        state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
+                        generators.append(self._wait_one_response(tmp_obj, state, request))
+                        rids.append(tmp_obj.rid)
         else:
             # FIXME: When using batch and parallel_sample_num together, the perf is not optimal.
             if batch_size > 128:
@@ -1012,6 +1381,14 @@ class TokenizerManager:
                         f"Cache miss occurred {recv_obj.cache_miss_count} times, please check if the precompile logic covers the current scenario"
                     )
                 meta_info["cache_miss_count"] = recv_obj.cache_miss_count
+            if getattr(recv_obj, "scheduler_queue_wait_s", None) is not None:
+                meta_info["scheduler_queue_wait_s"] = recv_obj.scheduler_queue_wait_s[i]
+            if getattr(recv_obj, "scheduler_device_compute_s", None) is not None:
+                meta_info["scheduler_device_compute_s"] = recv_obj.scheduler_device_compute_s[i]
+            if getattr(recv_obj, "scheduler_host_overhead_s", None) is not None:
+                meta_info["scheduler_host_overhead_s"] = recv_obj.scheduler_host_overhead_s[i]
+            if getattr(recv_obj, "scheduler_dispatch_count", None) is not None:
+                meta_info["scheduler_dispatch_count"] = recv_obj.scheduler_dispatch_count[i]
 
             if isinstance(recv_obj, BatchStrOut):
                 state.text += recv_obj.output_strs[i]
@@ -1041,7 +1418,12 @@ class TokenizerManager:
                     "meta_info": meta_info,
                 }
 
-            state.finished = recv_obj.finished_reasons[i] is not None
+            finished_reason = recv_obj.finished_reasons[i] is not None
+            if finished_reason:
+                state.observed_finish_count += 1
+            state.finished = finished_reason and state.observed_finish_count >= max(
+                1, state.expected_finish_count
+            )
             if state.finished:
                 state.finished_time = time.time()
                 meta_info["e2e_latency"] = state.finished_time - state.created_time
@@ -1086,6 +1468,22 @@ class TokenizerManager:
                 state.output_token_logprobs_idx,
                 return_text_in_logprobs,
             )
+            if (
+                token_ids_logprob is not None
+                and recv_obj.output_token_ids_logprobs_val is not None
+                and len(recv_obj.output_token_ids_logprobs_val) > 0
+            ):
+                state.output_token_ids_logprobs_val.extend(
+                    recv_obj.output_token_ids_logprobs_val[recv_obj_index]
+                )
+                state.output_token_ids_logprobs_idx.extend(
+                    recv_obj.output_token_ids_logprobs_idx[recv_obj_index]
+                )
+                meta_info["output_token_ids_logprobs"] = self.detokenize_top_logprobs_tokens(
+                    state.output_token_ids_logprobs_val,
+                    state.output_token_ids_logprobs_idx,
+                    return_text_in_logprobs,
+                )
             return
         if recv_obj.input_token_logprobs_val is None:
             return
@@ -1235,12 +1633,156 @@ class TokenizerManager:
                 },
             }
         )
-        state.event.set()
+        notify_state_event = getattr(self, "_notify_state_event", None)
+        if notify_state_event is not None:
+            notify_state_event(state)
+        else:
+            state.event.set()
 
     def _handle_open_session_req_output(self, recv_obj):
         self.session_futures[recv_obj.session_id].set_result(
             recv_obj.session_id if recv_obj.success else None
         )
+
+    def _normalize_score_query_tokens(self, query: str | list[int] | None) -> list[int]:
+        if query is None:
+            raise ValueError("query is required")
+
+        if isinstance(query, str):
+            if len(query) == 0:
+                raise ValueError("query cannot be empty")
+            if self.tokenizer is None:
+                raise ValueError("Tokenizer is required for text scoring.")
+            return self.tokenizer.encode(query, add_special_tokens=False)
+
+        if not isinstance(query, list):
+            raise ValueError(
+                f"query must be a string or list of integers, got {type(query).__name__}"
+            )
+        if len(query) == 0:
+            raise ValueError("query token list cannot be empty")
+        if any(not isinstance(token_id, int) for token_id in query):
+            raise ValueError("query contains non-integer values in token input mode")
+        return query
+
+    def _normalize_score_item_tokens(
+        self,
+        items: str | list[str] | list[list[int]] | None,
+    ) -> list[list[int]]:
+        if items is None:
+            raise ValueError("items is required")
+
+        if isinstance(items, str):
+            items = [items]
+
+        if not isinstance(items, list):
+            raise ValueError("items must be a list of strings or list of token ID lists")
+        if len(items) == 0:
+            raise ValueError("items cannot be empty. At least one item is required.")
+
+        if isinstance(items[0], str):
+            if self.tokenizer is None:
+                raise ValueError("Tokenizer is required for text scoring.")
+            for idx, item in enumerate(items):
+                if not isinstance(item, str):
+                    raise ValueError(f"items[{idx}] must be a string when using text input mode")
+            return [self.tokenizer.encode(item, add_special_tokens=False) for item in items]
+
+        normalized_items: list[list[int]] = []
+        for idx, item in enumerate(items):
+            if not isinstance(item, list):
+                raise ValueError(
+                    f"items[{idx}] must be a list of integers when using token input mode"
+                )
+            if any(not isinstance(token_id, int) for token_id in item):
+                raise ValueError(
+                    f"items[{idx}] contains non-integer values. " "All token IDs must be integers."
+                )
+            normalized_items.append(item)
+        return normalized_items
+
+    def _validate_label_token_ids_for_score(
+        self,
+        label_token_ids: list[int] | None,
+        *,
+        apply_softmax: bool,
+    ) -> None:
+        if label_token_ids is None:
+            raise ValueError("label_token_ids is required")
+        if not isinstance(label_token_ids, list):
+            raise ValueError("label_token_ids must be a list of integers")
+        if len(label_token_ids) == 0:
+            raise ValueError("label_token_ids cannot be empty. At least one token ID is required.")
+        if not isinstance(apply_softmax, bool):
+            raise ValueError(f"apply_softmax must be a boolean, got {type(apply_softmax).__name__}")
+
+        vocab_size = len(self.tokenizer) if self.tokenizer is not None else None
+        for idx, token_id in enumerate(label_token_ids):
+            if not isinstance(token_id, int):
+                raise ValueError(
+                    f"label_token_ids[{idx}] must be an integer, got {type(token_id).__name__}"
+                )
+            if token_id < 0:
+                raise ValueError(
+                    f"label_token_ids[{idx}] is negative ({token_id}). "
+                    "Token IDs must be non-negative."
+                )
+            if vocab_size is not None and token_id >= vocab_size:
+                raise ValueError(
+                    f"label_token_ids[{idx}] ({token_id}) exceeds vocabulary size ({vocab_size})"
+                )
+
+    async def prefill_scoring_cache(self, query: str | list[int] | None = None) -> str:
+        query_tokens = self._normalize_score_query_tokens(query)
+        return await self._prefill_and_cache(query_tokens)
+
+    async def score_from_cache(
+        self,
+        cache_handle: str,
+        items: str | list[str] | list[list[int]] | None = None,
+        label_token_ids: list[int] | None = None,
+        apply_softmax: bool = False,
+    ) -> list[list[float]]:
+        if not isinstance(cache_handle, str) or len(cache_handle) == 0:
+            raise ValueError("cache_handle must be a non-empty string")
+
+        item_tokens_list = self._normalize_score_item_tokens(items)
+        self._validate_label_token_ids_for_score(
+            label_token_ids,
+            apply_softmax=apply_softmax,
+        )
+
+        (
+            resolved_items_per_step,
+            resolved_max_total_tokens,
+            resolved_token_budget,
+        ) = self._resolve_score_from_cache_v2_items_per_step(
+            query_tokens=[],
+            items=item_tokens_list,
+        )
+        fastpath_out = await self._score_from_cache_fastpath_v2(
+            cache_handle=cache_handle,
+            items=item_tokens_list,
+            label_token_ids=label_token_ids,
+            apply_softmax=apply_softmax,
+            items_per_step=resolved_items_per_step,
+            token_budget=resolved_token_budget,
+            max_total_tokens=resolved_max_total_tokens,
+        )
+        if not fastpath_out.success:
+            error_msg = fastpath_out.error_msg or fastpath_out.fallback_reason or "unknown_error"
+            raise RuntimeError(f"score_from_cache failed: {error_msg}")
+        if len(fastpath_out.scores) != len(item_tokens_list):
+            raise RuntimeError(
+                "score_from_cache returned wrong score count: "
+                f"{len(fastpath_out.scores)} != {len(item_tokens_list)}."
+            )
+        return fastpath_out.scores
+
+    async def release_scoring_cache(self, cache_handle: str) -> bool:
+        if not isinstance(cache_handle, str) or len(cache_handle) == 0:
+            raise ValueError("cache_handle must be a non-empty string")
+        return await self._release_cache(cache_handle)
 
     async def score_request(
         self,
@@ -1254,18 +1796,192 @@ class TokenizerManager:
         """
         See Engine.score() for more details.
         """
-        if label_token_ids is None:
-            raise ValueError("label_token_ids must be provided")
+        logger.debug(
+            "Score request: query_type=%s, items_len=%s, label_token_ids=%s, "
+            "apply_softmax=%s, item_first=%s",
+            type(query),
+            len(items) if items is not None else 0,
+            label_token_ids,
+            apply_softmax,
+            item_first,
+        )
+        # Comprehensive validation per RFC-006
+        vocab_size = len(self.tokenizer) if self.tokenizer is not None else None
+        try:
+            validate_score_request(
+                query=query,
+                items=items,
+                label_token_ids=label_token_ids,
+                apply_softmax=apply_softmax,
+                item_first=item_first,
+                vocab_size=vocab_size,
+            )
+        except ValidationError as e:
+            raise ValueError(e.message) from e
 
-        if self.tokenizer is not None:
-            vocab_size = self.tokenizer.vocab_size
-            for token_id in label_token_ids:
-                if token_id >= vocab_size:
-                    raise ValueError(
-                        f"Token ID {token_id} is out of vocabulary (vocab size: {vocab_size})"
+        if getattr(self.server_args, "multi_item_enable_prefill_extend", False):
+            query_tokens = self._normalize_score_query_tokens(query)
+            item_tokens_list = self._normalize_score_item_tokens(items)
+
+            if item_first:
+                logger.warning("Ignoring item_first=True for prefill+extend strategy.")
+
+            return await self.score_prefill_extend(
+                query_tokens=query_tokens,
+                item_tokens_list=item_tokens_list,
+                label_token_ids=label_token_ids,
+                apply_softmax=apply_softmax,
+            )
+
+        delimiter_token_id = self.server_args.multi_item_scoring_delimiter
+        use_multi_item_scoring = delimiter_token_id is not None
+
+        if use_multi_item_scoring and item_first:
+            logger.warning("Ignoring item_first=True in multi-item scoring mode.")
+
+        def _convert_logprobs(logprobs_data: list) -> list[float]:
+            logprobs = {}
+            for logprob, token_id, _ in logprobs_data:
+                if token_id in label_token_ids:
+                    logprobs[token_id] = logprob
+            score_list = [logprobs.get(token_id, float("-inf")) for token_id in label_token_ids]
+            if apply_softmax:
+                return _stable_softmax(score_list)
+            return [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
+
+        async def _score_multi_item_tokenized(
+            query_tokens: list[int], item_tokens: list[list[int]]
+        ) -> list[list[float]]:
+            item_count = len(item_tokens)
+            chunk_size = int(
+                getattr(
+                    self.server_args,
+                    "multi_item_scoring_chunk_size",
+                    ServerArgs.multi_item_scoring_chunk_size,
+                )
+            )
+            if chunk_size <= 0:
+                chunk_size = item_count
+            chunk_size = max(1, min(chunk_size, item_count))
+            max_multi_item_count = int(
+                getattr(
+                    self.server_args,
+                    "max_multi_item_count",
+                    ServerArgs.max_multi_item_count,
+                )
+            )
+            max_multi_item_seq_len = int(
+                getattr(
+                    self.server_args,
+                    "max_multi_item_seq_len",
+                    ServerArgs.max_multi_item_seq_len,
+                )
+            )
+            multi_item_mask_mode = str(
+                getattr(
+                    self.server_args,
+                    "multi_item_mask_impl",
+                    ServerArgs.multi_item_mask_impl,
+                )
+            )
+
+            try:
+                # Validate query/items constraints once. Sequence-length limit is checked per chunk.
+                validate_multi_item_scoring_request(
+                    query_tokens=query_tokens,
+                    item_tokens=item_tokens,
+                    delimiter_token_id=delimiter_token_id,
+                    max_items=max_multi_item_count,
+                    max_total_seq_len=max_multi_item_seq_len,
+                    enforce_total_seq_len=False,
+                )
+            except ValidationError as e:
+                raise ValueError(e.message) from e
+
+            if chunk_size < item_count:
+                logger.info(
+                    "Multi-item scoring request split into %d chunks (items=%d, chunk_size=%d).",
+                    (item_count + chunk_size - 1) // chunk_size,
+                    item_count,
+                    chunk_size,
+                )
+
+            all_scores: list[list[float]] = []
+            for start in range(0, item_count, chunk_size):
+                chunk_tokens = item_tokens[start : start + chunk_size]
+                try:
+                    validate_multi_item_scoring_request(
+                        query_tokens=query_tokens,
+                        item_tokens=chunk_tokens,
+                        delimiter_token_id=delimiter_token_id,
+                        max_items=max_multi_item_count,
+                        max_total_seq_len=max_multi_item_seq_len,
+                    )
+                except ValidationError as e:
+                    raise ValueError(e.message) from e
+
+                combined_input_ids = self._build_multi_item_token_sequence(
+                    query_tokens, chunk_tokens, delimiter_token_id
+                )
+                batch_request = GenerateReqInput(
+                    input_ids=[combined_input_ids],
+                    return_logprob=True,
+                    logprob_start_len=0,
+                    token_ids_logprob=label_token_ids,
+                    stream=False,
+                    sampling_params={"max_new_tokens": 0},
+                    is_multi_item_scoring=True,
+                    multi_item_scoring_delimiter=delimiter_token_id,
+                    multi_item_algorithm="packed",
+                    multi_item_mask_mode=multi_item_mask_mode,
+                )
+                results = await self.generate_request(batch_request, request).__anext__()
+                result = results[0] if isinstance(results, list) else results
+                input_logprobs = result["meta_info"].get("input_token_ids_logprobs", [])
+                if not input_logprobs:
+                    raise RuntimeError(
+                        "input_token_ids_logprobs is empty for multi-item scoring request "
+                        f"{result['meta_info'].get('id', '<unknown>')}."
                     )
 
-        # Handle string or tokenized query/items
+                expected_count = len(chunk_tokens) + 1
+                if len(input_logprobs) != expected_count:
+                    raise RuntimeError(
+                        f"Expected {expected_count} input_token_ids_logprobs entries for "
+                        f"{len(chunk_tokens)} items, got {len(input_logprobs)}."
+                    )
+
+                # Skip the query/item1 boundary and use one delimiter score per item.
+                all_scores.extend(
+                    [_convert_logprobs(input_logprobs[idx + 1]) for idx in range(len(chunk_tokens))]
+                )
+
+            return all_scores
+
+        if use_multi_item_scoring:
+            if (
+                isinstance(query, str)
+                and isinstance(items, list)
+                and (not items or isinstance(items[0], str))
+            ):
+                if self.tokenizer is None:
+                    raise ValueError("Tokenizer is required for text multi-item scoring.")
+                query_tokens = self.tokenizer.encode(query, add_special_tokens=False)
+                item_tokens = [
+                    self.tokenizer.encode(item, add_special_tokens=False) for item in items
+                ]
+                return await _score_multi_item_tokenized(query_tokens, item_tokens)
+            elif (
+                isinstance(query, list)
+                and isinstance(items, list)
+                and items
+                and isinstance(items[0], list)
+            ):
+                return await _score_multi_item_tokenized(query, items)
+            else:
+                raise ValueError("Invalid combination of query/items types for score_request.")
+
+        # Handle string or tokenized query/items in single-item mode
         if isinstance(query, str) and (
             isinstance(items, str)
             or (isinstance(items, list) and (not items or isinstance(items[0], str)))
@@ -1281,7 +1997,13 @@ class TokenizerManager:
                 return_logprob=True,
                 token_ids_logprob=label_token_ids,
                 stream=False,
-                sampling_params={"max_new_tokens": 1},
+                sampling_params={"max_new_tokens": 0},  # Prefill-only: no generation needed
+                is_multi_item_scoring=False,
+            )
+            logger.debug(
+                "Scoring text prompts: num_items=%d, first_prompt_len=%d",
+                len(prompts),
+                len(prompts[0]),
             )
         elif (
             isinstance(query, list)
@@ -1299,7 +2021,13 @@ class TokenizerManager:
                 return_logprob=True,
                 token_ids_logprob=label_token_ids,
                 stream=False,
-                sampling_params={"max_new_tokens": 1},
+                sampling_params={"max_new_tokens": 0},  # Prefill-only: no generation needed
+                is_multi_item_scoring=False,
+            )
+            logger.debug(
+                "Scoring token IDs: num_items=%d, first_ids_len=%d",
+                len(input_ids_list),
+                len(input_ids_list[0]),
             )
         else:
             raise ValueError("Invalid combination of query/items types for score_request.")
@@ -1308,25 +2036,714 @@ class TokenizerManager:
         scores = []
 
         for result in results:
-            # Get logprobs for each token
-            logprobs = {}
-            for logprob, token_id, _ in result["meta_info"].get("output_token_ids_logprobs", [])[0]:
-                if token_id in label_token_ids:
-                    logprobs[token_id] = logprob
-
-            # Get scores in order of label_token_ids
-            score_list = [logprobs.get(token_id, float("-inf")) for token_id in label_token_ids]
-
-            # Apply softmax to logprobs if needed
-            if apply_softmax:
-                score_list = jax.nn.softmax(jnp.asarray(score_list), axis=0).tolist()
-            else:
-                # Convert logprobs to probabilities if not using softmax
-                score_list = [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
-
-            scores.append(score_list)
+            output_logprobs = result["meta_info"].get("output_token_ids_logprobs", [])
+            if not output_logprobs or len(output_logprobs) == 0:
+                raise RuntimeError(
+                    f"output_token_ids_logprobs is empty for request "
+                    f"{result['meta_info'].get('id', '<unknown>')}. "
+                    "This indicates token_ids_logprobs were not computed properly."
+                )
+            scores.append(_convert_logprobs(output_logprobs[0]))
 
         return scores
+
+    async def _prefill_and_cache(self, query_tokens: list[int]) -> str:
+        """Prefill query and return handle to cached KV."""
+        cache_handle = uuid.uuid4().hex
+        logger.debug(
+            "Prefill+extend: starting prefill cache request rid=%s query_tokens=%d",
+            cache_handle,
+            len(query_tokens),
+        )
+        req = GenerateReqInput(
+            # Use a single request (flat token list), not a batch-of-1. This keeps
+            # the cache handle stable and avoids rid suffix rewrites during normalize.
+            input_ids=query_tokens,
+            sampling_params={"max_new_tokens": 0},  # Prefill only
+            return_logprob=False,
+            cache_for_scoring=True,  # New flag
+            is_single=True,
+            rid=cache_handle,
+        )
+
+        # Execute request
+        async for _ in self.generate_request(req):
+            pass
+
+        logger.debug("Prefill+extend: prefill cache ready rid=%s", cache_handle)
+        return cache_handle
+
+    async def _batched_extend_score(
+        self,
+        cache_handle: str,
+        items: list[list[int]],
+        label_token_ids: list[int],
+        apply_softmax: bool = False,
+    ) -> list[list[float]]:
+        scores, _ = await self._batched_extend_score_with_metrics(
+            cache_handle=cache_handle,
+            items=items,
+            label_token_ids=label_token_ids,
+            apply_softmax=apply_softmax,
+        )
+        return scores
+
+    async def _batched_extend_score_with_metrics(
+        self,
+        cache_handle: str,
+        items: list[list[int]],
+        label_token_ids: list[int],
+        apply_softmax: bool = False,
+    ) -> tuple[list[list[float]], dict[str, float | int]]:
+        """Score items by extending from cached prefix."""
+        if not items:
+            return (
+                [],
+                {
+                    "dispatch_count": 0,
+                    "queue_wait_s": 0.0,
+                    "device_compute_s": 0.0,
+                    "host_orchestration_s": 0.0,
+                    "lifecycle_requests_sent": 0,
+                    "lifecycle_results_received": 0,
+                },
+            )
+        logger.debug(
+            "Prefill+extend: scoring extend batch handle=%s batch_items=%d",
+            cache_handle,
+            len(items),
+        )
+
+        requests = GenerateReqInput(
+            input_ids=items,
+            sampling_params={"max_new_tokens": 0},
+            return_logprob=True,
+            return_output_logprob_only=False,
+            token_ids_logprob=label_token_ids,
+            extend_from_cache=cache_handle,
+            stream=False,
+            # We don't mark is_multi_item_scoring here because these are treated as individual requests
+            # that happen to share a prefix.
+        )
+
+        results = []
+        async for res in self.generate_request(requests):
+            # res is a list of results for the batch
+            if isinstance(res, list):
+                results.extend(res)
+            else:
+                results.append(res)
+
+        # Sort results by index when present so scores align with request order.
+        if all("index" in result for result in results):
+            results.sort(key=lambda x: x["index"])
+
+        if len(results) != len(items):
+            raise RuntimeError(
+                f"Expected {len(items)} extend results for cache handle {cache_handle}, "
+                f"but got {len(results)}."
+            )
+
+        scores = []
+        scheduler_dispatch_counts = []
+        scheduler_queue_wait = []
+        scheduler_device_compute = []
+        scheduler_host_overhead = []
+        for result in results:
+            meta_info = result.get("meta_info", {})
+            finish_reason = meta_info.get("finish_reason")
+            if isinstance(finish_reason, dict) and finish_reason.get("type") == "abort":
+                raise RuntimeError(
+                    "Prefill+extend extend request aborted for "
+                    f"{meta_info.get('id', '<unknown>')}: {finish_reason}"
+                )
+
+            output_logprobs = meta_info.get("output_token_ids_logprobs", [])
+            if not output_logprobs or not output_logprobs[0]:
+                raise RuntimeError(
+                    "output_token_ids_logprobs is empty for prefill+extend request "
+                    f"{meta_info.get('id', '<unknown>')}."
+                )
+
+            logprobs_map = {}
+            for logprob, token_id, _ in output_logprobs[0]:
+                if token_id in label_token_ids:
+                    logprobs_map[token_id] = logprob
+
+            item_scores = [
+                logprobs_map.get(token_id, float("-inf")) for token_id in label_token_ids
+            ]
+            if all(score == float("-inf") for score in item_scores):
+                raise RuntimeError(
+                    "No requested label token IDs were found in output_token_ids_logprobs for "
+                    f"{meta_info.get('id', '<unknown>')}."
+                )
+
+            if apply_softmax:
+                scores.append(_stable_softmax(item_scores))
+            else:
+                scores.append([math.exp(x) if x != float("-inf") else 0.0 for x in item_scores])
+            if meta_info.get("scheduler_dispatch_count") is not None:
+                scheduler_dispatch_counts.append(int(meta_info["scheduler_dispatch_count"]))
+            if meta_info.get("scheduler_queue_wait_s") is not None:
+                scheduler_queue_wait.append(float(meta_info["scheduler_queue_wait_s"]))
+            if meta_info.get("scheduler_device_compute_s") is not None:
+                scheduler_device_compute.append(float(meta_info["scheduler_device_compute_s"]))
+            if meta_info.get("scheduler_host_overhead_s") is not None:
+                scheduler_host_overhead.append(float(meta_info["scheduler_host_overhead_s"]))
+
+        logger.debug(
+            "Prefill+extend: completed extend batch handle=%s batch_items=%d",
+            cache_handle,
+            len(items),
+        )
+        return (
+            scores,
+            {
+                "dispatch_count": (
+                    max(scheduler_dispatch_counts) if scheduler_dispatch_counts else 1
+                ),
+                "queue_wait_s": (max(scheduler_queue_wait) if scheduler_queue_wait else 0.0),
+                "device_compute_s": (
+                    max(scheduler_device_compute) if scheduler_device_compute else 0.0
+                ),
+                "host_orchestration_s": (
+                    max(scheduler_host_overhead) if scheduler_host_overhead else 0.0
+                ),
+                "lifecycle_requests_sent": len(items),
+                "lifecycle_results_received": len(results),
+            },
+        )
+
+    async def _release_cache(self, cache_handle: str):
+        """Release the cached query."""
+        self.auto_create_handle_loop()
+        logger.debug("Prefill+extend: releasing cache handle=%s", cache_handle)
+        timeout_s = float(
+            getattr(self.server_args, "multi_item_prefill_extend_cache_timeout", 60.0)
+        )
+        scheduler_fan_out = (
+            self._scheduler_sender_fan_out() if hasattr(self, "_scheduler_sender_fan_out") else 1
+        )
+        try:
+            req = ReleaseScoringCacheReqInput(rid=cache_handle)
+            if self._can_use_local_score_rpc():
+                outputs = await self._submit_local_score_rpc(
+                    req,
+                    timeout=timeout_s if timeout_s > 0 else None,
+                )
+            else:
+                outputs = await self.release_scoring_cache_communicator(
+                    req,
+                    timeout=timeout_s if timeout_s > 0 else None,
+                    broadcast=scheduler_fan_out > 1,
+                )
+        except TimeoutError:
+            logger.error(
+                "Timed out releasing prefill+extend cache handle=%s (timeout=%.2fs).",
+                cache_handle,
+                timeout_s,
+            )
+            return False
+        except Exception:
+            logger.exception(
+                "Unexpected failure while releasing prefill+extend cache handle=%s.",
+                cache_handle,
+            )
+            return False
+
+        if not outputs:
+            logger.warning("Release scoring cache returned no output for handle=%s", cache_handle)
+            return False
+
+        for out in outputs:
+            if not out.success:
+                logger.error(
+                    "Failed to release scoring cache handle=%s: %s",
+                    cache_handle,
+                    out.error_msg,
+                )
+                return False
+            logger.debug(
+                "Prefill+extend: released cache handle=%s released_items=%d",
+                cache_handle,
+                out.released_items,
+            )
+        return True
+
+    def _record_score_fastpath_fallback(self, reason: str):
+        self.score_fastpath_fallback += 1
+        self.score_fastpath_fallback_reasons[reason] = (
+            self.score_fastpath_fallback_reasons.get(reason, 0) + 1
+        )
+
+    def _resolve_score_from_cache_v2_items_per_step(
+        self,
+        query_tokens: list[int],
+        items: list[list[int]],
+    ) -> tuple[int, int, int]:
+        default_items_per_step = int(
+            getattr(
+                self.server_args,
+                "multi_item_score_from_cache_v2_items_per_step",
+                ServerArgs.multi_item_score_from_cache_v2_items_per_step,
+            )
+        )
+        if default_items_per_step <= 0:
+            default_items_per_step = 1
+
+        adaptive_enabled = bool(
+            getattr(
+                self.server_args,
+                "multi_item_score_from_cache_v2_adaptive_chunk_by_token_budget",
+                False,
+            )
+        )
+        token_budget = int(
+            getattr(
+                self.server_args,
+                "multi_item_score_from_cache_v2_token_budget",
+                ServerArgs.multi_item_score_from_cache_v2_token_budget,
+            )
+        )
+        if not adaptive_enabled or token_budget <= 0:
+            return default_items_per_step, 0, max(0, token_budget)
+
+        max_total_tokens = max((len(query_tokens) + len(item) for item in items), default=0)
+        if max_total_tokens <= 0:
+            return default_items_per_step, 0, token_budget
+
+        min_items_per_step = int(
+            getattr(
+                self.server_args,
+                "multi_item_score_from_cache_v2_min_items_per_step",
+                ServerArgs.multi_item_score_from_cache_v2_min_items_per_step,
+            )
+        )
+        if min_items_per_step <= 0:
+            min_items_per_step = 1
+
+        budget_items_per_step = max(1, token_budget // max_total_tokens)
+        resolved_items_per_step = min(
+            default_items_per_step,
+            max(min_items_per_step, budget_items_per_step),
+        )
+        return resolved_items_per_step, max_total_tokens, token_budget
+
+    def _partition_score_from_cache_v2_items(
+        self,
+        items: list[list[int]],
+        scheduler_count: int,
+    ) -> list[list[tuple[int, list[int]]]]:
+        partitions = [[] for _ in range(max(1, scheduler_count))]
+        lane_token_loads = [0] * len(partitions)
+        for item_idx, item_tokens in enumerate(items):
+            lane_idx = min(
+                range(len(partitions)),
+                key=lambda idx: (lane_token_loads[idx], len(partitions[idx]), idx),
+            )
+            partitions[lane_idx].append((item_idx, item_tokens))
+            lane_token_loads[lane_idx] += len(item_tokens)
+        return partitions
+
+    async def _score_from_cache_fastpath_v2(
+        self,
+        cache_handle: str,
+        items: list[list[int]],
+        label_token_ids: list[int],
+        apply_softmax: bool,
+        items_per_step: int | None = None,
+        token_budget: int = 0,
+        max_total_tokens: int = 0,
+    ) -> ScoreFromCacheReqOutput:
+        self.auto_create_handle_loop()
+        req_rid = f"scorev2-{uuid.uuid4().hex}"
+        timeout_s = float(
+            getattr(self.server_args, "multi_item_prefill_extend_cache_timeout", 60.0)
+        )
+        if items_per_step is None or items_per_step <= 0:
+            items_per_step = int(
+                getattr(
+                    self.server_args,
+                    "multi_item_score_from_cache_v2_items_per_step",
+                    ServerArgs.multi_item_score_from_cache_v2_items_per_step,
+                )
+            )
+        if items_per_step <= 0:
+            items_per_step = 1
+        scheduler_count = self._scheduler_sender_fan_out()
+        request_token_budget = max(0, int(token_budget or 0))
+        request_max_total_tokens = max(0, int(max_total_tokens or 0))
+
+        if scheduler_count <= 1:
+            req = ScoreFromCacheReqInput(
+                rid=req_rid,
+                cache_handle=cache_handle,
+                items_2d=items,
+                label_token_ids=label_token_ids,
+                apply_softmax=apply_softmax,
+                items_per_step=items_per_step,
+                token_budget=request_token_budget,
+                max_total_tokens=request_max_total_tokens,
+            )
+            can_use_local_score_rpc = getattr(
+                self, "_can_use_local_score_rpc", lambda *, total_items: False
+            )
+            if can_use_local_score_rpc(total_items=len(items)):
+                outputs = await self._submit_local_score_rpc(
+                    req,
+                    timeout=timeout_s if timeout_s > 0 else None,
+                )
+            else:
+                outputs = await self.score_from_cache_v2_communicator(
+                    req,
+                    timeout=timeout_s if timeout_s > 0 else None,
+                )
+            if not outputs:
+                return ScoreFromCacheReqOutput(
+                    success=False,
+                    scores=[],
+                    fallback_reason="no_scheduler_response",
+                    error_msg="No score-from-cache v2 response from scheduler.",
+                )
+            return outputs[0]
+
+        item_partitions = self._partition_score_from_cache_v2_items(items, scheduler_count)
+
+        async def _dispatch_partition(
+            lane_idx: int,
+            partition: list[tuple[int, list[int]]],
+        ) -> tuple[list[int], ScoreFromCacheReqOutput]:
+            partition_indices = [item_idx for item_idx, _ in partition]
+            partition_items = [item_tokens for _, item_tokens in partition]
+            if not partition_items:
+                return (
+                    [],
+                    ScoreFromCacheReqOutput(
+                        rid=f"{req_rid}-lane{lane_idx}",
+                        success=True,
+                        scores=[],
+                        effective_items_per_step=0,
+                        dispatch_token_budget=0,
+                        replica_lane_count=0,
+                    ),
+                )
+            partition_budget = (
+                request_token_budget // scheduler_count if request_token_budget > 0 else 0
+            )
+            outputs = await self.score_from_cache_v2_communicator(
+                ScoreFromCacheReqInput(
+                    rid=f"{req_rid}-lane{lane_idx}",
+                    cache_handle=cache_handle,
+                    items_2d=partition_items,
+                    label_token_ids=label_token_ids,
+                    apply_softmax=apply_softmax,
+                    items_per_step=items_per_step,
+                    token_budget=partition_budget,
+                    max_total_tokens=request_max_total_tokens,
+                ),
+                timeout=timeout_s if timeout_s > 0 else None,
+                scheduler_idx=lane_idx,
+            )
+            if not outputs:
+                return (
+                    partition_indices,
+                    ScoreFromCacheReqOutput(
+                        rid=f"{req_rid}-lane{lane_idx}",
+                        success=False,
+                        scores=[],
+                        fallback_reason="no_scheduler_response",
+                        error_msg="No score-from-cache v2 response from scheduler lane.",
+                    ),
+                )
+            return partition_indices, outputs[0]
+
+        lane_results = await asyncio.gather(
+            *[
+                _dispatch_partition(lane_idx, partition)
+                for lane_idx, partition in enumerate(item_partitions)
+                if partition
+            ]
+        )
+        merged_scores: list[list[float] | None] = [None] * len(items)
+        aggregate = ScoreFromCacheReqOutput(
+            rid=req_rid,
+            success=True,
+            scores=[],
+            dispatch_count=0,
+            lifecycle_requests_sent=0,
+            lifecycle_results_received=0,
+            queue_wait_s=0.0,
+            device_compute_s=0.0,
+            host_orchestration_s=0.0,
+            effective_items_per_step=0,
+            dispatch_token_budget=0,
+            replica_lane_count=len(lane_results),
+            topology_name="",
+        )
+        topology_names: list[str] = []
+        for partition_indices, lane_output in lane_results:
+            if not lane_output.success:
+                return lane_output
+            if len(lane_output.scores) != len(partition_indices):
+                return ScoreFromCacheReqOutput(
+                    rid=req_rid,
+                    success=False,
+                    scores=[],
+                    fallback_reason="invalid_response_count",
+                    error_msg=(
+                        "Score-from-cache v2 replica lane returned wrong score count: "
+                        f"{len(lane_output.scores)} != {len(partition_indices)}."
+                    ),
+                )
+            for item_idx, item_scores in zip(partition_indices, lane_output.scores):
+                merged_scores[item_idx] = item_scores
+            aggregate.dispatch_count += int(lane_output.dispatch_count)
+            aggregate.lifecycle_requests_sent += int(lane_output.lifecycle_requests_sent)
+            aggregate.lifecycle_results_received += int(lane_output.lifecycle_results_received)
+            aggregate.queue_wait_s = max(
+                aggregate.queue_wait_s,
+                float(lane_output.queue_wait_s),
+            )
+            aggregate.device_compute_s = max(
+                aggregate.device_compute_s,
+                float(lane_output.device_compute_s),
+            )
+            aggregate.host_orchestration_s = max(
+                aggregate.host_orchestration_s,
+                float(lane_output.host_orchestration_s),
+            )
+            aggregate.effective_items_per_step += int(lane_output.effective_items_per_step or 0)
+            aggregate.dispatch_token_budget += int(lane_output.dispatch_token_budget or 0)
+            if lane_output.topology_name:
+                topology_names.append(lane_output.topology_name)
+
+        if any(score is None for score in merged_scores):
+            return ScoreFromCacheReqOutput(
+                rid=req_rid,
+                success=False,
+                scores=[],
+                fallback_reason="missing_partition_scores",
+                error_msg="Replica-lane score aggregation left gaps in the merged result.",
+            )
+
+        aggregate.scores = [score for score in merged_scores if score is not None]
+        unique_topologies = sorted(set(topology_names))
+        if unique_topologies:
+            topology_name = unique_topologies[0]
+            if len(unique_topologies) > 1:
+                topology_name = ",".join(unique_topologies)
+            aggregate.topology_name = f"{topology_name} replicated x{len(lane_results)}"
+        return aggregate
+
+    def _maybe_log_score_path_metrics(self, metrics: dict):
+        if not getattr(self.server_args, "multi_item_score_fastpath_log_metrics", False):
+            return
+        logger.info(
+            "ScorePathMetrics path=%s items=%d dispatches=%d lifecycle_sent=%d lifecycle_recv=%d "
+            "queue_wait_s=%.6f device_compute_s=%.6f host_orchestration_s=%.6f "
+            "fastpath_attempted=%s fastpath_succeeded=%s fastpath_fallback_reason=%s "
+            "fastpath_items_per_step=%d fastpath_token_budget=%d fastpath_max_total_tokens=%d "
+            "fastpath_replica_lanes=%d fastpath_topology=%s",
+            metrics.get("path", "unknown"),
+            int(metrics.get("items", 0)),
+            int(metrics.get("dispatch_count", 0)),
+            int(metrics.get("lifecycle_requests_sent", 0)),
+            int(metrics.get("lifecycle_results_received", 0)),
+            float(metrics.get("queue_wait_s", 0.0)),
+            float(metrics.get("device_compute_s", 0.0)),
+            float(metrics.get("host_orchestration_s", 0.0)),
+            bool(metrics.get("fastpath_attempted", False)),
+            bool(metrics.get("fastpath_succeeded", False)),
+            metrics.get("fastpath_fallback_reason"),
+            int(metrics.get("fastpath_items_per_step", 0)),
+            int(metrics.get("fastpath_token_budget", 0)),
+            int(metrics.get("fastpath_max_total_tokens", 0)),
+            int(metrics.get("fastpath_replica_lanes", 1)),
+            metrics.get("fastpath_topology", ""),
+        )
+
+    async def score_prefill_extend(
+        self,
+        query_tokens: list[int],
+        item_tokens_list: list[list[int]],
+        label_token_ids: list[int],
+        apply_softmax: bool = False,
+    ) -> list[list[float]]:
+        """
+        Score items using prefill+extend strategy.
+        """
+        if not item_tokens_list:
+            return []
+
+        logger.debug(
+            "Prefill+extend: begin scoring query_tokens=%d items=%d",
+            len(query_tokens),
+            len(item_tokens_list),
+        )
+        metrics = {
+            "path": "prefill_extend_baseline",
+            "items": len(item_tokens_list),
+            "dispatch_count": 0,
+            "lifecycle_requests_sent": 0,
+            "lifecycle_results_received": 0,
+            "queue_wait_s": 0.0,
+            "device_compute_s": 0.0,
+            "host_orchestration_s": 0.0,
+            "fastpath_attempted": False,
+            "fastpath_succeeded": False,
+            "fastpath_fallback_reason": None,
+            "fastpath_items_per_step": 0,
+            "fastpath_token_budget": 0,
+            "fastpath_max_total_tokens": 0,
+            "fastpath_replica_lanes": 1,
+            "fastpath_topology": "",
+        }
+        # Step 1: Prefill query and get cache handle
+        cache_handle = await self._prefill_and_cache(query_tokens)
+        metrics["lifecycle_requests_sent"] += 1
+        metrics["lifecycle_results_received"] += 1
+
+        try:
+            if getattr(self.server_args, "multi_item_enable_score_from_cache_v2", False):
+                metrics["fastpath_attempted"] = True
+                self.score_fastpath_attempted += 1
+                try:
+                    (
+                        resolved_items_per_step,
+                        resolved_max_total_tokens,
+                        resolved_token_budget,
+                    ) = self._resolve_score_from_cache_v2_items_per_step(
+                        query_tokens=query_tokens,
+                        items=item_tokens_list,
+                    )
+                    metrics["fastpath_items_per_step"] = int(resolved_items_per_step)
+                    metrics["fastpath_token_budget"] = int(resolved_token_budget)
+                    metrics["fastpath_max_total_tokens"] = int(resolved_max_total_tokens)
+                    fastpath_out = await self._score_from_cache_fastpath_v2(
+                        cache_handle=cache_handle,
+                        items=item_tokens_list,
+                        label_token_ids=label_token_ids,
+                        apply_softmax=apply_softmax,
+                        items_per_step=resolved_items_per_step,
+                        token_budget=resolved_token_budget,
+                        max_total_tokens=resolved_max_total_tokens,
+                    )
+                    metrics["lifecycle_requests_sent"] += 1
+                    metrics["lifecycle_results_received"] += 1
+                except TimeoutError:
+                    fastpath_out = ScoreFromCacheReqOutput(
+                        success=False,
+                        scores=[],
+                        fallback_reason="timeout",
+                        error_msg="Timed out waiting for score-from-cache v2 response.",
+                    )
+                except Exception:
+                    logger.exception("Fastpath v2 request failed before scheduler response.")
+                    fastpath_out = ScoreFromCacheReqOutput(
+                        success=False,
+                        scores=[],
+                        fallback_reason="runtime_exception",
+                        error_msg="Fastpath v2 communicator exception.",
+                    )
+
+                fallback_reason = None
+                fallback_error_msg = fastpath_out.error_msg
+                if fastpath_out.success:
+                    if len(fastpath_out.scores) != len(item_tokens_list):
+                        fallback_reason = "invalid_response_count"
+                        fallback_error_msg = (
+                            "Fastpath v2 returned wrong score count: "
+                            f"{len(fastpath_out.scores)} != {len(item_tokens_list)}."
+                        )
+                    else:
+                        self.score_fastpath_succeeded += 1
+                        metrics["path"] = "score_from_cache_v2"
+                        metrics["fastpath_succeeded"] = True
+                        metrics["fastpath_items_per_step"] = int(
+                            fastpath_out.effective_items_per_step or resolved_items_per_step
+                        )
+                        metrics["fastpath_token_budget"] = int(
+                            fastpath_out.dispatch_token_budget or resolved_token_budget
+                        )
+                        metrics["fastpath_replica_lanes"] = int(
+                            fastpath_out.replica_lane_count or 1
+                        )
+                        metrics["fastpath_topology"] = fastpath_out.topology_name or ""
+                        metrics["dispatch_count"] += int(fastpath_out.dispatch_count)
+                        metrics["queue_wait_s"] += float(fastpath_out.queue_wait_s)
+                        metrics["device_compute_s"] += float(fastpath_out.device_compute_s)
+                        metrics["host_orchestration_s"] += float(fastpath_out.host_orchestration_s)
+                        metrics["lifecycle_requests_sent"] += int(
+                            fastpath_out.lifecycle_requests_sent
+                        )
+                        metrics["lifecycle_results_received"] += int(
+                            fastpath_out.lifecycle_results_received
+                        )
+                        self._maybe_log_score_path_metrics(metrics)
+                        return fastpath_out.scores
+                else:
+                    fallback_reason = fastpath_out.fallback_reason or "runtime_exception"
+
+                if fallback_reason is not None:
+                    metrics["fastpath_fallback_reason"] = fallback_reason
+                    self._record_score_fastpath_fallback(fallback_reason)
+                    logger.warning(
+                        "Fastpath v2 falling back to baseline: reason=%s error=%s",
+                        fallback_reason,
+                        fallback_error_msg,
+                    )
+
+            # Step 2: Process items in batches
+            all_scores = []
+            batch_size = int(getattr(self.server_args, "multi_item_extend_batch_size", 32))
+            if batch_size <= 0:
+                batch_size = len(item_tokens_list) or 1
+
+            for i in range(0, len(item_tokens_list), batch_size):
+                batch = item_tokens_list[i : i + batch_size]
+                logger.debug(
+                    "Prefill+extend: processing batch start=%d size=%d total=%d",
+                    i,
+                    len(batch),
+                    len(item_tokens_list),
+                )
+                # Keep extend batch shape stable to avoid extra compile on trailing
+                # partial batches (e.g., 10 items with batch size 4 -> 4,4,2).
+                # We drop padded scores after the call.
+                padded_batch = batch
+                padded_count = 0
+                if len(batch) < batch_size and len(batch) > 0:
+                    padded_count = batch_size - len(batch)
+                    padded_batch = batch + [batch[-1]] * padded_count
+                batch_scores, batch_metrics = await self._batched_extend_score_with_metrics(
+                    cache_handle=cache_handle,
+                    items=padded_batch,
+                    label_token_ids=label_token_ids,
+                    apply_softmax=apply_softmax,
+                )
+                if padded_count > 0:
+                    batch_scores = batch_scores[: len(batch)]
+                all_scores.extend(batch_scores)
+                metrics["dispatch_count"] += int(batch_metrics["dispatch_count"])
+                metrics["queue_wait_s"] += float(batch_metrics["queue_wait_s"])
+                metrics["device_compute_s"] += float(batch_metrics["device_compute_s"])
+                metrics["host_orchestration_s"] += float(batch_metrics["host_orchestration_s"])
+                # Only real items should contribute to lifecycle counters.
+                real_items = len(batch)
+                metrics["lifecycle_requests_sent"] += real_items
+                metrics["lifecycle_results_received"] += real_items
+
+            logger.debug("Prefill+extend: complete items=%d", len(item_tokens_list))
+            self._maybe_log_score_path_metrics(metrics)
+            return all_scores
+        finally:
+            # Step 3: Release cache
+            released = await self._release_cache(cache_handle)
+            if not released:
+                logger.warning(
+                    "Prefill+extend cache handle=%s was not cleanly released.", cache_handle
+                )
 
 
 async def print_exception_wrapper(func):
@@ -1363,39 +2780,130 @@ class SignalHandler:
         kill_process_tree(os.getpid())
 
 
+@dataclasses.dataclass
+class _CorrelatedWaiter[T]:
+    event: asyncio.Event
+    values: list[T]
+
+
+class _CorrelatedCommunicator[T]:
+    """Allow multiple in-flight RPCs by correlating responses with `rid`."""
+
+    def __init__(self, sender, fan_out: int):
+        self._sender = sender
+        self._fan_out = fan_out
+        self._pending: dict[str, _CorrelatedWaiter[T]] = {}
+
+    async def __call__(
+        self,
+        obj,
+        timeout: float | None = None,
+        scheduler_idx: int | None = None,
+        broadcast: bool = False,
+    ):
+        rid = getattr(obj, "rid", None)
+        if not rid:
+            raise ValueError(
+                "Correlated communicator requires request objects with non-empty `rid`."
+            )
+        if rid in self._pending:
+            raise RuntimeError(f"Duplicate in-flight correlated request rid={rid!r}.")
+
+        waiter = _CorrelatedWaiter(event=asyncio.Event(), values=[])
+        self._pending[rid] = waiter
+        try:
+            if obj is not None:
+                if broadcast and hasattr(self._sender, "send_pyobj_all"):
+                    self._sender.send_pyobj_all(obj)
+                elif scheduler_idx is not None and hasattr(self._sender, "send_pyobj_to"):
+                    self._sender.send_pyobj_to(scheduler_idx, obj)
+                else:
+                    self._sender.send_pyobj(obj)
+
+            wait_coro = waiter.event.wait()
+            if timeout is not None and timeout > 0:
+                await asyncio.wait_for(wait_coro, timeout=timeout)
+            else:
+                await wait_coro
+            return list(waiter.values)
+        finally:
+            self._pending.pop(rid, None)
+
+    def handle_recv(self, recv_obj: T):
+        rid = getattr(recv_obj, "rid", None)
+        if not rid:
+            logger.warning(
+                "Dropping correlated communicator response missing rid. type=%s",
+                type(recv_obj).__name__,
+            )
+            return
+
+        waiter = self._pending.get(rid)
+        if waiter is None:
+            logger.warning(
+                "Dropping correlated communicator response with no active waiter. rid=%s type=%s",
+                rid,
+                type(recv_obj).__name__,
+            )
+            return
+
+        waiter.values.append(recv_obj)
+        if len(waiter.values) >= self._fan_out:
+            waiter.event.set()
+
+
 class _Communicator[T]:
     """Note: The communicator now only run up to 1 in-flight request at any time."""
 
     def __init__(self, sender, fan_out: int):
         self._sender = sender
         self._fan_out = fan_out
+        self._lock = asyncio.Lock()
         self._result_event: asyncio.Event | None = None
         self._result_values: list[T] | None = None
-        self._ready_queue: deque[asyncio.Future] = deque()
 
-    async def __call__(self, obj):
-        ready_event = asyncio.Event()
-        if self._result_event is not None or len(self._ready_queue) > 0:
-            self._ready_queue.append(ready_event)
-            await ready_event.wait()
-            assert self._result_event is None
-            assert self._result_values is None
+    async def __call__(
+        self,
+        obj,
+        timeout: float | None = None,
+        scheduler_idx: int | None = None,
+        broadcast: bool = False,
+    ):
+        async with self._lock:
+            if self._result_event is not None or self._result_values is not None:
+                raise RuntimeError(
+                    "Communicator received a new call while a previous call is still active."
+                )
 
-        if obj:
-            self._sender.send_pyobj(obj)
+            self._result_event = asyncio.Event()
+            self._result_values = []
+            try:
+                if obj is not None:
+                    if broadcast and hasattr(self._sender, "send_pyobj_all"):
+                        self._sender.send_pyobj_all(obj)
+                    elif scheduler_idx is not None and hasattr(self._sender, "send_pyobj_to"):
+                        self._sender.send_pyobj_to(scheduler_idx, obj)
+                    else:
+                        self._sender.send_pyobj(obj)
 
-        self._result_event = asyncio.Event()
-        self._result_values = []
-        await self._result_event.wait()
-        result_values = self._result_values
-        self._result_event = self._result_values = None
+                wait_coro = self._result_event.wait()
+                if timeout is not None and timeout > 0:
+                    await asyncio.wait_for(wait_coro, timeout=timeout)
+                else:
+                    await wait_coro
 
-        if len(self._ready_queue) > 0:
-            self._ready_queue.popleft().set()
-
-        return result_values
+                return list(self._result_values)
+            finally:
+                self._result_event = None
+                self._result_values = None
 
     def handle_recv(self, recv_obj: T):
+        if self._result_values is None or self._result_event is None:
+            logger.warning(
+                "Dropping communicator response with no active waiter. type=%s",
+                type(recv_obj).__name__,
+            )
+            return
         self._result_values.append(recv_obj)
-        if len(self._result_values) == self._fan_out:
+        if len(self._result_values) >= self._fan_out:
             self._result_event.set()

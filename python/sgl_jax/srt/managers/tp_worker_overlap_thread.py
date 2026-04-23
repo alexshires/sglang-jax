@@ -98,6 +98,7 @@ class ModelWorkerClient:
                 future_token_ids_ct,
                 sampling_metadata,
                 forward_metadata,
+                skip_sample,
             ) = self.input_queue.get()
             if not model_worker_batch:
                 break
@@ -114,17 +115,19 @@ class ModelWorkerClient:
                     self.worker.forward_batch_generation(
                         model_worker_batch,
                         model_worker_batch.launch_done,
+                        skip_sample=skip_sample,
                         sampling_metadata=sampling_metadata,
                         forward_metadata=forward_metadata,
                     )
                 )
 
             # Update the future token ids map
-            self.future_token_ids_map = set_future_token_ids(
-                self.future_token_ids_map,
-                future_token_ids_ct,
-                next_token_ids,
-            )
+            if not skip_sample:
+                self.future_token_ids_map = set_future_token_ids(
+                    self.future_token_ids_map,
+                    future_token_ids_ct,
+                    next_token_ids,
+                )
             self.output_queue.put((None, logits_output, next_token_ids, cache_miss_count))
 
     def resolve_last_batch_result(self, launch_done: threading.Event | None = None):
@@ -154,6 +157,7 @@ class ModelWorkerClient:
         self,
         model_worker_batch: ModelWorkerBatch,
         sampling_metadata: SamplingMetadata = None,
+        skip_sample: bool = False,
     ) -> tuple[None, jax.Array, int]:
         # Create a new copy of sampling_info because it will be updated in-place by the scheduler for the next batch.
         sampling_info = model_worker_batch.sampling_info
@@ -188,13 +192,17 @@ class ModelWorkerClient:
         self.input_queue.put(
             (
                 model_worker_batch,
-                self.future_token_ids_ct,
+                self.future_token_ids_ct if not skip_sample else None,
                 sampling_metadata,
                 forward_metadata,
+                skip_sample,
             )
         )
 
         # Allocate output future objects
+        if skip_sample:
+            return None, np.empty((0,), dtype=np.int32), 0
+
         bs = len([seq_len for seq_len in model_worker_batch.seq_lens if seq_len > 0])
 
         future_next_token_ids = np.arange(
@@ -221,4 +229,4 @@ class ModelWorkerClient:
         return self.worker.get_tokens_per_layer_info()
 
     def __delete__(self):
-        self.input_queue.put((None, None, None, None))
+        self.input_queue.put((None, None, None, None, None))
