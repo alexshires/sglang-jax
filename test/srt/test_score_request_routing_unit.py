@@ -19,7 +19,7 @@ def test_score_lane_scheduler_index_uses_cache_handle_hash_when_fan_out_enabled(
 
 def test_local_score_rpc_requires_threshold_and_single_scheduler_lane():
     manager = _DummyTokenizerManager()
-    manager.local_rpc_submitter = object()
+    manager.local_rpc_submitter = lambda _req: None
     manager.send_to_scheduler = SimpleNamespace(fan_out=1)
     manager.server_args = SimpleNamespace(multi_item_score_local_rpc_min_items=8)
 
