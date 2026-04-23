@@ -40,6 +40,8 @@ from sgl_jax.srt.managers.io_struct import (
     GetInternalStateReqOutput,
     PauseGenerationReqInput,
     ProfileReq,
+    ReleaseScoringCacheReqInput,
+    ScoreFromCacheReqInput,
     SetInternalStateReq,
     SetInternalStateReqOutput,
     TokenizedGenerateReqInput,
@@ -63,6 +65,7 @@ from sgl_jax.srt.managers.scheduler_output_processor_mixin import (
     SchedulerOutputProcessorMixin,
 )
 from sgl_jax.srt.managers.scheduler_profiler_mixing import SchedulerProfilerMixin
+from sgl_jax.srt.managers.scheduler_scoring_mixin import SchedulerScoringMixin
 from sgl_jax.srt.managers.tp_worker import ModelWorker
 from sgl_jax.srt.managers.tp_worker_overlap_thread import ModelWorkerClient
 from sgl_jax.srt.managers.utils import validate_input_length
@@ -125,6 +128,7 @@ class GenerationBatchResult:
 
 
 class Scheduler(
+    SchedulerScoringMixin,
     SchedulerOutputProcessorMixin,
     SchedulerProfilerMixin,
     SchedulerMetricsMixin,
@@ -383,6 +387,7 @@ class Scheduler(
 
         # Init pause/continue state
         self._engine_paused = False
+        self.init_scoring_state(server_args)
 
         # Init schedule policy and new token estimation
         self.policy = SchedulePolicy(
@@ -423,6 +428,8 @@ class Scheduler(
                 (AbortReq, self.abort_request),
                 (ProfileReq, self.profile),
                 (FlushCacheReqInput, self.flush_cache_wrapped),
+                (ReleaseScoringCacheReqInput, self.release_scoring_cache),
+                (ScoreFromCacheReqInput, self.score_from_cache_v2),
                 (GetInternalStateReq, self.get_internal_state),
                 (SetInternalStateReq, self.set_internal_state),
                 (PauseGenerationReqInput, self.pause_generation),
@@ -439,6 +446,11 @@ class Scheduler(
                 logger.info("[Scheduler] Begins to run spec_decode worker precompile.")
                 self.draft_worker.run_spec_decode_precompile()
                 logger.info("[Scheduler] Completes spec_decode worker precompile.")
+
+        if self._score_direct_warmup_spec() is not None:
+            logger.info("[Scheduler] Begins direct bulk score warmup.")
+            self._run_score_direct_label_only_warmup()
+            logger.info("[Scheduler] Completes direct bulk score warmup.")
 
     def sync_pub(self):
         logger.info(
@@ -912,44 +924,90 @@ class Scheduler(
                 raise ReceiveDataError(f"[Subscriber {self.node_rank}] Fails to receive data")
         return recv_reqs
 
-    def recv_requests(self) -> list[Req]:
-        """Receive results at node_rank = 0 and broadcast it to all other Node ranks."""
-        if self.node_rank == 0:
-            recv_reqs = []
+    @staticmethod
 
-            while True:
-                try:
-                    recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
-                except zmq.ZMQError:
-                    break
-                recv_reqs.append(recv_req)
+    @staticmethod
 
-            while True:
-                try:
-                    recv_rpc = self.recv_from_rpc.recv_pyobj(zmq.NOBLOCK)
-                except zmq.ZMQError:
-                    break
-                recv_reqs.append(recv_rpc)
-        else:
-            recv_reqs = None
+    @staticmethod
 
-        if self.nnodes > 1:
-            recv_reqs = self.broadcast_pyobj(recv_reqs)
-        return recv_reqs
+    @staticmethod
 
-    def process_input_requests(self, recv_reqs: list):
-        for recv_req in recv_reqs:
-            output = self._request_dispatcher(recv_req)
-            if output is not None:
-                if self._comm_backend is not None:
-                    self._comm_backend.send_pyobj(output)
-                else:
-                    self.send_to_tokenizer.send_pyobj(output)
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    @staticmethod
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+    @staticmethod
+
+
+
+
+
+
 
     def handle_generate_request(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        if self.server_args.log_requests:
+            logger.debug(
+                "Handle request: rid=%s, max_new_tokens=%s, token_ids_logprob=%s",
+                recv_req.rid,
+                recv_req.sampling_params.max_new_tokens,
+                recv_req.token_ids_logprob,
+            )
+
+        cached_prefix_ctx, cache_lookup_error = self._resolve_extend_from_cache(recv_req)
+
         # Create a new request
         req = Req(
             recv_req.rid,
@@ -968,8 +1026,21 @@ class Scheduler(
             vocab_size=self.model_config.vocab_size,
             return_routed_experts=recv_req.return_routed_experts,
             return_hidden_states=recv_req.return_hidden_states,
+            cache_for_scoring=recv_req.cache_for_scoring,
+            extend_from_cache=recv_req.extend_from_cache,
         )
         req.tokenizer = self.tokenizer
+        if cache_lookup_error is not None:
+            req.set_finish_with_abort(cache_lookup_error)
+            self._add_request_to_queue(req)
+            return
+
+        if cached_prefix_ctx is not None:
+            cached_last_node, cached_prefix_indices = cached_prefix_ctx
+            req.cached_last_node = cached_last_node
+            req.cached_last_host_node = cached_last_node
+            req.cached_prefix_indices = cached_prefix_indices
+            req.cached_host_hit_length = 0
         if hasattr(recv_req, "mm_inputs") and recv_req.mm_inputs:
             req.mm_inputs = recv_req.mm_inputs
             multimodal_embedding = recv_req.mm_inputs.get("multimodal_embedding")
@@ -1160,6 +1231,7 @@ class Scheduler(
         ret["forward_ct_decode"] = self.forward_ct_decode
         ret["new_token_ratio"] = self.new_token_ratio
         ret["init_new_token_ratio"] = self.init_new_token_ratio
+        self.add_scoring_internal_state(ret)
 
         return GetInternalStateReqOutput(internal_state=ret)
 
@@ -1319,9 +1391,15 @@ class Scheduler(
 
     def _add_request_to_queue(self, req: Req):
         req.queue_time_start = time.perf_counter()
+        req.queue_time_end = None
         self.waiting_queue.append(req)
 
     def _extend_requests_to_queue(self, reqs: list[Req], is_retracted: bool = False):
+        if is_retracted:
+            now = time.perf_counter()
+            for req in reqs:
+                req.queue_time_start = now
+                req.queue_time_end = None
         self.waiting_queue.extend(reqs)
 
     def check_memory(self):
@@ -1780,17 +1858,18 @@ class Scheduler(
                 with jax.profiler.TraceAnnotation(
                     f"forward_batch_generation_overlap {self.forward_ct}"
                 ):
-
                     logits_output, next_token_ids, cache_miss_count = (
                         self.tp_worker.forward_batch_generation(
-                            model_worker_batch, sampling_metadata=None
+                            model_worker_batch,
+                            sampling_metadata=None,
                         )
                     )
                 self._extract_dp_output_ids(next_token_ids, model_worker_batch, batch)
             else:
                 logits_output, next_token_ids_device, cache_miss_count = (
                     self.tp_worker.forward_batch_generation(
-                        model_worker_batch, sampling_metadata=None
+                        model_worker_batch,
+                        sampling_metadata=None,
                     )
                 )
                 # In multi-host DP, next_token_ids may span non-addressable
@@ -1849,7 +1928,11 @@ class Scheduler(
 
         ret = GenerationBatchResult(
             logits_output=logits_output,
-            next_token_ids=next_token_ids.tolist(),
+            next_token_ids=(
+                next_token_ids.tolist()
+                if hasattr(next_token_ids, "tolist")
+                else list(next_token_ids)
+            ),
             extend_input_len_per_req=extend_input_len_per_req,
             extend_logprob_start_len_per_req=extend_logprob_start_len_per_req,
             bid=bid,
@@ -1977,6 +2060,9 @@ class Scheduler(
                 # Then we reuse all existing code to clean up the KV cache allocation.
                 logger.debug("Abort running request. rid=%s", req.rid)
                 req.to_finish = FINISH_ABORT()
+
+        # Abort method 4: Release cached nodes for prefill+extend
+        self._release_scoring_cache_nodes(recv_req.rid, recv_req.abort_all)
 
     def pause_generation(self, recv_req: PauseGenerationReqInput):
         self._engine_paused = True
