@@ -17,7 +17,7 @@ class TypeBasedDispatcher:
 
     def __call__(self, obj: Any):
         for ty, fn in self._mapping:
-            if isinstance(obj, ty):
+            if isinstance(obj, ty) or type(obj).__name__ == ty.__name__:
                 return fn(obj)
         raise ValueError(f"Invalid object: {obj}")
 

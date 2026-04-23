@@ -1,8 +1,7 @@
 import logging
 import uuid
 
-from sgl_jax.srt.entrypoints.openai.protocol import ScoreFromCacheReqOutput
-from sgl_jax.srt.managers.io_struct import GenerateReqInput, ScoreFromCacheReqInput
+from sgl_jax.srt.managers.io_struct import GenerateReqInput, ScoreFromCacheReqInput, ScoreFromCacheReqOutput
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +33,11 @@ class TokenizerScoringMixin:
         )
         # Use generate_request entry point to handle the prefill
         results_gen = self.generate_request(batch_request, None)
-        async for result in results_gen:
-            # We expect a single result indicating completion
-            if result["meta_info"]["finish_reason"] is not None:
-                logger.debug("Prefill+extend: prefill completed for rid=%s", rid)
-                return rid
+        async for results in results_gen:
+            for result in results:
+                if result["meta_info"]["finish_reason"] is not None:
+                    logger.debug("Prefill+extend: prefill completed for rid=%s", rid)
+                    return rid
 
         raise RuntimeError(f"Prefill failed to yield a result for rid={rid}")
 
@@ -82,8 +81,7 @@ class TokenizerScoringMixin:
                 label_token_ids=label_token_ids,
                 apply_softmax=apply_softmax,
                 items_per_step=items_per_step,
-            ),
-            timeout=timeout_s if timeout_s > 0 else None,
+            )
         )
 
         if not outputs:
