@@ -47,16 +47,6 @@ class TokenizerScoreRoutingMixin:
             result = await wait_coro
         return [result]
 
-    def _build_multi_item_token_sequence(
-        query_tokens: list[int], item_tokens: list[list[int]], delimiter_token_id: int
-    ) -> list[int]:
-        combined = query_tokens[:]
-        for tokens in item_tokens:
-            combined.append(delimiter_token_id)
-            combined.extend(tokens)
-        combined.append(delimiter_token_id)
-        return combined
-
     def _send_one_request(
         self,
         obj: GenerateReqInput | EmbeddingReqInput,
@@ -192,6 +182,7 @@ class TokenizerScoreRoutingMixin:
             states.append(state)
         return states
 
+    @staticmethod
     def _is_process_alive(pid: int) -> bool:
         if pid <= 0:
             return False
