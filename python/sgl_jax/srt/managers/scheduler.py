@@ -427,6 +427,10 @@ class Scheduler(
                 (SetInternalStateReq, self.set_internal_state),
                 (PauseGenerationReqInput, self.pause_generation),
                 (ContinueGenerationReqInput, self.continue_generation),
+<<<<<<< HEAD
+=======
+
+>>>>>>> 3059863 (Remove remaining leaked scoring cache code from scheduler.py on branch 1c)
             ]
         )
 
@@ -2258,15 +2262,7 @@ class Scheduler(
             logger.debug("Released cached node for rid=%s", rid)
         return released
 
-    def release_scoring_cache(
-        self, recv_req: ReleaseScoringCacheReqInput
-    ) -> ReleaseScoringCacheReqOutput:
-        released = self._release_scoring_cache_nodes(recv_req.rid, abort_all=False)
-        return ReleaseScoringCacheReqOutput(
-            rid=recv_req.rid,
-            success=True,
-            released_items=released,
-        )
+
 
     def _scoring_cache_metrics_snapshot(self) -> dict:
         query_total = self.scoring_cache_lookup_queries
