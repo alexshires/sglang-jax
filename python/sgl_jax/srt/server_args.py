@@ -129,6 +129,7 @@ class ServerArgs:
     enable_scoring_cache: bool = False
     multi_item_extend_batch_size: int = 64
     multi_item_score_from_cache_v2_items_per_step: int = 64
+    multi_item_score_label_only_logprob: bool = False
     disable_overlap_schedule: bool = False
     enable_precision_tracer: bool = False
 
@@ -849,6 +850,11 @@ class ServerArgs:
             type=int,
             default=ServerArgs.multi_item_score_from_cache_v2_items_per_step,
             help="Items per step for score-from-cache v2.",
+        )
+        parser.add_argument(
+            "--multi-item-score-label-only-logprob",
+            action="store_true",
+            help="Enable label-only logprob mode to optimize scoring workloads.",
         )
         parser.add_argument(
             "--enable-tokenizer-batch-encode",

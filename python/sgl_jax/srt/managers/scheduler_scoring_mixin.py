@@ -151,7 +151,7 @@ class SchedulerScoringMixin:
             cached_prefix_indices=cached_prefix_indices,
             prefix_ids=prefix_ids,
             cached_extra_key=cached_extra_key,
-            return_label_logprobs=True,
+            return_label_logprobs=False,
         )
 
         try:
