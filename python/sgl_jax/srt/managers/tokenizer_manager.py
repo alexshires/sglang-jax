@@ -56,6 +56,7 @@ from sgl_jax.srt.managers.io_struct import (
     SetInternalStateReqOutput,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
+    ScoreFromCacheReqOutput,
 )
 from sgl_jax.srt.managers.tokenizer_scoring_mixin import TokenizerScoringMixin
 from sgl_jax.srt.multimodal.tokenizer_utils import resolve_tokenizer_subdir
@@ -251,6 +252,10 @@ class TokenizerManager(TokenizerScoringMixin):
                     SetInternalStateReqOutput,
                     self.set_internal_state_communicator.handle_recv,
                 ),
+                (
+                    ScoreFromCacheReqOutput,
+                    self.score_from_cache_v2_communicator.handle_recv,
+                ),
                 (HealthCheckOutput, lambda x: None),
             ]
         )
@@ -381,6 +386,7 @@ class TokenizerManager(TokenizerScoringMixin):
             obj.extra_key,
             obj.return_routed_experts,
         )
+        tokenized_obj.cache_for_scoring = obj.cache_for_scoring
         # note: When only `return_logprob` is specified, we assume that only the output probability is required.
         if (
             tokenized_obj.return_logprob

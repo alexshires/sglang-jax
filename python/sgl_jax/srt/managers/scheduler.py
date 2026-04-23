@@ -853,6 +853,7 @@ class Scheduler(
             vocab_size=self.model_config.vocab_size,
             return_routed_experts=recv_req.return_routed_experts,
             return_hidden_states=recv_req.return_hidden_states,
+            cache_for_scoring=recv_req.cache_for_scoring,
         )
         req.tokenizer = self.tokenizer
         if hasattr(recv_req, "mm_inputs") and recv_req.mm_inputs:
@@ -1286,7 +1287,7 @@ class Scheduler(
         else:
             _, _, available_size, evictable_size = self._get_token_info()
             protected_size = self.tree_cache.protected_size()
-            memory_leak = (available_size + evictable_size) != self.max_total_num_tokens
+            memory_leak = (available_size + evictable_size + protected_size) != self.max_total_num_tokens
             token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
 
         if memory_leak:

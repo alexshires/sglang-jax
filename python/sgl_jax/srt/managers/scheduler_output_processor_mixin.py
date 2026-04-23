@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import threading
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,8 @@ from sgl_jax.srt.layers.logits_processor import LogitsProcessorOutput
 from sgl_jax.srt.layers.routed_experts_capturer import get_global_experts_capturer
 from sgl_jax.srt.managers.io_struct import AbortReq, BatchTokenIDOut
 from sgl_jax.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBatch
+from sgl_jax.srt.mem_cache.radix_cache import RadixKey
+from sgl_jax.srt.mem_cache.swa_radix_cache import SWARadixCache
 from sgl_jax.srt.precision_tracer import precision_tracer
 from sgl_jax.srt.utils.common_utils import cdiv
 
@@ -122,7 +125,40 @@ class SchedulerOutputProcessorMixin:
                             >= precision_tracer.get_max_requests()
                         ):
                             precision_tracer.stop_trace()
-                    self.tree_cache.cache_finished_req(req)
+                    logger.error(f"PREFILL DONE check: rid={req.rid}, cache_for_scoring={getattr(req, 'cache_for_scoring', False)}")
+                    if req.cache_for_scoring:
+                        self.tree_cache.cache_finished_req(req)
+                        if hasattr(self, "scoring_cache_nodes"):
+                            (
+                                prefix_indices,
+                                last_node,
+                                _,
+                                _,
+                            ) = self.tree_cache.match_prefix(
+                                key=RadixKey(req.origin_input_ids, req.extra_key)
+                            )
+                            if last_node is None:
+                                logger.warning(
+                                    "Skipping scoring cache for rid=%s because radix node is missing.",
+                                    req.rid,
+                                )
+                            else:
+                                if isinstance(self.tree_cache, SWARadixCache):
+                                    swa_uuid_for_lock = self.tree_cache.inc_lock_ref(last_node)
+                                else:
+                                    self.tree_cache.inc_lock_ref(last_node)
+                                    swa_uuid_for_lock = None
+                                self.scoring_cache_nodes[req.rid] = (
+                                    last_node,
+                                    swa_uuid_for_lock,
+                                    req.origin_input_ids,
+                                    prefix_indices,
+                                    req.extra_key,
+                                    time.monotonic(),
+                                )
+                                logger.debug("Stored scoring cache handle for rid=%s", req.rid)
+                    else:
+                        self.tree_cache.cache_finished_req(req)
                 elif not batch.decoding_reqs or req not in batch.decoding_reqs:
                     # This updates radix so others can match
                     self.tree_cache.cache_unfinished_req(req)

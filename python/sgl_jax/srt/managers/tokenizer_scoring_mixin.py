@@ -37,7 +37,7 @@ class TokenizerScoringMixin:
             for result in results:
                 if result["meta_info"]["finish_reason"] is not None:
                     logger.debug("Prefill+extend: prefill completed for rid=%s", rid)
-                    return rid
+                    return result["meta_info"]["id"]
 
         raise RuntimeError(f"Prefill failed to yield a result for rid={rid}")
 

@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import time
+from sgl_jax.srt.managers.scoring_utils import _compute_label_only_logprobs
 
 import jax
 import jax.numpy as jnp
@@ -77,10 +78,13 @@ class SchedulerScoringMixin:
         total_items = len(recv_req.items_2d)
         items_per_step = 16  # Default batch size for scoring
 
-        prefix_ids = recv_req.prefix_ids
-        prefix_indices = recv_req.prefix_indices
-        cached_last_node = recv_req.cached_last_node
-        cached_extra_key = recv_req.cached_extra_key
+        entry = self.scoring_cache_nodes.get(recv_req.cache_handle)
+        if entry is None:
+            raise ValueError(f"Cache handle {recv_req.cache_handle} not found or expired.")
+
+        cached_last_node, _, prefix_ids, prefix_indices, cached_extra_key, _ = (
+            self._unpack_scoring_cache_entry(entry)
+        )
 
         all_scores = []
         dispatch_count = 0
@@ -169,22 +173,44 @@ class SchedulerScoringMixin:
             )
             batch.prepare_for_extend()
             batch.bid = acc_global_bid()
-            result = self.run_batch(batch)
 
-            from jax.sharding import NamedSharding
-            from jax.sharding import PartitionSpec as P
+            (
+                precompile_token_paddings,
+                precompile_bs_paddings,
+                precompile_cache_loc_paddings,
+            ) = self.tp_worker.get_precompile_paddings()
 
-            from sgl_jax.srt.managers.scoring_utils import _compute_label_only_logprobs
-
-            next_token_logits = result.logits_output.next_token_logits[: len(reqs), :]
-            label_token_ids_arr = jnp.asarray(label_token_ids, dtype=jnp.int32)
-            out_sharding = NamedSharding(self.mesh, P(None, None))
-
-            row_logprobs_dev = _compute_label_only_logprobs(
-                next_token_logits, label_token_ids_arr, out_sharding
+            model_worker_batch = batch.get_model_worker_batch(
+                precompile_token_paddings,
+                precompile_bs_paddings,
+                precompile_cache_loc_paddings,
+                self.page_size,
+                self.server_args.enable_static_lora,
             )
 
-            logprob_vals = np.asarray(jax.device_get(row_logprobs_dev), dtype=np.float64)
+            logits_output_dict, _, _ = self.tp_worker.forward_batch_generation(
+                model_worker_batch, skip_sample=True, sampling_metadata=None
+            )
+            
+            from sgl_jax.srt.layers.logits_processor import LogitsProcessorOutput
+            logits_output = LogitsProcessorOutput(**logits_output_dict)
+
+            if logits_output.next_token_logits is None:
+                # Logprobs were pre-computed on device!
+                logprob_vals = np.asarray(jax.device_get(logits_output.next_token_logprobs), dtype=np.float64)
+            else:
+                # Compute on host using JAX math
+                from jax.sharding import NamedSharding
+                from jax.sharding import PartitionSpec as P
+
+                next_token_logits = logits_output.next_token_logits[: len(reqs), :]
+                label_token_ids_arr = jnp.asarray(label_token_ids, dtype=jnp.int32)
+                out_sharding = NamedSharding(self.mesh, P(None, None))
+
+                row_logprobs_dev = _compute_label_only_logprobs(
+                    next_token_logits, label_token_ids_arr, out_sharding
+                )
+                logprob_vals = np.asarray(jax.device_get(row_logprobs_dev), dtype=np.float64)
 
             if logprob_vals.shape[0] != len(reqs):
                 raise RuntimeError(

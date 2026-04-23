@@ -423,6 +423,7 @@ class ModelWorker:
             out_cache_loc=np.concat([valid_out_cache_loc, invalid_out_cache_loc], axis=0),
             return_logprob=False,
             return_output_logprob_only=True,
+            is_prefill_only=(mode == ForwardMode.EXTEND),
             sampling_info=(
                 SamplingBatchInfo.generate_for_precompile(bs, self.model_config.vocab_size)
                 if speculative_algotithm is None
@@ -443,6 +444,8 @@ class ModelWorker:
             top_logprobs_nums=None,
             token_ids_logprobs=None,
             extend_logprob_start_lens=None,
+            extend_start_loc=(np.zeros(bs, dtype=np.int32) if mode == ForwardMode.EXTEND else None),
+            temp_scaled_logprobs=False,
             capture_hidden_mode=capture_hidden_mode,
             spec_algorithm=speculative_algotithm,
             lora_ids=lora_ids,  # Already set to [None] * bs above
@@ -569,6 +572,11 @@ class ModelWorker:
             logits_metadata=LogitsMetadata.from_model_worker_batch(model_worker_batch, self.mesh),
         )
 
+
+        self.dump_topk_ids(layers_topk_ids, model_worker_batch)
+
+
+
         self.dump_topk_ids(layers_topk_ids, model_worker_batch)
 
         if launch_done is not None:
@@ -606,7 +614,9 @@ class ModelWorker:
                     sampling_metadata,
                 )
                 cache_miss_count += count()
-            if model_worker_batch.return_output_logprob_only:
+            if model_worker_batch.return_output_logprob_only and (
+                new_logits_output is None or new_logits_output.next_token_logprobs is None
+            ):
                 logprobs = self.model_runner.compute_logprobs(token_logprobs, next_token_ids_device)
                 logits_output.next_token_logprobs = logprobs[: model_worker_batch.real_bs]
         if new_logits_output is not None:
@@ -638,11 +648,28 @@ class ModelWorker:
                 ).tolist()
                 logits_output.input_top_logprobs_idx = logits_output.input_top_logprobs_idx.tolist()
 
-        return (
-            logits_output,
-            next_token_ids_device,
-            cache_miss_count,
-        )
+        if logits_output is not None:
+            if hasattr(logits_output, "next_token_logits") and isinstance(logits_output.next_token_logits, jax.Array):
+                logits_output.next_token_logits = jax.device_get(logits_output.next_token_logits)
+            if hasattr(logits_output, "next_token_logprobs") and isinstance(logits_output.next_token_logprobs, jax.Array):
+                logits_output.next_token_logprobs = jax.device_get(logits_output.next_token_logprobs)
+
+        if logits_output is not None:
+            logits_dict = {
+                "next_token_logits": jax.device_get(logits_output.next_token_logits) if getattr(logits_output, "next_token_logits", None) is not None else None,
+                "next_token_logprobs": jax.device_get(logits_output.next_token_logprobs) if getattr(logits_output, "next_token_logprobs", None) is not None else None,
+            }
+            return (
+                logits_dict,
+                next_token_ids_device,
+                cache_miss_count,
+            )
+        else:
+            return (
+                None,
+                next_token_ids_device,
+                cache_miss_count,
+            )
 
     def dump_topk_ids(self, layers_topk_ids: list[jax.Array], model_worker_batch: ModelWorkerBatch):
         enable = self.server_args.enable_return_routed_experts

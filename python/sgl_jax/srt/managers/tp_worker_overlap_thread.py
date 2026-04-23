@@ -98,6 +98,7 @@ class ModelWorkerClient:
                 future_token_ids_ct,
                 sampling_metadata,
                 forward_metadata,
+                skip_sample,
             ) = self.input_queue.get()
             if not model_worker_batch:
                 break
@@ -114,6 +115,7 @@ class ModelWorkerClient:
                     self.worker.forward_batch_generation(
                         model_worker_batch,
                         model_worker_batch.launch_done,
+                        skip_sample=skip_sample,
                         sampling_metadata=sampling_metadata,
                         forward_metadata=forward_metadata,
                     )
@@ -132,7 +134,9 @@ class ModelWorkerClient:
         This function is called to resolve the last batch result and
         wait for the current batch to be launched. Used in overlap mode.
         """
-        _, logits_output, next_token_ids, cache_miss_count = self.output_queue.get()
+        _, logits_output_dict, next_token_ids, cache_miss_count = self.output_queue.get()
+        from sgl_jax.srt.layers.logits_processor import LogitsProcessorOutput
+        logits_output = LogitsProcessorOutput(**logits_output_dict)
         if logits_output.next_token_logprobs is not None:
             logits_output.next_token_logprobs = jax.device_get(
                 logits_output.next_token_logprobs
@@ -154,6 +158,7 @@ class ModelWorkerClient:
         self,
         model_worker_batch: ModelWorkerBatch,
         sampling_metadata: SamplingMetadata = None,
+        skip_sample: bool = False,
     ) -> tuple[None, jax.Array, int]:
         # Create a new copy of sampling_info because it will be updated in-place by the scheduler for the next batch.
         sampling_info = model_worker_batch.sampling_info
@@ -191,6 +196,7 @@ class ModelWorkerClient:
                 self.future_token_ids_ct,
                 sampling_metadata,
                 forward_metadata,
+                skip_sample,
             )
         )
 
