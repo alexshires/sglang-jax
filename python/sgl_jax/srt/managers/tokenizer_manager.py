@@ -258,14 +258,6 @@ class TokenizerManager(
         self.scheduler_pids: list[int] = []
         self.scheduler_unavailable_error: str | None = None
 
-
-
-
-
-
-
-    @staticmethod
-
     async def generate_request(
         self,
         obj: GenerateReqInput | EmbeddingReqInput,
@@ -390,10 +382,6 @@ class TokenizerManager(
             lora_id=obj.lora_id,
             extra_key=obj.extra_key,
             return_routed_experts=obj.return_routed_experts,
-            is_multi_item_scoring=bool(obj.is_multi_item_scoring),
-            multi_item_scoring_delimiter=obj.multi_item_scoring_delimiter,
-            multi_item_algorithm=obj.multi_item_algorithm,
-            multi_item_mask_mode=obj.multi_item_mask_mode,
             cache_for_scoring=bool(obj.cache_for_scoring),
             extend_from_cache=obj.extend_from_cache,
         )
@@ -449,7 +437,6 @@ class TokenizerManager(
                 raise ValueError(
                     "Batch tokenization is not needed for input_embeds. Do not set `enable_tokenizer_batch_encode`."
                 )
-
 
     def _notify_state_event(self, state: ReqState) -> None:
         """Thread-safe wrapper around state.event.set().
@@ -1346,10 +1333,6 @@ class SignalHandler:
 
 
 @dataclasses.dataclass
-
-
-
-
 class _Communicator[T]:
     """Note: The communicator now only run up to 1 in-flight request at any time."""
 
