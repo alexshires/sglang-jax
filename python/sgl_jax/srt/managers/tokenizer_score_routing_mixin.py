@@ -63,6 +63,7 @@ class TokenizerScoreRoutingMixin:
             result = await wait_coro
         return [result]
 
+    @staticmethod
     def _build_multi_item_token_sequence(
         query_tokens: list[int], item_tokens: list[list[int]], delimiter_token_id: int
     ) -> list[int]:
@@ -208,6 +209,7 @@ class TokenizerScoreRoutingMixin:
             states.append(state)
         return states
 
+    @staticmethod
     def _is_process_alive(pid: int) -> bool:
         if pid <= 0:
             return False
