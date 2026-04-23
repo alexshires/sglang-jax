@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import jax
@@ -11,6 +12,8 @@ from sgl_jax.srt.layers.logits_processor import LogitsProcessorOutput
 from sgl_jax.srt.layers.routed_experts_capturer import get_global_experts_capturer
 from sgl_jax.srt.managers.io_struct import AbortReq, BatchTokenIDOut
 from sgl_jax.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBatch
+from sgl_jax.srt.mem_cache.radix_cache import RadixKey
+from sgl_jax.srt.mem_cache.swa_radix_cache import SWARadixCache
 from sgl_jax.srt.precision_tracer import precision_tracer
 from sgl_jax.srt.utils.common_utils import cdiv
 
@@ -86,12 +89,16 @@ class SchedulerOutputProcessorMixin:
                     logits_output.input_token_logprobs = tuple(
                         jax.device_get(logits_output.input_token_logprobs).astype(float)
                     )
+        prefill_only_without_output = bool(
+            getattr(self, "_can_skip_sample_for_prefill_batch", lambda _batch: False)(batch)
+        )
         hidden_state_offset = 0
         # Check finish conditions
         logprob_pt = 0
-        for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
+        for i, req in enumerate(batch.reqs):
             if req.is_retracted:
                 continue
+            next_token_id = None if prefill_only_without_output else next_token_ids[i]
 
             req.latest_bid = batch.bid
 
@@ -101,8 +108,9 @@ class SchedulerOutputProcessorMixin:
                 continue
 
             if req.is_chunked <= 0:
-                # req output_ids are set here
-                req.output_ids.append(next_token_id)
+                if not prefill_only_without_output:
+                    # req output_ids are set here for normal prefill/decode.
+                    req.output_ids.append(next_token_id)
                 req.check_finished()
 
                 if req.finished():
@@ -122,7 +130,121 @@ class SchedulerOutputProcessorMixin:
                             >= precision_tracer.get_max_requests()
                         ):
                             precision_tracer.stop_trace()
-                    self.tree_cache.cache_finished_req(req)
+                    if req.cache_for_scoring:
+                        # Cache ownership transfer/freeing must happen here, otherwise
+                        # req_to_token_pool slots leak. After caching we re-match the
+                        # request prefix and keep a protected lock for the scoring handle.
+                        self.tree_cache.cache_finished_req(req)
+                        if hasattr(self, "scoring_cache_nodes"):
+                            lane_name = "default"
+                            if hasattr(self, "_score_scheduler_lane_from_prefix_len"):
+                                lane_name = self._score_scheduler_lane_from_prefix_len(
+                                    self, len(req.origin_input_ids)
+                                )
+
+                            reused_existing_handle = False
+                            prefix_key = None
+                            if hasattr(self, "_normalize_scoring_cache_prefix_key"):
+                                prefix_key = self._normalize_scoring_cache_prefix_key(
+                                    req.origin_input_ids,
+                                    req.extra_key,
+                                )
+                            if prefix_key is not None and hasattr(
+                                self, "scoring_cache_prefix_handles_by_key"
+                            ):
+                                handle_candidates = sorted(
+                                    self.scoring_cache_prefix_handles_by_key.get(prefix_key, set())
+                                )
+                                for cached_handle in handle_candidates:
+                                    existing_entry = self.scoring_cache_nodes.get(cached_handle)
+                                    if existing_entry is None:
+                                        continue
+                                    (
+                                        existing_node,
+                                        _,
+                                        existing_prefix_ids,
+                                        existing_prefix_indices,
+                                        existing_extra_key,
+                                        _,
+                                    ) = self._unpack_scoring_cache_entry(existing_entry)
+                                    if existing_node is None:
+                                        continue
+                                    if isinstance(self.tree_cache, SWARadixCache):
+                                        swa_uuid_for_lock = self.tree_cache.inc_lock_ref(
+                                            existing_node
+                                        )
+                                    else:
+                                        self.tree_cache.inc_lock_ref(existing_node)
+                                        swa_uuid_for_lock = None
+                                    self.scoring_cache_nodes[req.rid] = (
+                                        existing_node,
+                                        swa_uuid_for_lock,
+                                        existing_prefix_ids,
+                                        existing_prefix_indices,
+                                        existing_extra_key,
+                                        time.monotonic(),
+                                    )
+                                    if hasattr(self, "_register_scoring_cache_handle"):
+                                        self._register_scoring_cache_handle(
+                                            req.rid,
+                                            existing_prefix_ids,
+                                            existing_extra_key,
+                                        )
+                                    if hasattr(self, "_record_scoring_cache_lookup"):
+                                        self._record_scoring_cache_lookup(
+                                            path="cache_for_scoring",
+                                            hit=True,
+                                            lane_name=lane_name,
+                                        )
+                                    if hasattr(self, "_record_scoring_cache_handle_created"):
+                                        self._record_scoring_cache_handle_created()
+                                    reused_existing_handle = True
+                                    break
+
+                            if not reused_existing_handle:
+                                (
+                                    prefix_indices,
+                                    last_node,
+                                    _,
+                                    _,
+                                ) = self.tree_cache.match_prefix(
+                                    key=RadixKey(req.origin_input_ids, req.extra_key)
+                                )
+                                if last_node is None:
+                                    logger.warning(
+                                        "Skipping scoring cache for rid=%s because radix node is missing.",
+                                        req.rid,
+                                    )
+                                else:
+                                    if isinstance(self.tree_cache, SWARadixCache):
+                                        swa_uuid_for_lock = self.tree_cache.inc_lock_ref(last_node)
+                                    else:
+                                        self.tree_cache.inc_lock_ref(last_node)
+                                        swa_uuid_for_lock = None
+                                    self.scoring_cache_nodes[req.rid] = (
+                                        last_node,
+                                        swa_uuid_for_lock,
+                                        req.origin_input_ids,
+                                        prefix_indices,
+                                        req.extra_key,
+                                        time.monotonic(),
+                                    )
+                                    if hasattr(self, "_register_scoring_cache_handle"):
+                                        self._register_scoring_cache_handle(
+                                            req.rid,
+                                            req.origin_input_ids,
+                                            req.extra_key,
+                                        )
+                                    if hasattr(self, "_record_scoring_cache_lookup"):
+                                        self._record_scoring_cache_lookup(
+                                            path="cache_for_scoring",
+                                            hit=False,
+                                            lane_name=lane_name,
+                                        )
+                                    if hasattr(self, "_record_scoring_cache_handle_created"):
+                                        self._record_scoring_cache_handle_created()
+                    else:
+                        self.tree_cache.cache_finished_req(req)
                 elif not batch.decoding_reqs or req not in batch.decoding_reqs:
                     # This updates radix so others can match
                     self.tree_cache.cache_unfinished_req(req)
@@ -130,6 +252,16 @@ class SchedulerOutputProcessorMixin:
                 if req.return_output_logprob_only:
                     req.output_token_logprobs_val.append(logits_output.next_token_logprobs[i])
                     req.output_token_logprobs_idx.append(next_token_ids[i])
+                    if (
+                        req.token_ids_logprob is not None
+                        and logits_output.next_token_token_ids_logprobs_val is not None
+                    ):
+                        req.output_token_ids_logprobs_val.append(
+                            logits_output.next_token_token_ids_logprobs_val[i]
+                        )
+                        req.output_token_ids_logprobs_idx.append(
+                            logits_output.next_token_token_ids_logprobs_idx[i]
+                        )
 
                 if req.return_logprob:
                     assert extend_logprob_start_len_per_req is not None
@@ -158,7 +290,7 @@ class SchedulerOutputProcessorMixin:
                         ).astype(float)
                     )
                 # Update grammar state after token sampling
-                if req.grammar is not None:
+                if req.grammar is not None and next_token_id is not None:
                     try:
                         req.grammar.accept_token(int(next_token_id))
                     except ValueError as e:
@@ -314,9 +446,9 @@ class SchedulerOutputProcessorMixin:
                     kv_indices = kv_indices[kv_indices != 0]
                     from sgl_jax.srt.speculative.eagle_util import EagleDraftInput
 
-                    assert (
-                        len(kv_indices) <= EagleDraftInput.ALLOC_LEN_PER_DECODE
-                    ), f"redundant kv indices {len(kv_indices)=} should less than {EagleDraftInput.ALLOC_LEN_PER_DECODE=}"
+                    assert len(kv_indices) <= EagleDraftInput.ALLOC_LEN_PER_DECODE, (
+                        f"redundant kv indices {len(kv_indices)=} should less than {EagleDraftInput.ALLOC_LEN_PER_DECODE=}"
+                    )
 
                     self.token_to_kv_pool_allocator.free(kv_indices)
                 # End trace for finished request
@@ -340,6 +472,16 @@ class SchedulerOutputProcessorMixin:
             if req.return_output_logprob_only:
                 req.output_token_logprobs_val.append(next_token_logprobs[i])
                 req.output_token_logprobs_idx.append(next_token_id)
+                if (
+                    req.token_ids_logprob is not None
+                    and logits_output.next_token_token_ids_logprobs_val is not None
+                ):
+                    req.output_token_ids_logprobs_val.append(
+                        logits_output.next_token_token_ids_logprobs_val[i]
+                    )
+                    req.output_token_ids_logprobs_idx.append(
+                        logits_output.next_token_token_ids_logprobs_idx[i]
+                    )
 
             if req.return_logprob and (
                 batch.spec_algorithm is None or batch.spec_algorithm.is_none()
@@ -439,12 +581,33 @@ class SchedulerOutputProcessorMixin:
         req.input_token_logprobs.extend(input_token_logprobs)
 
         if req.top_logprobs_num > 0:
-            req.temp_input_top_logprobs_val.append(output.input_top_logprobs_val[i])
-            req.temp_input_top_logprobs_idx.append(output.input_top_logprobs_idx[i])
+            req.temp_input_top_logprobs_val.append(
+                [
+                    row[: req.top_logprobs_num]
+                    for row in output.input_top_logprobs_val[i][:num_input_logprobs]
+                ]
+            )
+            req.temp_input_top_logprobs_idx.append(
+                [
+                    row[: req.top_logprobs_num]
+                    for row in output.input_top_logprobs_idx[i][:num_input_logprobs]
+                ]
+            )
 
         if req.token_ids_logprob is not None:
-            req.temp_input_token_ids_logprobs_val.append(output.input_token_ids_logprobs_val[i])
-            req.temp_input_token_ids_logprobs_idx.append(output.input_token_ids_logprobs_idx[i])
+            token_ids_len = len(req.token_ids_logprob)
+            req.temp_input_token_ids_logprobs_val.append(
+                [
+                    row[:token_ids_len]
+                    for row in output.input_token_ids_logprobs_val[i][:num_input_logprobs]
+                ]
+            )
+            req.temp_input_token_ids_logprobs_idx.append(
+                [
+                    row[:token_ids_len]
+                    for row in output.input_token_ids_logprobs_idx[i][:num_input_logprobs]
+                ]
+            )
 
         if last_prefill_chunk:
             input_token_logprobs = req.input_token_logprobs
@@ -454,21 +617,22 @@ class SchedulerOutputProcessorMixin:
             assert req.input_top_logprobs_val is None
             assert req.input_top_logprobs_idx is None
 
-            # Compute input_token_logprobs_val
-            # Always pad the first one with None.
-            req.input_token_logprobs_val = [None]
-            req.input_token_logprobs_val.extend(input_token_logprobs)
-            # The last input logprob is for sampling, so just pop it out.
-            req.input_token_logprobs_val.pop()
+            relevant_tokens = req.origin_input_ids[req.logprob_start_len :]
 
-            # Compute input_token_logprobs_idx
-            input_token_logprobs_idx = req.origin_input_ids[req.logprob_start_len :]
+            # Align per-token logprobs to token positions:
+            # token[i] maps to model prediction at i-1 (first token has None).
+            aligned_input_token_logprobs = [None]
+            aligned_input_token_logprobs.extend(input_token_logprobs)
+            aligned_input_token_logprobs.pop()
+
+            req.input_token_logprobs_val = aligned_input_token_logprobs
+            input_token_logprobs_idx = relevant_tokens
+
             # Clip the padded hash values from image tokens.
             # Otherwise, it will lead to detokenization errors.
-            input_token_logprobs_idx = [
+            req.input_token_logprobs_idx = [
                 x if x < self.model_config.vocab_size - 1 else 0 for x in input_token_logprobs_idx
             ]
-            req.input_token_logprobs_idx = input_token_logprobs_idx
 
             if req.top_logprobs_num > 0:
                 req.input_top_logprobs_val = [None]
@@ -484,9 +648,10 @@ class SchedulerOutputProcessorMixin:
                     req.input_top_logprobs_val.extend(val)
                     req.input_top_logprobs_idx.extend(idx)
 
-                # Last token is a sample token.
+                # Last token corresponds to sampled output, not an input token.
                 req.input_top_logprobs_val.pop()
                 req.input_top_logprobs_idx.pop()
+
                 req.temp_input_top_logprobs_idx = None
                 req.temp_input_top_logprobs_val = None
 
@@ -502,9 +667,10 @@ class SchedulerOutputProcessorMixin:
                     req.input_token_ids_logprobs_val.extend(val)
                     req.input_token_ids_logprobs_idx.extend(idx)
 
-                # Last token is a sample token.
+                # Last token corresponds to sampled output, not an input token.
                 req.input_token_ids_logprobs_val.pop()
                 req.input_token_ids_logprobs_idx.pop()
+
                 req.temp_input_token_ids_logprobs_idx = None
                 req.temp_input_token_ids_logprobs_val = None
 
@@ -582,12 +748,17 @@ class SchedulerOutputProcessorMixin:
         prompt_tokens = []
         completion_tokens = []
         cached_tokens = []
+        scheduler_queue_wait_s = []
+        scheduler_device_compute_s = []
+        scheduler_host_overhead_s = []
+        scheduler_dispatch_count = []
         spec_verify_ct = []
         spec_accepted_tokens = []
         output_hidden_states = None
         output_routed_experts = None
 
         output_hidden_states_for_mm = None
+        has_output_token_ids_logprob = any(req.token_ids_logprob is not None for req in reqs)
         if return_logprob:
             input_token_logprobs_val = []
             input_token_logprobs_idx = []
@@ -608,7 +779,12 @@ class SchedulerOutputProcessorMixin:
                 input_top_logprobs_idx
             ) = output_top_logprobs_val = output_top_logprobs_idx = input_token_ids_logprobs_val = (
                 input_token_ids_logprobs_idx
-            ) = output_token_ids_logprobs_val = output_token_ids_logprobs_idx = None
+            ) = None
+            if has_output_token_ids_logprob:
+                output_token_ids_logprobs_val = []
+                output_token_ids_logprobs_idx = []
+            else:
+                output_token_ids_logprobs_val = output_token_ids_logprobs_idx = None
         else:
             input_token_logprobs_val = input_token_logprobs_idx = output_token_logprobs_val = (
                 output_token_logprobs_idx
@@ -669,6 +845,10 @@ class SchedulerOutputProcessorMixin:
                 prompt_tokens.append(len(req.origin_input_ids))
                 completion_tokens.append(len(req.output_ids))
                 cached_tokens.append(req.cached_tokens)
+                scheduler_queue_wait_s.append(req.queue_wait_time_s)
+                scheduler_device_compute_s.append(req.device_compute_time_s)
+                scheduler_host_overhead_s.append(req.host_overhead_time_s)
+                scheduler_dispatch_count.append(req.scheduler_dispatch_count)
 
                 if self.spec_algorithm is not None and not self.spec_algorithm.is_none():
                     spec_verify_ct.append(req.spec_verify_ct)
@@ -681,6 +861,22 @@ class SchedulerOutputProcessorMixin:
                     output_token_logprobs_idx.append(
                         req.output_token_logprobs_idx[send_output_token_logprobs_offset:]
                     )
+                    if has_output_token_ids_logprob:
+                        if req.token_ids_logprob is not None:
+                            output_token_ids_logprobs_val.append(
+                                req.output_token_ids_logprobs_val[
+                                    send_output_token_logprobs_offset:
+                                ]
+                            )
+                            output_token_ids_logprobs_idx.append(
+                                req.output_token_ids_logprobs_idx[
+                                    send_output_token_logprobs_offset:
+                                ]
+                            )
+                        else:
+                            output_token_ids_logprobs_val.append([])
+                            output_token_ids_logprobs_idx.append([])
+                    req.send_output_token_logprobs_offset = len(req.output_token_logprobs_val)
                 if return_logprob:
                     if req.return_logprob and not req.input_logprob_sent:
                         input_token_logprobs_val.append(req.input_token_logprobs_val)
@@ -765,6 +961,10 @@ class SchedulerOutputProcessorMixin:
                 output_hidden_states_for_mm,
                 cache_miss_count,
                 output_routed_experts,
+                scheduler_queue_wait_s,
+                scheduler_device_compute_s,
+                scheduler_host_overhead_s,
+                scheduler_dispatch_count,
             )
             if self._comm_backend is not None:
                 self._comm_backend.send_pyobj(out)
