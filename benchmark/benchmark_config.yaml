@@ -1,3 +1,9 @@
-enable-scoring-cache: true
-multi-item-extend-batch-size: 64
-multi-item-score-from-cache-v2-items-per-step: 64
+model-path: /models/Qwen/Qwen3-0.6B
+trust-remote-code: true
+device: tpu
+dtype: bfloat16
+mem-fraction-static: 0.7
+max-running-requests: 128
+page-size: 16
+attention-backend: fa
+skip-server-warmup: true
