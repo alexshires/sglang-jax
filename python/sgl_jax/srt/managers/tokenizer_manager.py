@@ -302,14 +302,6 @@ class TokenizerManager(
         self.scheduler_pids: list[int] = []
         self.scheduler_unavailable_error: str | None = None
 
-
-
-
-
-
-
-    @staticmethod
-
     async def generate_request(
         self,
         obj: GenerateReqInput | EmbeddingReqInput,
