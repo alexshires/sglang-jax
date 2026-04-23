@@ -126,6 +126,9 @@ class ServerArgs:
     disable_radix_cache: bool = False
     allow_auto_truncate: bool = False
     enable_tokenizer_batch_encode: bool = False
+    enable_scoring_cache: bool = False
+    multi_item_extend_batch_size: int = 64
+    multi_item_score_from_cache_v2_items_per_step: int = 64
     disable_overlap_schedule: bool = False
     enable_precision_tracer: bool = False
 
@@ -829,6 +832,23 @@ class ServerArgs:
             "--allow-auto-truncate",
             action="store_true",
             help="Allow automatically truncating requests that exceed the maximum input length instead of returning an error.",
+        )
+        parser.add_argument(
+            "--enable-scoring-cache",
+            action="store_true",
+            help="Enable scoring cache to optimize scoring workloads.",
+        )
+        parser.add_argument(
+            "--multi-item-extend-batch-size",
+            type=int,
+            default=ServerArgs.multi_item_extend_batch_size,
+            help="Batch size for multi-item extend operations.",
+        )
+        parser.add_argument(
+            "--multi-item-score-from-cache-v2-items-per-step",
+            type=int,
+            default=ServerArgs.multi_item_score_from_cache_v2_items_per_step,
+            help="Items per step for score-from-cache v2.",
         )
         parser.add_argument(
             "--enable-tokenizer-batch-encode",

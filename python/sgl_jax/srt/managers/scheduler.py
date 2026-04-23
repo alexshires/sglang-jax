@@ -442,6 +442,15 @@ class Scheduler(
 
         self.executor = futures.ThreadPoolExecutor(max_workers=4)
 
+        # Prefill+extend scoring cache
+        self.scoring_cache_nodes: dict[str, tuple] = {}
+        self._last_scoring_cache_gc: float = 0.0
+        self.scoring_cache_timeout = float(
+            getattr(server_args, "multi_item_prefill_extend_cache_timeout", 60.0)
+        )
+
+
+
         # Telemetry for ingress
         self.ingress_recv_calls = 0
         self.ingress_nonempty_calls = 0
@@ -469,6 +478,27 @@ class Scheduler(
             "rpc_score_from_cache_v2": 0,
             "rpc_release_scoring_cache": 0,
         }
+
+        # Telemetry for scoring cache
+        self.scoring_cache_lookup_queries = 0
+        self.scoring_cache_lookup_hits = 0
+        self.scoring_cache_lookup_misses = 0
+        self.scoring_cache_handles_created = 0
+        self.scoring_cache_handles_released = {}
+
+        # Telemetry for score-from-cache v2
+        self.score_from_cache_v2_attempted = 0
+        self.score_from_cache_v2_succeeded = 0
+        self.score_from_cache_v2_fallback = 0
+        self.score_from_cache_v2_fallback_reasons = {}
+        self.score_from_cache_v2_queue_wait_s_total = 0.0
+        self.score_from_cache_v2_device_compute_s_total = 0.0
+        self.score_from_cache_v2_host_orchestration_s_total = 0.0
+        self.score_from_cache_v2_queue_wait_s_max = 0.0
+        self.score_from_cache_v2_device_compute_s_max = 0.0
+        self.score_from_cache_v2_host_orchestration_s_max = 0.0
+
+
 
     def sync_pub(self):
         logger.info(
@@ -1976,6 +2006,289 @@ class Scheduler(
             + (bs * prefix_len)
         )
 
+
+    def _unpack_scoring_cache_entry(self, entry):
+        # Backward-compatible unpack for entries created before `last_access_ts`
+        # was added.
+        if len(entry) == 6:
+            return entry
+        if len(entry) == 5:
+            node, swa_uuid, input_ids, prefix_indices, extra_key = entry
+            return node, swa_uuid, input_ids, prefix_indices, extra_key, 0.0
+        raise RuntimeError(f"Invalid scoring cache entry format (len={len(entry)}).")
+
+    def _release_scoring_cache_entry(self, rid: str, entry, reason: str) -> None:
+        node, swa_uuid, *_ = self._unpack_scoring_cache_entry(entry)
+        self._record_scoring_cache_handle_released(reason)
+        if node is None:
+            self.scoring_cache_handles_missing_node += 1
+            logger.warning("Scoring cache entry rid=%s has no radix node (%s).", rid, reason)
+            return
+        try:
+            if isinstance(self.tree_cache, SWARadixCache):
+                self.tree_cache.dec_lock_ref(node, swa_uuid)
+            else:
+                self.tree_cache.dec_lock_ref(node)
+        except Exception:
+            logger.exception(
+                "Failed to decrement scoring-cache lock ref for rid=%s (%s).",
+                rid,
+                reason,
+            )
+
+    def _touch_scoring_cache_entry(self, rid: str, now: float | None = None):
+        entry = self.scoring_cache_nodes.get(rid)
+        if entry is None:
+            return
+        node, swa_uuid, input_ids, prefix_indices, extra_key, _ = self._unpack_scoring_cache_entry(
+            entry
+        )
+        self.scoring_cache_nodes[rid] = (
+            node,
+            swa_uuid,
+            input_ids,
+            prefix_indices,
+            extra_key,
+            time.monotonic() if now is None else now,
+        )
+
+    def _evict_expired_scoring_cache_nodes(self, now: float | None = None) -> int:
+        timeout = self.scoring_cache_timeout
+        if timeout <= 0:
+            return 0
+
+        now_ts = time.monotonic() if now is None else now
+        # Throttle GC to avoid walking the dict too often.
+        if now is None and now_ts - self._last_scoring_cache_gc < 0.5:
+            return 0
+        self._last_scoring_cache_gc = now_ts
+
+        expired_rids: list[str] = []
+        for rid, entry in self.scoring_cache_nodes.items():
+            *_, last_access_ts = self._unpack_scoring_cache_entry(entry)
+            if now_ts - last_access_ts > timeout:
+                expired_rids.append(rid)
+
+        for rid in expired_rids:
+            entry = self.scoring_cache_nodes.pop(rid, None)
+            if entry is None:
+                continue
+            self._release_scoring_cache_entry(rid, entry, reason="expired")
+
+        if expired_rids:
+            logger.info("Evicted %d expired scoring cache handles.", len(expired_rids))
+        return len(expired_rids)
+
+    def _resolve_extend_from_cache(
+        self, recv_req: TokenizedGenerateReqInput
+    ) -> tuple[tuple | None, str | None]:
+        if not recv_req.extend_from_cache:
+            return None, None
+
+        self._evict_expired_scoring_cache_nodes()
+        entry = self.scoring_cache_nodes.get(recv_req.extend_from_cache)
+        if entry is None:
+            self._record_scoring_cache_lookup(path="extend", hit=False)
+            err = (
+                f"Missing scoring cache handle '{recv_req.extend_from_cache}'. "
+                "The cached prefix may have expired or been released."
+            )
+            logger.warning("Prefill+extend scheduler: %s", err)
+            return None, err
+        self._record_scoring_cache_lookup(path="extend", hit=True)
+
+        cached_last_node, _, prefix_ids, prefix_indices, cached_extra_key, _ = (
+            self._unpack_scoring_cache_entry(entry)
+        )
+        item_ids = recv_req.input_ids or []
+        recv_req.input_ids = prefix_ids + item_ids
+        cached_prefix_len = len(prefix_indices)
+        suffix_len = max(0, len(item_ids))
+        if recv_req.extra_key is None:
+            recv_req.extra_key = cached_extra_key
+        self._touch_scoring_cache_entry(recv_req.extend_from_cache)
+        logger.debug(
+            "Prefill+extend scheduler: extend request rid=%s handle=%s prefix_tokens=%d cached_prefix=%d item_tokens=%d merged_input_tokens=%d max_new_tokens=%s",
+            recv_req.rid,
+            recv_req.extend_from_cache,
+            len(prefix_ids),
+            cached_prefix_len,
+            suffix_len,
+            len(recv_req.input_ids),
+            recv_req.sampling_params.max_new_tokens,
+        )
+        return (cached_last_node, prefix_indices), None
+
+    def _record_score_from_cache_v2_fallback(self, reason: str):
+        self.score_from_cache_v2_fallback += 1
+        self.score_from_cache_v2_fallback_reasons[reason] = (
+            self.score_from_cache_v2_fallback_reasons.get(reason, 0) + 1
+        )
+
+    def _record_score_from_cache_v2_timing(
+        self,
+        queue_wait_s: float,
+        device_compute_s: float,
+        host_orchestration_s: float,
+    ) -> None:
+        queue_wait_s = max(0.0, float(queue_wait_s))
+        device_compute_s = max(0.0, float(device_compute_s))
+        host_orchestration_s = max(0.0, float(host_orchestration_s))
+        self.score_from_cache_v2_queue_wait_s_total += queue_wait_s
+        self.score_from_cache_v2_device_compute_s_total += device_compute_s
+        self.score_from_cache_v2_host_orchestration_s_total += host_orchestration_s
+        self.score_from_cache_v2_queue_wait_s_max = max(
+            self.score_from_cache_v2_queue_wait_s_max,
+            queue_wait_s,
+        )
+        self.score_from_cache_v2_device_compute_s_max = max(
+            self.score_from_cache_v2_device_compute_s_max,
+            device_compute_s,
+        )
+        self.score_from_cache_v2_host_orchestration_s_max = max(
+            self.score_from_cache_v2_host_orchestration_s_max,
+            host_orchestration_s,
+        )
+
+    def _score_from_cache_v2_fallback_output(
+        self,
+        recv_req: ScoreFromCacheReqInput,
+        reason: str,
+        error_msg: str = "",
+        dispatch_count: int = 0,
+        queue_wait_s: float = 0.0,
+        device_compute_s: float = 0.0,
+        host_orchestration_s: float = 0.0,
+    ) -> ScoreFromCacheReqOutput:
+        self._record_score_from_cache_v2_fallback(reason)
+        self._record_score_from_cache_v2_timing(
+            queue_wait_s=queue_wait_s,
+            device_compute_s=device_compute_s,
+            host_orchestration_s=host_orchestration_s,
+        )
+        return ScoreFromCacheReqOutput(
+            rid=recv_req.rid,
+            success=False,
+            scores=[],
+            fallback_reason=reason,
+            error_msg=error_msg,
+            dispatch_count=dispatch_count,
+            lifecycle_requests_sent=0,
+            lifecycle_results_received=0,
+            queue_wait_s=max(0.0, float(queue_wait_s)),
+            device_compute_s=device_compute_s,
+            host_orchestration_s=host_orchestration_s,
+        )
+
+    def _score_from_cache_v2_validate_items(
+        self, recv_req: ScoreFromCacheReqInput
+    ) -> tuple[bool, str, str]:
+        if not recv_req.cache_handle:
+            return False, "missing_cache_handle", "cache_handle must be non-empty."
+        if not isinstance(recv_req.items_2d, list):
+            return False, "unsupported_shape", "items_2d must be a list of token lists."
+        if not isinstance(recv_req.label_token_ids, list) or len(recv_req.label_token_ids) == 0:
+            return False, "unsupported_shape", "label_token_ids must be a non-empty list."
+        if any((not isinstance(token_id, int)) for token_id in recv_req.label_token_ids):
+            return False, "unsupported_shape", "label_token_ids must contain ints."
+        for token_id in recv_req.label_token_ids:
+            if token_id < 0 or token_id >= self.model_config.vocab_size:
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"label_token_ids must be in [0, {self.model_config.vocab_size - 1}].",
+                )
+        for idx, item in enumerate(recv_req.items_2d):
+            if not isinstance(item, list):
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"items_2d[{idx}] must be a list of token ids.",
+                )
+            if len(item) == 0:
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"items_2d[{idx}] must contain at least one token.",
+                )
+            if any((not isinstance(token_id, int)) for token_id in item):
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"items_2d[{idx}] must contain ints.",
+                )
+        return True, "", ""
+
+    # Removed for PR 1a (moved to Mixin)
+
+    @staticmethod
+    def _estimate_score_from_cache_v2_words(prefix_len: int, items: list[list[int]]) -> int:
+        # Conservative host-side int32-sized tensor estimate for this chunk.
+        total_item_tokens = sum(len(item) for item in items)
+        total_fill_tokens = sum(prefix_len + len(item) for item in items)
+        max_item_len = max((len(item) for item in items), default=0)
+        bs = len(items)
+        # Terms loosely track main arrays: flat input ids, seq/prefix/extend lengths,
+        # req_to_token writes, and token-id-logprob tensors.
+        return (
+            total_item_tokens
+            + total_fill_tokens
+            + (3 * bs)
+            + (bs * max_item_len)
+            + (bs * prefix_len)
+        )
+
+    def _release_scoring_cache_nodes(self, rid_prefix: str | None, abort_all: bool) -> int:
+        released = 0
+        self._evict_expired_scoring_cache_nodes()
+        if not abort_all and not rid_prefix:
+            return released
+
+        rids_to_remove = []
+        for rid in self.scoring_cache_nodes:
+            if abort_all or (rid_prefix and rid.startswith(rid_prefix)):
+                rids_to_remove.append(rid)
+
+        for rid in rids_to_remove:
+            entry = self.scoring_cache_nodes.pop(rid, None)
+            if entry is None:
+                continue
+            self._release_scoring_cache_entry(rid, entry, reason="manual")
+            released += 1
+            logger.debug("Released cached node for rid=%s", rid)
+        return released
+
+    def release_scoring_cache(
+        self, recv_req: ReleaseScoringCacheReqInput
+    ) -> ReleaseScoringCacheReqOutput:
+        released = self._release_scoring_cache_nodes(recv_req.rid, abort_all=False)
+        return ReleaseScoringCacheReqOutput(
+            rid=recv_req.rid,
+            success=True,
+            released_items=released,
+        )
+
+    def _scoring_cache_metrics_snapshot(self) -> dict:
+        query_total = self.scoring_cache_lookup_queries
+        hit_total = self.scoring_cache_lookup_hits
+        miss_total = self.scoring_cache_lookup_misses
+        hit_rate = float(hit_total / query_total) if query_total > 0 else 0.0
+        return {
+            "active_handles": len(self.scoring_cache_nodes),
+            "handles_created": self.scoring_cache_handles_created,
+            "handles_released_total": self.scoring_cache_handles_released,
+            "handles_released_manual": self.scoring_cache_handles_released_manual,
+            "handles_released_expired": self.scoring_cache_handles_released_expired,
+            "handles_released_other": self.scoring_cache_handles_released_other,
+            "handles_missing_node": self.scoring_cache_handles_missing_node,
+            "lookup_queries": query_total,
+            "lookup_hits": hit_total,
+            "lookup_misses": miss_total,
+            "lookup_hit_rate": hit_rate,
+            "lookup_by_path": {
+                path: dict(stats) for path, stats in self.scoring_cache_lookup_by_path.items()
+            },
+        }
 
 def run_scheduler_process(
     server_args: ServerArgs,
