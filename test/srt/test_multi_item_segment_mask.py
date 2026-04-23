@@ -65,6 +65,18 @@ def test_segment_layout_reconstructs_dense_mask():
     np.testing.assert_array_equal(rebuilt, dense_mask)
 
 
+def test_jit_dense_mask_matches_segment_layout():
+    delimiter = 99
+    tokens = np.array([10, 11, 99, 21, 22, 99, 31, 99], dtype=np.int32)
+
+    dense_mask = FlashAttention._build_multi_item_attention_mask(tokens, delimiter)
+    jit_dense_mask = np.asarray(
+        jax.device_get(FlashAttention._build_multi_item_attention_mask_jit(tokens, delimiter))
+    )
+
+    np.testing.assert_array_equal(jit_dense_mask, dense_mask)
+
+
 def test_get_forward_metadata_selects_segment_mode_in_auto():
     attn = _build_flash_attn()
     delimiter = 99

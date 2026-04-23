@@ -150,24 +150,30 @@ class FlashAttention(AttentionBackend):
     ) -> jax.Array:
         """Vectorized mask builder optimized for XLA static compilation."""
         q_len = tokens.shape[0]
-
-        # 1. Identify delimiter positions (Query <d1> Item1 <d2> ...)
         is_delimiter = tokens == delimiter_token_id
-        block_ids = jnp.cumsum(is_delimiter)  # Query=0, d1=1, Item1=1, d2=2...
-
-        row_blocks = block_ids[:, None]
-        col_blocks = block_ids[None, :]
-
-        # 2. Basic Causal Visibility
         indices = jnp.arange(q_len)
+
+        def scan_fn(last_start, x):
+            is_d, idx = x
+            current_start = last_start
+            next_start = jnp.where(is_d, idx + 1, last_start)
+            return next_start, current_start
+
+        _, row_seg_starts = jax.lax.scan(scan_fn, jnp.int32(0), (is_delimiter, indices))
+        first_delim_idx = jnp.argmax(is_delimiter)
+        prefix_end = first_delim_idx + 1
+        row_seg_starts = jnp.where(indices <= first_delim_idx, 0, row_seg_starts)
+
+        row_positions = indices[:, None]
+        col_positions = indices[None, :]
         causal_mask = indices[:, None] >= indices[None, :]
 
-        # 3. Multi-Item Scoring Logic:
-        # A token can see a column if it is Causal AND (is Shared Prefix OR is Same Block)
-        # Shared Prefix is block_id 0 (query) and block_id 1 (first delimiter)
-        is_visible = (col_blocks <= 1) | (row_blocks == col_blocks)
+        is_prefix_row = row_positions < prefix_end
+        shared_prefix_visible = col_positions < prefix_end
+        segment_visible = col_positions >= row_seg_starts[:, None]
+        non_prefix_visible = shared_prefix_visible | segment_visible
 
-        return (causal_mask & is_visible).astype(jnp.int32)
+        return (causal_mask & jnp.where(is_prefix_row, True, non_prefix_visible)).astype(jnp.int32)
 
     @staticmethod
     def _build_multi_item_attention_mask(tokens: np.ndarray, delimiter_token_id: int) -> np.ndarray:
