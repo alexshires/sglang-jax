@@ -11,3 +11,4 @@ enable-scoring-cache: true
 multi-item-extend-batch-size: 64
 multi-item-score-from-cache-v2-items-per-step: 64
 disable-overlap-schedule: true
+enable-gc-freeze: true
