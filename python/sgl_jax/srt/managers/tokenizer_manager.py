@@ -456,14 +456,6 @@ class TokenizerManager(
         else:
             state.event.set()
 
-
-    @staticmethod
-
-
-
-
-
-
     async def _wait_one_response(
         self,
         obj: GenerateReqInput | EmbeddingReqInput,
