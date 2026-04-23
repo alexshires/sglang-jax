@@ -4,7 +4,8 @@ from sgl_jax.srt.managers.scheduler_scoring_state_mixin import SchedulerScoringS
 
 
 class _DummyScheduler(SchedulerScoringStateMixin):
-    pass
+    def _detect_score_scheduler_topology_name(self) -> str:
+        return "test-topology"
 
 
 def test_init_scoring_state_sets_cache_and_ingress_counters():
