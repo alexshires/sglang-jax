@@ -438,6 +438,32 @@ suites = {
             test_methods=["TestModelPerfTrace.test_qwen_7b_performance_trace_tp_1_daily"],
         ),
     ],
+    "score-api-test-tpu-v6e-1": [
+        TestFile("test/srt/test_score_api.py", 2),
+        TestFile("test/srt/test_score_api_core.py", 2),
+        TestFile("test/srt/test_score_api_edge_cases.py", 2),
+        TestFile("test/srt/test_score_openai_client.py", 2),
+        TestFile("test/srt/test_score_validation.py", 2),
+    ],
+    "score-api-core-test-tpu-v6e-1": [
+        TestFile("test/srt/test_score_api_core.py", 5),
+        TestFile("test/srt/test_score_api_edge_cases.py", 2),
+        TestFile("test/srt/test_score_api.py", 5),
+        TestFile("test/srt/test_score_validation.py", 2),
+    ],
+    "score-api-client-test-tpu-v6e-1": [
+        TestFile("test/srt/test_score_openai_client.py", 15),
+    ],
+    "multi-item-scoring-test-tpu-v6e-1": [
+        TestFile("test/srt/test_multi_item_positions.py", 2),
+        TestFile("test/srt/test_multi_item_chunking.py", 3),
+        TestFile("test/srt/test_multi_item_segment_mask.py", 2),
+        TestFile("test/srt/test_multi_item_scheduler_output.py", 2),
+        TestFile("test/srt/test_multi_item_regression.py", 4),
+    ],
+    "minimal-smoke-test": [
+        TestFile("python/sgl_jax/test/test_utils.py", 0.2),
+    ],
     "sglang_dependency_test": [],
     "unit-test-tpu-v6e-1": [
         TestFile("python/sgl_jax/test/kernels/quantized_linear_test.py", 0.1, runner="pytest"),
@@ -494,7 +520,14 @@ suites = {
             ["TestMoEEvalAccuracyLarge.test_mmlu"],
         ),
     ],
-    "performance-test-tpu-v6e-1": [TestFile("test/srt/test_bench_serving_dense.py", 7)],
+    "performance-test-tpu-v6e-1": [
+        TestFile("test/srt/test_bench_serving_dense.py", 7),
+        TestFile(
+            "test/srt/test_multi_item_regression.py",
+            4,
+            ["TestMultiItemRegression.test_multi_item_isolation_and_speed"],
+        ),
+    ],
     "performance-test-tpu-v6e-4": [
         TestFile(
             "test/srt/test_bench_serving_dense_tp_4.py",
@@ -511,6 +544,7 @@ suites = {
         TestFile("test/srt/openai_server/basic/test_serving_chat.py", 0.1),
         TestFile("test/srt/openai_server/basic/test_serving_completions.py", 0.1),
         TestFile("test/srt/openai_server/basic/test_openai_server.py", 1),
+        TestFile("test/srt/test_score_api.py", 2),
         TestFile("test/srt/openai_server/features/test_ebnf.py", 2),
         TestFile("test/srt/openai_server/features/test_json_mode.py", 2),
         TestFile("test/srt/openai_server/features/test_structural_tag.py", 2),
