@@ -21,8 +21,6 @@ import pathwaysutils
 import psutil
 import setproctitle
 import zmq
-from jax.sharding import NamedSharding
-from jax.sharding import PartitionSpec as P
 
 from sgl_jax.global_config import global_config
 from sgl_jax.srt.configs.model_config import ModelConfig
@@ -42,8 +40,6 @@ from sgl_jax.srt.managers.io_struct import (
     GetInternalStateReqOutput,
     PauseGenerationReqInput,
     ProfileReq,
-    ReleaseScoringCacheReqInput,
-    ReleaseScoringCacheReqOutput,
     ScoreFromCacheReqInput,
     ScoreFromCacheReqOutput,
     SetInternalStateReq,
@@ -431,8 +427,6 @@ class Scheduler(
                 (SetInternalStateReq, self.set_internal_state),
                 (PauseGenerationReqInput, self.pause_generation),
                 (ContinueGenerationReqInput, self.continue_generation),
-                (ScoreFromCacheReqInput, self.score_from_cache_v2),
-                (ReleaseScoringCacheReqInput, self.release_scoring_cache),
             ]
         )
 
@@ -447,8 +441,6 @@ class Scheduler(
                 logger.info("[Scheduler] Completes spec_decode worker precompile.")
 
         self.executor = futures.ThreadPoolExecutor(max_workers=4)
-
-
 
         # Telemetry for ingress
         self.ingress_recv_calls = 0
@@ -477,8 +469,6 @@ class Scheduler(
             "rpc_score_from_cache_v2": 0,
             "rpc_release_scoring_cache": 0,
         }
-
-
 
     def sync_pub(self):
         logger.info(
@@ -751,15 +741,7 @@ class Scheduler(
                         if bool(getattr(recv_req, "extend_from_cache", None)):
                             self.ingress_score_paths["tokenizer_extend_from_cache"] += 1
                             tokenizer_frame_paths["tokenizer_extend_from_cache"] = True
-                    elif isinstance(recv_req, ScoreFromCacheReqInput):
-                        # Score fastpath requests are sent by tokenizer manager over the
-                        # tokenizer socket.
-                        self.ingress_score_paths["rpc_score_from_cache_v2"] += 1
-                        tokenizer_frame_paths["rpc_score_from_cache_v2"] = True
-                    elif isinstance(recv_req, ReleaseScoringCacheReqInput):
-                        # Cache release requests are also sent over the tokenizer socket.
-                        self.ingress_score_paths["rpc_release_scoring_cache"] += 1
-                        tokenizer_frame_paths["rpc_release_scoring_cache"] = True
+
                 for path, seen in tokenizer_frame_paths.items():
                     if seen:
                         self.ingress_score_path_frames[path] += 1
@@ -779,13 +761,7 @@ class Scheduler(
                     "rpc_score_from_cache_v2": False,
                     "rpc_release_scoring_cache": False,
                 }
-                for recv_rpc in unpacked_reqs:
-                    if isinstance(recv_rpc, ScoreFromCacheReqInput):
-                        self.ingress_score_paths["rpc_score_from_cache_v2"] += 1
-                        rpc_frame_paths["rpc_score_from_cache_v2"] = True
-                    elif isinstance(recv_rpc, ReleaseScoringCacheReqInput):
-                        self.ingress_score_paths["rpc_release_scoring_cache"] += 1
-                        rpc_frame_paths["rpc_release_scoring_cache"] = True
+
                 for path, seen in rpc_frame_paths.items():
                     if seen:
                         self.ingress_score_path_frames[path] += 1
@@ -1881,9 +1857,124 @@ class Scheduler(
             time.monotonic() if now is None else now,
         )
 
+    def _record_score_from_cache_v2_fallback(self, reason: str):
+        self.score_from_cache_v2_fallback += 1
+        self.score_from_cache_v2_fallback_reasons[reason] = (
+            self.score_from_cache_v2_fallback_reasons.get(reason, 0) + 1
+        )
 
+    def _record_score_from_cache_v2_timing(
+        self,
+        queue_wait_s: float,
+        device_compute_s: float,
+        host_orchestration_s: float,
+    ) -> None:
+        queue_wait_s = max(0.0, float(queue_wait_s))
+        device_compute_s = max(0.0, float(device_compute_s))
+        host_orchestration_s = max(0.0, float(host_orchestration_s))
+        self.score_from_cache_v2_queue_wait_s_total += queue_wait_s
+        self.score_from_cache_v2_device_compute_s_total += device_compute_s
+        self.score_from_cache_v2_host_orchestration_s_total += host_orchestration_s
+        self.score_from_cache_v2_queue_wait_s_max = max(
+            self.score_from_cache_v2_queue_wait_s_max,
+            queue_wait_s,
+        )
+        self.score_from_cache_v2_device_compute_s_max = max(
+            self.score_from_cache_v2_device_compute_s_max,
+            device_compute_s,
+        )
+        self.score_from_cache_v2_host_orchestration_s_max = max(
+            self.score_from_cache_v2_host_orchestration_s_max,
+            host_orchestration_s,
+        )
 
+    def _score_from_cache_v2_fallback_output(
+        self,
+        recv_req: ScoreFromCacheReqInput,
+        reason: str,
+        error_msg: str = "",
+        dispatch_count: int = 0,
+        queue_wait_s: float = 0.0,
+        device_compute_s: float = 0.0,
+        host_orchestration_s: float = 0.0,
+    ) -> ScoreFromCacheReqOutput:
+        self._record_score_from_cache_v2_fallback(reason)
+        self._record_score_from_cache_v2_timing(
+            queue_wait_s=queue_wait_s,
+            device_compute_s=device_compute_s,
+            host_orchestration_s=host_orchestration_s,
+        )
+        return ScoreFromCacheReqOutput(
+            rid=recv_req.rid,
+            success=False,
+            scores=[],
+            fallback_reason=reason,
+            error_msg=error_msg,
+            dispatch_count=dispatch_count,
+            lifecycle_requests_sent=0,
+            lifecycle_results_received=0,
+            queue_wait_s=max(0.0, float(queue_wait_s)),
+            device_compute_s=device_compute_s,
+            host_orchestration_s=host_orchestration_s,
+        )
 
+    def _score_from_cache_v2_validate_items(
+        self, recv_req: ScoreFromCacheReqInput
+    ) -> tuple[bool, str, str]:
+        if not recv_req.cache_handle:
+            return False, "missing_cache_handle", "cache_handle must be non-empty."
+        if not isinstance(recv_req.items_2d, list):
+            return False, "unsupported_shape", "items_2d must be a list of token lists."
+        if not isinstance(recv_req.label_token_ids, list) or len(recv_req.label_token_ids) == 0:
+            return False, "unsupported_shape", "label_token_ids must be a non-empty list."
+        if any((not isinstance(token_id, int)) for token_id in recv_req.label_token_ids):
+            return False, "unsupported_shape", "label_token_ids must contain ints."
+        for token_id in recv_req.label_token_ids:
+            if token_id < 0 or token_id >= self.model_config.vocab_size:
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"label_token_ids must be in [0, {self.model_config.vocab_size - 1}].",
+                )
+        for idx, item in enumerate(recv_req.items_2d):
+            if not isinstance(item, list):
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"items_2d[{idx}] must be a list of token ids.",
+                )
+            if len(item) == 0:
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"items_2d[{idx}] must contain at least one token.",
+                )
+            if any((not isinstance(token_id, int)) for token_id in item):
+                return (
+                    False,
+                    "unsupported_shape",
+                    f"items_2d[{idx}] must contain ints.",
+                )
+        return True, "", ""
+
+    # Removed for PR 1a (moved to Mixin)
+
+    @staticmethod
+    def _estimate_score_from_cache_v2_words(prefix_len: int, items: list[list[int]]) -> int:
+        # Conservative host-side int32-sized tensor estimate for this chunk.
+        total_item_tokens = sum(len(item) for item in items)
+        total_fill_tokens = sum(prefix_len + len(item) for item in items)
+        max_item_len = max((len(item) for item in items), default=0)
+        bs = len(items)
+        # Terms loosely track main arrays: flat input ids, seq/prefix/extend lengths,
+        # req_to_token writes, and token-id-logprob tensors.
+        return (
+            total_item_tokens
+            + total_fill_tokens
+            + (3 * bs)
+            + (bs * max_item_len)
+            + (bs * prefix_len)
+        )
 
 
 def run_scheduler_process(
