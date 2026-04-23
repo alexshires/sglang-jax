@@ -468,6 +468,7 @@ class SchedulerScoringStateMixin:
             },
         }
 
+    @staticmethod
     def _is_score_path_req(req: Req) -> bool:
         if bool(getattr(req, "is_multi_item_scoring", False)):
             return True
@@ -481,6 +482,7 @@ class SchedulerScoringStateMixin:
         max_new_tokens = getattr(sampling_params, "max_new_tokens", None)
         return int(max_new_tokens or 0) <= 0
 
+    @staticmethod
     def _can_skip_sample_for_prefill_batch(batch: ScheduleBatch | None) -> bool:
         if batch is None or not bool(getattr(batch, "is_prefill_only", False)):
             return False
@@ -494,6 +496,7 @@ class SchedulerScoringStateMixin:
         reqs = getattr(batch, "reqs", None) or []
         return len(reqs) > 0 and all(bool(getattr(req, "cache_for_scoring", False)) for req in reqs)
 
+    @staticmethod
     def _admission_lane(req_owner, req: Req) -> str:
         if not SchedulerScoringStateMixin._is_score_path_req(req):
             return "default"
@@ -504,6 +507,7 @@ class SchedulerScoringStateMixin:
         prompt_tokens = len(getattr(req, "origin_input_ids", []) or [])
         return "short" if prompt_tokens <= threshold else "long"
 
+    @staticmethod
     def _lane_cap(req_owner, lane: str) -> int:
         if lane == "short":
             return max(
@@ -513,6 +517,7 @@ class SchedulerScoringStateMixin:
             return max(0, int(getattr(req_owner, "score_scheduler_long_lane_max_inflight", 0) or 0))
         return 0
 
+    @staticmethod
     def _lane_counter(req_owner, attr_name: str) -> dict[str, int]:
         counter = getattr(req_owner, attr_name, None)
         if not isinstance(counter, dict):
@@ -523,6 +528,7 @@ class SchedulerScoringStateMixin:
         counter.setdefault("long", 0)
         return counter
 
+    @staticmethod
     def _running_lane_counts(req_owner) -> dict[str, int]:
         counts = {"default": 0, "short": 0, "long": 0}
         running_batch = getattr(req_owner, "running_batch", None)
@@ -532,6 +538,7 @@ class SchedulerScoringStateMixin:
             counts[lane] = counts.get(lane, 0) + 1
         return counts
 
+    @staticmethod
     def _waiting_lane_counts(req_owner, waiting_queue: list[Req]) -> dict[str, int]:
         counts = {"default": 0, "short": 0, "long": 0}
         for req in waiting_queue:
@@ -539,6 +546,7 @@ class SchedulerScoringStateMixin:
             counts[lane] = counts.get(lane, 0) + 1
         return counts
 
+    @staticmethod
     def _normalize_scoring_cache_prefix_key(
         input_ids: list[int] | tuple[int, ...] | np.ndarray | None,
         extra_key: str | None,
@@ -551,6 +559,7 @@ class SchedulerScoringStateMixin:
         normalized_extra_key = "" if extra_key is None else str(extra_key)
         return normalized_extra_key, tuple(int(tok) for tok in token_list)
 
+    @staticmethod
     def _cache_admission_priority(req_owner, req: Req) -> int:
         if not bool(getattr(req_owner, "score_scheduler_cache_admission_bias_enable", False)):
             return 0
@@ -576,6 +585,7 @@ class SchedulerScoringStateMixin:
         prefix_registry = getattr(req_owner, "scoring_cache_prefix_handles_by_key", {})
         return 2 if prefix_key in prefix_registry else 0
 
+    @staticmethod
     def _iter_waiting_queue(req_owner, waiting_queue: list[Req]) -> list[Req]:
         bias_enabled = bool(
             getattr(req_owner, "score_scheduler_cache_admission_bias_enable", False)
@@ -670,12 +680,14 @@ class SchedulerScoringStateMixin:
         )
         return ordered_waiting_queue
 
+    @staticmethod
     def _score_scheduler_queue_pressure(req_owner) -> int:
         waiting_queue = getattr(req_owner, "waiting_queue", []) or []
         running_batch = getattr(req_owner, "running_batch", None)
         running_reqs = getattr(running_batch, "reqs", []) if running_batch is not None else []
         return max(0, len(waiting_queue)) + max(0, len(running_reqs))
 
+    @staticmethod
     def _score_scheduler_lane_from_prefix_len(req_owner, prefix_len: int) -> str:
         threshold = max(
             1,
