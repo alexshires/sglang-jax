@@ -6,7 +6,6 @@ import copy
 import dataclasses
 import json
 import logging
-import math
 import os
 import pickle
 import signal
@@ -58,6 +57,7 @@ from sgl_jax.srt.managers.io_struct import (
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
 )
+from sgl_jax.srt.managers.tokenizer_scoring_mixin import TokenizerScoringMixin
 from sgl_jax.srt.multimodal.tokenizer_utils import resolve_tokenizer_subdir
 from sgl_jax.srt.sampling.sampling_params import SamplingParams
 from sgl_jax.srt.server_args import PortArgs, ServerArgs
@@ -110,7 +110,7 @@ class ReqState:
     output_token_ids_logprobs_idx: list = dataclasses.field(default_factory=list)
 
 
-class TokenizerManager:
+class TokenizerManager(TokenizerScoringMixin):
     """TokenizerManager is a process that tokenizes the text."""
 
     def __init__(
@@ -206,6 +206,9 @@ class TokenizerManager:
             self.send_to_scheduler, server_args.dp_size
         )
         self.set_internal_state_communicator = _Communicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
+        self.score_from_cache_v2_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
 
@@ -1269,69 +1272,32 @@ class TokenizerManager:
                     )
 
         # Handle string or tokenized query/items
-        if isinstance(query, str) and (
-            isinstance(items, str)
-            or (isinstance(items, list) and (not items or isinstance(items[0], str)))
-        ):
-            # Both query and items are text
-            items_list = [items] if isinstance(items, str) else items
-            if item_first:
-                prompts = [f"{item}{query}" for item in items_list]
-            else:
-                prompts = [f"{query}{item}" for item in items_list]
-            batch_request = GenerateReqInput(
-                text=prompts,
-                return_logprob=True,
-                token_ids_logprob=label_token_ids,
-                stream=False,
-                sampling_params={"max_new_tokens": 1},
-            )
-        elif (
-            isinstance(query, list)
-            and isinstance(items, list)
-            and items
-            and isinstance(items[0], list)
-        ):
-            # Both query and items are token IDs
-            if item_first:
-                input_ids_list = [item + query for item in items]
-            else:
-                input_ids_list = [query + item for item in items]
-            batch_request = GenerateReqInput(
-                input_ids=input_ids_list,
-                return_logprob=True,
-                token_ids_logprob=label_token_ids,
-                stream=False,
-                sampling_params={"max_new_tokens": 1},
-            )
+        if isinstance(query, str):
+            if self.tokenizer is None:
+                raise ValueError("Tokenizer is required for text scoring.")
+            query_tokens = self.tokenizer.encode(query, add_special_tokens=False)
         else:
-            raise ValueError("Invalid combination of query/items types for score_request.")
+            query_tokens = query
 
-        results = await self.generate_request(batch_request, request).__anext__()
-        scores = []
+        item_tokens_list = items
+        if isinstance(items, str):
+            item_tokens_list = [items]
+        if item_tokens_list and isinstance(item_tokens_list[0], str):
+            if self.tokenizer is None:
+                raise ValueError("Tokenizer is required for text scoring.")
+            item_tokens_list = [
+                self.tokenizer.encode(item, add_special_tokens=False) for item in item_tokens_list
+            ]
 
-        for result in results:
-            # Get logprobs for each token
-            logprobs = {}
-            for logprob, token_id, _ in result["meta_info"].get("output_token_ids_logprobs", [])[0]:
-                if token_id in label_token_ids:
-                    logprobs[token_id] = logprob
+        # Call optimized path in mixin
+        scores = await self.score_prefill_extend(
+            query_tokens=query_tokens,
+            item_tokens_list=item_tokens_list,
+            label_token_ids=label_token_ids,
+            apply_softmax=apply_softmax,
+        )
 
-            # Get scores in order of label_token_ids
-            score_list = [logprobs.get(token_id, float("-inf")) for token_id in label_token_ids]
-
-            # Apply softmax to logprobs if needed
-            if apply_softmax:
-                import numpy as np
-
-                scores_np = np.asarray(score_list, dtype=np.float64)
-                e_x = np.exp(scores_np - np.max(scores_np))
-                score_list = (e_x / e_x.sum()).tolist()
-            else:
-                # Convert logprobs to probabilities if not using softmax
-                score_list = [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
-
-            scores.append(score_list)
+        return scores
 
         return scores
 
