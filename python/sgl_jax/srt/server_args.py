@@ -195,9 +195,9 @@ class ServerArgs:
         # update device
         if self.device:
             platform_env = os.environ.get("JAX_PLATFORMS", self.device)
-            assert (
-                self.device == platform_env
-            ), f"device {self.device} is not consistent with 'JAX_PLATFORMS' {platform_env}"
+            assert self.device == platform_env, (
+                f"device {self.device} is not consistent with 'JAX_PLATFORMS' {platform_env}"
+            )
         else:
             platform_env = os.environ.get("JAX_PLATFORMS", "")
             if platform_env != "":
@@ -1149,9 +1149,9 @@ class ServerArgs:
         # Check chunked prefill
         # Skip validation if chunked prefill is disabled (i.e., size <= 0).
         if self.chunked_prefill_size > 0:
-            assert (
-                self.chunked_prefill_size % self.page_size == 0
-            ), "chunked_prefill_size must be divisible by page_size"
+            assert self.chunked_prefill_size % self.page_size == 0, (
+                "chunked_prefill_size must be divisible by page_size"
+            )
 
         # Check LoRA configuration
         self.check_lora_server_args()
@@ -1175,9 +1175,9 @@ class ServerArgs:
         if not self.enable_lora and not self.enable_static_lora:
             return
 
-        assert not (
-            self.enable_lora and self.enable_static_lora
-        ), f"{self.enable_lora} and {self.enable_static_lora} can not be enable at the same time"
+        assert not (self.enable_lora and self.enable_static_lora), (
+            f"{self.enable_lora} and {self.enable_static_lora} can not be enable at the same time"
+        )
 
         self.enable_lora = True
 
@@ -1188,27 +1188,27 @@ class ServerArgs:
         if self.lora_target_modules:
             self.lora_target_modules = set(self.lora_target_modules)
             if "all" in self.lora_target_modules:
-                assert (
-                    len(self.lora_target_modules) == 1
-                ), "If 'all' is specified in --lora-target-modules, it should be the only module specified."
+                assert len(self.lora_target_modules) == 1, (
+                    "If 'all' is specified in --lora-target-modules, it should be the only module specified."
+                )
                 self.lora_target_modules = set(SUPPORTED_LORA_TARGET_MODULES)
 
         # Ensure sufficient information is provided for LoRA initialization.
-        assert self.lora_paths or (
-            self.max_lora_rank and self.lora_target_modules
-        ), "When no initial --lora-paths is provided, you need to specify both --max-lora-rank and --lora-target-modules for LoRA initialization."
+        assert self.lora_paths or (self.max_lora_rank and self.lora_target_modules), (
+            "When no initial --lora-paths is provided, you need to specify both --max-lora-rank and --lora-target-modules for LoRA initialization."
+        )
 
         def check_static_lora_args():
-            assert (
-                self.lora_scaling is not None
-            ), "lora_scaling is required when enable-static-lora is enabled"
+            assert self.lora_scaling is not None, (
+                "lora_scaling is required when enable-static-lora is enabled"
+            )
 
-            assert (
-                self.lora_paths is None
-            ), "lora-paths is not required when enable-static-lora is enabled"
-            assert (
-                self.max_loras_per_batch == 1
-            ), "max-loras-per-batch is required to be 1 when enable-static-lora is enabled"
+            assert self.lora_paths is None, (
+                "lora-paths is not required when enable-static-lora is enabled"
+            )
+            assert self.max_loras_per_batch == 1, (
+                "max-loras-per-batch is required to be 1 when enable-static-lora is enabled"
+            )
 
         def check_dynamic_lora_args():
             # Normalize lora_paths to List[LoRARef]
@@ -1268,9 +1268,9 @@ class ServerArgs:
 
                     # Validate max_loaded_loras
                     if self.max_loaded_loras is not None:
-                        assert (
-                            self.max_loaded_loras >= self.max_loras_per_batch
-                        ), "max_loaded_loras must be >= max_loras_per_batch"
+                        assert self.max_loaded_loras >= self.max_loras_per_batch, (
+                            "max_loaded_loras must be >= max_loras_per_batch"
+                        )
 
                     logger.info(
                         "Loaded %d LoRA adapters: %s",
