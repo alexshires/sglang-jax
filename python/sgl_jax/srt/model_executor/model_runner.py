@@ -133,7 +133,8 @@ class ModelRunner(BaseModelRunner):
             pass
 
         # Load the model
-        self.sampler = Sampler(nnx.Rngs(server_args.random_seed), mesh=self.mesh)
+        with self._mesh_context():
+            self.sampler = Sampler(nnx.Rngs(server_args.random_seed), mesh=self.mesh)
         total_device_memory = self.get_available_device_memory()
         self.init_attention_backend()
         self.load_model()
@@ -184,12 +185,23 @@ class ModelRunner(BaseModelRunner):
             )
         )
 
+    def _mesh_context(self):
+        # JAX changed mesh context helpers across versions.
+        try:
+            return jax.sharding.use_mesh(self.mesh)
+        except AttributeError:
+            try:
+                return jax.set_mesh(self.mesh)
+            except AttributeError:
+                return self.mesh
+
     def initialize_jit(self):
-        model_def, model_state = nnx.split(self.model)
-        # note export for external modification
-        self.model_state_leaves, model_state_def = jax.tree_util.tree_flatten(model_state)
-        sampler_def, sampler_state = nnx.split(self.sampler)
-        sampler_state_leaves, sampler_state_def = jax.tree_util.tree_flatten(sampler_state)
+        with self._mesh_context():
+            model_def, model_state = nnx.split(self.model)
+            # note export for external modification
+            self.model_state_leaves, model_state_def = jax.tree_util.tree_flatten(model_state)
+            sampler_def, sampler_state = nnx.split(self.sampler)
+            sampler_state_leaves, sampler_state_def = jax.tree_util.tree_flatten(sampler_state)
 
         enable_tpu_log_recorder = jax.default_backend() == "tpu" and (
             get_bool_env_var("SGLANG_JAX_ENABLE_KERNEL_LOG_RECORDER")
@@ -206,12 +218,13 @@ class ModelRunner(BaseModelRunner):
         @partial(
             jax.jit,
             donate_argnames=["token_to_kv_pool"],  # just donate KV cache
-            static_argnames=["model_state_def"],
+            static_argnames=["model_state_def", "mesh"],
             compiler_options=jit_compiler_options,
         )
         def jitted_run_model(
             model_def,
             model_state_def,
+            mesh,
             model_state_leaves,
             forward_batch,
             token_to_kv_pool,
@@ -227,10 +240,14 @@ class ModelRunner(BaseModelRunner):
         # the eager jax.random.split that would serialize the host-device pipeline.
         base_rng_key = self._sampler_base_rng
 
-        @partial(jax.jit, static_argnames=["sampler_state_def", "use_sort_for_toppk_minp"])
+        @partial(
+            jax.jit,
+            static_argnames=["sampler_state_def", "use_sort_for_toppk_minp", "mesh"],
+        )
         def jitted_sampler(
             sampler_def,
             sampler_state_def,
+            mesh,
             sampler_state_leaves,
             use_sort_for_toppk_minp,
             rng_step,
@@ -253,6 +270,7 @@ class ModelRunner(BaseModelRunner):
             return jitted_run_model(
                 model_def,
                 model_state_def,
+                self.mesh,
                 self.model_state_leaves,
                 forward_batch,
                 token_to_kv_pool,
@@ -265,6 +283,7 @@ class ModelRunner(BaseModelRunner):
             jitted_sampler,
             sampler_def,
             sampler_state_def,
+            self.mesh,
             sampler_state_leaves,
             self.use_sort_for_toppk_minp,
         )
@@ -743,11 +762,12 @@ class ModelRunner(BaseModelRunner):
         # fold_in(base_key, step) inside JIT produces a unique RNG per step.
         self._sampler_step += 1
         # Penalty application has been moved to the Sampler for better JIT performance
-        return self.jitted_sampler(
-            self._sampler_step,
-            logits_output,
-            sampling_metadata,
-        )
+        with self._mesh_context():
+            return self.jitted_sampler(
+                self._sampler_step,
+                logits_output,
+                sampling_metadata,
+            )
 
     def compute_logprobs(self, logits, token_ids: jax.Array) -> jax.Array:
         return self.jitted_compute_logprobs(logits, token_ids)

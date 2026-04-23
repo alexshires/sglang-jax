@@ -423,6 +423,7 @@ class ModelWorker:
             out_cache_loc=np.concat([valid_out_cache_loc, invalid_out_cache_loc], axis=0),
             return_logprob=False,
             return_output_logprob_only=True,
+            is_prefill_only=(mode == ForwardMode.EXTEND),
             sampling_info=(
                 SamplingBatchInfo.generate_for_precompile(bs, self.model_config.vocab_size)
                 if speculative_algotithm is None
@@ -591,7 +592,7 @@ class ModelWorker:
             )
 
         if skip_sample:
-            next_token_ids_device = None
+            next_token_ids_device = jnp.empty((0,), dtype=jnp.int32)
             new_logits_output = None
         else:
             import jax._src.test_util as jtu
@@ -606,7 +607,9 @@ class ModelWorker:
                     sampling_metadata,
                 )
                 cache_miss_count += count()
-            if model_worker_batch.return_output_logprob_only:
+            if model_worker_batch.return_output_logprob_only and (
+                new_logits_output is None or new_logits_output.next_token_logprobs is None
+            ):
                 logprobs = self.model_runner.compute_logprobs(token_logprobs, next_token_ids_device)
                 logits_output.next_token_logprobs = logprobs[: model_worker_batch.real_bs]
         if new_logits_output is not None:
