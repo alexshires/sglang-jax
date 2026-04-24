@@ -1472,6 +1472,41 @@ def get_default_block_sizes(
     sliding_window: int | None = None,
 ):
     """Get (bq_sz, bkv_sz, bq_csz, bkv_csz) by some heuristic formulas."""
+    
+    def get_env_int(name: str, default: int) -> int:
+        import os
+        val = os.getenv(name)
+        if val is None:
+            return default
+        try:
+            return int(val)
+        except ValueError:
+            logger.warning(
+                "Invalid integer env for kernel override: %s=%r. Using default=%s.",
+                name,
+                val,
+                default,
+            )
+            return default
+
+    prefix = case.symbol.upper() # 'D', 'P', or 'M'
+    bq_sz_env = get_env_int(f"SGLANG_RPA_V3_{prefix}_BQ_SZ", -1)
+    bkv_sz_env = get_env_int(f"SGLANG_RPA_V3_{prefix}_BKV_SZ", -1)
+    bq_csz_env = get_env_int(f"SGLANG_RPA_V3_{prefix}_BQ_CSZ", -1)
+    bkv_csz_env = get_env_int(f"SGLANG_RPA_V3_{prefix}_BKV_CSZ", -1)
+
+    if bq_sz_env > 0 and bkv_sz_env > 0 and bq_csz_env > 0 and bkv_csz_env > 0:
+        logger.info(
+            "Using env override for RPA v3 block sizes: case=%s, bq=%d, bkv=%d, bq_csz=%d, bkv_csz=%d",
+            case.symbol, bq_sz_env, bkv_sz_env, bq_csz_env, bkv_csz_env
+        )
+        return {
+            "bq_sz": bq_sz_env,
+            "bkv_sz": bkv_sz_env,
+            "bq_csz": bq_csz_env,
+            "bkv_csz": bkv_csz_env,
+        }
+
     tpu_version = get_tpu_version()
 
     kv_packing = get_dtype_packing(kv_dtype)
