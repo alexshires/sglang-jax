@@ -480,6 +480,8 @@ class SchedulerScoringStateMixin:
 
     @staticmethod
     def _is_score_path_req(req: Req) -> bool:
+        if bool(getattr(req, "is_multi_item_scoring", False)):
+            return True
         if bool(getattr(req, "cache_for_scoring", False)):
             return True
         if bool(getattr(req, "extend_from_cache", None)):

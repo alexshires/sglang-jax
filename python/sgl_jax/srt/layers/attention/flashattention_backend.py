@@ -12,6 +12,9 @@ from jax.tree_util import register_pytree_node_class
 from sgl_jax.srt.kernels.ragged_paged_attention.ragged_paged_attention_v3 import (
     ragged_paged_attention as ragged_paged_attention_v3,
 )
+from sgl_jax.srt.kernels.ragged_paged_attention.ragged_paged_attention import (
+    ragged_paged_attention as ragged_paged_attention_v2,
+)
 from sgl_jax.srt.layers.attention.base_attn_backend import AttentionBackend
 from sgl_jax.srt.layers.radix_attention import RadixAttention
 from sgl_jax.srt.managers.schedule_batch import ModelWorkerBatch
@@ -518,21 +521,46 @@ class FlashAttention(AttentionBackend):
             other_args = args[4:]
 
             # Call fused KV kernel with head interleaving
-            result, updated_kv_cache_fused = ragged_paged_attention_v3(
-                queries,
-                keys,
-                values,
-                kv_cache_fused,
-                *other_args,
-                causal=causal,
-                sm_scale=scale,
-                sliding_window=layer.sliding_window_size,
-                soft_cap=layer.logit_cap,
-                xai_temperature_len=(
-                    layer.xai_temperature_len if layer.xai_temperature_len > 0 else None
-                ),
-                vmem_limit_bytes=self.vmem_limit_bytes,
-            )
+            import os
+            rpa_version = os.getenv("SGLANG_RPA_VERSION", "3")
+            
+            if rpa_version == "2":
+                # Call v2 kernel, excluding attention sink (the 11th positional arg)
+                # Reshape kv_cache_fused from 5D to 4D to match v2 expectation
+                s = kv_cache_fused.shape
+                kv_cache_fused_4d = kv_cache_fused.reshape(s[0], s[1], s[2] * s[3], s[4])
+                
+                result, updated_kv_cache_fused_4d = ragged_paged_attention_v2(
+                    queries,
+                    keys,
+                    values,
+                    kv_cache_fused_4d,
+                    *other_args[:6],
+                    causal=causal,
+                    sm_scale=scale,
+                    sliding_window=layer.sliding_window_size,
+                    soft_cap=layer.logit_cap,
+                    vmem_limit_bytes=self.vmem_limit_bytes,
+                )
+                # Reshape back to 5D
+                updated_kv_cache_fused = updated_kv_cache_fused_4d.reshape(s)
+            else:
+                # Call v3 kernel
+                result, updated_kv_cache_fused = ragged_paged_attention_v3(
+                    queries,
+                    keys,
+                    values,
+                    kv_cache_fused,
+                    *other_args,
+                    causal=causal,
+                    sm_scale=scale,
+                    sliding_window=layer.sliding_window_size,
+                    soft_cap=layer.logit_cap,
+                    xai_temperature_len=(
+                        layer.xai_temperature_len if layer.xai_temperature_len > 0 else None
+                    ),
+                    vmem_limit_bytes=self.vmem_limit_bytes,
+                )
 
             return result, updated_kv_cache_fused
 

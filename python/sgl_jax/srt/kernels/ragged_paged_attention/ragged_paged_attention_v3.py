@@ -2011,13 +2011,13 @@ def ragged_paged_attention(
         distribution = distribution.at[1].set(distribution[0])
 
     # Decode-only
-    q, kv_cache_fused_processed = run_rpa_kernel(
-        q,
-        kv_cache_fused_processed,
-        **_prepare_block_sizes(d_block_sizes, RpaCase.DECODE),
-        static_q_len=1,
-        case=RpaCase.DECODE,
-    )
+    # q, kv_cache_fused_processed = run_rpa_kernel(
+    #     q,
+    #     kv_cache_fused_processed,
+    #     **_prepare_block_sizes(d_block_sizes, RpaCase.DECODE),
+    #     static_q_len=1,
+    #     case=RpaCase.DECODE,
+    # )
 
     if chunk_prefill_size is not None:
         # Prefill-only
