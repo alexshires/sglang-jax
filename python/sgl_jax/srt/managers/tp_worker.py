@@ -423,6 +423,7 @@ class ModelWorker:
             out_cache_loc=np.concat([valid_out_cache_loc, invalid_out_cache_loc], axis=0),
             return_logprob=False,
             return_output_logprob_only=True,
+            is_prefill_only=(mode == ForwardMode.EXTEND),
             sampling_info=(
                 SamplingBatchInfo.generate_for_precompile(bs, self.model_config.vocab_size)
                 if speculative_algotithm is None
@@ -443,9 +444,9 @@ class ModelWorker:
             top_logprobs_nums=None,
             token_ids_logprobs=None,
             extend_logprob_start_lens=None,
+            extend_start_loc=(np.zeros(bs, dtype=np.int32) if mode == ForwardMode.EXTEND else None),
+            temp_scaled_logprobs=False,
             capture_hidden_mode=capture_hidden_mode,
-            spec_algorithm=speculative_algotithm,
-            lora_ids=lora_ids,  # Already set to [None] * bs above
             apply_for_deepstack=(
                 mode == ForwardMode.EXTEND
                 and self.server_args.multimodal
@@ -465,6 +466,8 @@ class ModelWorker:
                 and has_deepstack_visual_embedding
                 else None
             ),
+            spec_algorithm=speculative_algotithm,
+            lora_ids=lora_ids,  # Already set to [None] * bs above
         )
 
     def get_model_runner(self):
@@ -571,6 +574,48 @@ class ModelWorker:
 
         self.dump_topk_ids(layers_topk_ids, model_worker_batch)
 
+        if forward_metadata is None:
+            forward_metadata = self.worker.model_runner.attn_backend.get_forward_metadata(
+                model_worker_batch
+            )
+
+        if sampling_metadata is None:
+            sampling_metadata = SamplingMetadata.from_model_worker_batch(
+                model_worker_batch,
+                len(model_worker_batch.seq_lens) - model_worker_batch.real_bs,
+                self.mesh,
+                self.model_config.vocab_size,
+            )
+
+        self.model_runner.attn_backend.forward_metadata = forward_metadata
+        logits_output, cache_miss_count, layers_topk_ids = self.model_runner.forward(
+            forward_batch,
+            logits_metadata=LogitsMetadata.from_model_worker_batch(model_worker_batch, self.mesh),
+        )
+
+        self.dump_topk_ids(layers_topk_ids, model_worker_batch)
+
+        # if launch_done is not None:
+        #     launch_done.set()
+
+        # self.sync_queue.put(
+        #     (
+        #         layers_topk_ids,
+        #         model_worker_batch,
+        #     )
+        # )
+
+        if not skip_sample:
+            self.dump_topk_ids(layers_topk_ids, model_worker_batch)
+            
+            self.sync_queue.put(
+                (
+                    layers_topk_ids,
+                    model_worker_batch,
+                )
+            )
+
+        # Keep launch_done outside, as the scheduler might still rely on this event
         if launch_done is not None:
             launch_done.set()
 
@@ -606,7 +651,9 @@ class ModelWorker:
                     sampling_metadata,
                 )
                 cache_miss_count += count()
-            if model_worker_batch.return_output_logprob_only:
+            if model_worker_batch.return_output_logprob_only and (
+                new_logits_output is None or new_logits_output.next_token_logprobs is None
+            ):
                 logprobs = self.model_runner.compute_logprobs(token_logprobs, next_token_ids_device)
                 logits_output.next_token_logprobs = logprobs[: model_worker_batch.real_bs]
         if new_logits_output is not None:

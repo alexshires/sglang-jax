@@ -126,7 +126,10 @@ class ServerArgs:
     disable_radix_cache: bool = False
     allow_auto_truncate: bool = False
     enable_tokenizer_batch_encode: bool = False
+    enable_tokenizer_batch_send: bool = False
     disable_overlap_schedule: bool = False
+    enable_gc_freeze: bool = False
+    gc_freeze_rollback: bool = False
     enable_precision_tracer: bool = False
 
     # Kernel backend
@@ -159,6 +162,25 @@ class ServerArgs:
 
     # For sampling
     use_sort_for_toppk_minp: bool = False
+
+    # Scoring configuration
+    # Maximum number of items allowed in a single multi-item scoring request.
+    max_multi_item_count: int = 512
+    # Prefill+extend scoring path.
+    multi_item_enable_prefill_extend: bool = True
+    multi_item_extend_batch_size: int = 32
+    multi_item_prefill_extend_cache_timeout: float = 60.0
+    # Experimental score-from-cache fastpath v2.
+    # This path uses a dedicated internal score RPC with chunked worker execution.
+    multi_item_enable_score_from_cache_v2: bool = True
+    # Number of items executed per internal fastpath step.
+    multi_item_score_from_cache_v2_items_per_step: int = 64
+    # Compute score probabilities from label-only logprobs in fastpath v2.
+    multi_item_score_label_only_logprob: bool = False
+    # Emit per-request score-path metrics to logs.
+    multi_item_score_fastpath_log_metrics: bool = False
+    # Allow radix cache specifically for scoring requests.
+    enable_scoring_cache: bool = False
 
     # LoRA
     enable_lora: bool | None = None
@@ -836,6 +858,27 @@ class ServerArgs:
             help="Enable batch tokenization for improved performance when processing multiple text inputs. Do not use with image inputs, pre-tokenized input_ids, or input_embeds.",
         )
         parser.add_argument(
+            "--enable-tokenizer-batch-send",
+            action="store_true",
+            help=(
+                "Send tokenized batch requests to scheduler as a single ZMQ payload. "
+                "Only affects batch inputs after tokenization."
+            ),
+        )
+        parser.add_argument(
+            "--enable-gc-freeze",
+            action="store_true",
+            help="Freeze long-lived Python GC objects after scheduler warmup/precompile.",
+        )
+        parser.add_argument(
+            "--gc-freeze-rollback",
+            action="store_true",
+            help=(
+                "Immediately rollback gc.freeze via gc.unfreeze after warmup/precompile. "
+                "Useful as a safety valve when validating freeze behavior."
+            ),
+        )
+        parser.add_argument(
             "--enable-precision-tracer",
             action="store_true",
             help="Enable precision tracer for debugging tensor values. May have performance impact.",
@@ -1010,6 +1053,64 @@ class ServerArgs:
         )
 
         parser.add_argument(
+            "--max-multi-item-count",
+            type=int,
+            default=ServerArgs.max_multi_item_count,
+            help="Maximum number of items allowed in a single multi-item scoring request.",
+        )
+        parser.add_argument(
+            "--multi-item-enable-prefill-extend",
+            action="store_true",
+            help="Enable prefill+extend scoring strategy for multi-item scoring. On by default.",
+            default=True,
+        )
+        parser.add_argument(
+            "--multi-item-extend-batch-size",
+            type=int,
+            default=ServerArgs.multi_item_extend_batch_size,
+            help="Batch size for extend requests in prefill+extend scoring.",
+        )
+        parser.add_argument(
+            "--multi-item-prefill-extend-cache-timeout",
+            type=float,
+            default=ServerArgs.multi_item_prefill_extend_cache_timeout,
+            help=(
+                "TTL in seconds for prefill+extend cached query handles. "
+                "Set 0 to disable automatic expiration."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-enable-score-from-cache-v2",
+            action="store_true",
+            help="Enable v2 score-from-cache fastpath. On by default.",
+            default=True,
+        )
+        parser.add_argument(
+            "--multi-item-score-from-cache-v2-items-per-step",
+            type=int,
+            default=ServerArgs.multi_item_score_from_cache_v2_items_per_step,
+            help="Internal chunk size for score-from-cache v2 fastpath.",
+        )
+        parser.add_argument(
+            "--multi-item-score-label-only-logprob",
+            action="store_true",
+            help=(
+                "Use label-only logprob math in score-from-cache v2 "
+                "(logit[label]-logsumexp(logits))."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-fastpath-log-metrics",
+            action="store_true",
+            help="Emit per-/v1/score path metrics including fastpath counters and timings.",
+        )
+        parser.add_argument(
+            "--enable-scoring-cache",
+            action="store_true",
+            help="Enable radix cache specifically for scoring requests.",
+        )
+
+        parser.add_argument(
             "--multimodal",
             action="store_true",
             help="Enable multimodal HTTP server.",
@@ -1155,6 +1256,39 @@ class ServerArgs:
                 "Please pass --disable-overlap-schedule when using --speculative-algorithm."
             )
 
+        # Check multi-item scoring constraints
+        assert self.max_multi_item_count > 0, "--max-multi-item-count must be positive"
+        assert (
+            self.multi_item_extend_batch_size > 0
+        ), "--multi-item-extend-batch-size must be positive"
+        assert (
+            self.multi_item_prefill_extend_cache_timeout >= 0
+        ), "--multi-item-prefill-extend-cache-timeout must be non-negative"
+        assert (
+            self.multi_item_score_from_cache_v2_items_per_step > 0
+        ), "--multi-item-score-from-cache-v2-items-per-step must be positive"
+
+        if self.multi_item_enable_score_from_cache_v2:
+            assert self.multi_item_enable_prefill_extend, (
+                "score-from-cache v2 requires prefill+extend to be enabled. "
+                "Please pass --multi-item-enable-prefill-extend."
+            )
+            assert self.enable_scoring_cache, (
+                "score-from-cache v2 requires scoring cache. "
+                "Please pass --enable-scoring-cache."
+            )
+        if self.multi_item_score_label_only_logprob:
+            assert self.multi_item_enable_score_from_cache_v2, (
+                "label-only logprob mode requires score-from-cache v2. "
+                "Please pass --multi-item-enable-score-from-cache-v2."
+            )
+
+        if self.ep_num_redundant_experts < 0:
+            raise ValueError("ep_num_redundant_experts must be non-negative")
+
+        if self.enable_expert_balance_debug and self.expert_balance_segment_counter <= 0:
+            raise ValueError("expert_balance_segment_counter must be positive")
+
     def check_lora_server_args(self):
         """Validate and normalize LoRA-related server arguments."""
         # Import LoRARef here to avoid circular imports
@@ -1207,68 +1341,64 @@ class ServerArgs:
             if self.lora_paths is not None:
                 normalized_lora_refs = []
 
-                # Normalize lora_paths to List[LoRARef]
-                if self.lora_paths is not None:
-                    normalized_lora_refs = []
-
-                    if isinstance(self.lora_paths, dict):
-                        # Dict format: {"name": "path", ...}
-                        for name, path in self.lora_paths.items():
-                            if name == "0":
-                                raise ValueError(
-                                    "This key(0) is a server-reserved symbol, used for requests that do not go through LoRA."
-                                )
-                            normalized_lora_refs.append(
-                                LoRARef(lora_name=name, lora_path=path, pinned=True)
+                if isinstance(self.lora_paths, dict):
+                    # Dict format: {"name": "path", ...}
+                    for name, path in self.lora_paths.items():
+                        if name == "0":
+                            raise ValueError(
+                                "This key(0) is a server-reserved symbol, used for requests that do not go through LoRA."
                             )
-                    elif isinstance(self.lora_paths, list):
-                        for item in self.lora_paths:
-                            if isinstance(item, str):
-                                # String format: "name=path" or just "path"
-                                if "=" in item:
-                                    name, path = item.split("=", 1)
-                                    normalized_lora_refs.append(
-                                        LoRARef(
-                                            lora_name=name.strip(),
-                                            lora_path=path.strip(),
-                                            pinned=True,
-                                        )
-                                    )
-                                else:
-                                    # Use basename as name
-                                    import os
-
-                                    name = os.path.basename(item.rstrip("/"))
-                                    normalized_lora_refs.append(
-                                        LoRARef(lora_name=name, lora_path=item, pinned=True)
-                                    )
-                            elif isinstance(item, dict):
-                                # Dict format in list: {"name": "adapter1", "path": "/path/to/adapter"}
-                                name = item.get("name") or item.get("lora_name")
-                                path = item.get("path") or item.get("lora_path")
-                                pinned = item.get("pinned", True)
+                        normalized_lora_refs.append(
+                            LoRARef(lora_name=name, lora_path=path, pinned=True)
+                        )
+                elif isinstance(self.lora_paths, list):
+                    for item in self.lora_paths:
+                        if isinstance(item, str):
+                            # String format: "name=path" or just "path"
+                            if "=" in item:
+                                name, path = item.split("=", 1)
                                 normalized_lora_refs.append(
-                                    LoRARef(lora_name=name, lora_path=path, pinned=pinned)
+                                    LoRARef(
+                                        lora_name=name.strip(),
+                                        lora_path=path.strip(),
+                                        pinned=True,
+                                    )
                                 )
-                            elif hasattr(item, "lora_name"):
-                                # Already a LoRARef object
-                                normalized_lora_refs.append(item)
                             else:
-                                raise ValueError(f"Unsupported lora_paths item format: {item}")
+                                # Use basename as name
+                                import os
 
-                    self.lora_paths = normalized_lora_refs
+                                name = os.path.basename(item.rstrip("/"))
+                                normalized_lora_refs.append(
+                                    LoRARef(lora_name=name, lora_path=item, pinned=True)
+                                )
+                        elif isinstance(item, dict):
+                            # Dict format in list: {"name": "adapter1", "path": "/path/to/adapter"}
+                            name = item.get("name") or item.get("lora_name")
+                            path = item.get("path") or item.get("lora_path")
+                            pinned = item.get("pinned", True)
+                            normalized_lora_refs.append(
+                                LoRARef(lora_name=name, lora_path=path, pinned=pinned)
+                            )
+                        elif hasattr(item, "lora_name"):
+                            # Already a LoRARef object
+                            normalized_lora_refs.append(item)
+                        else:
+                            raise ValueError(f"Unsupported lora_paths item format: {item}")
 
-                    # Validate max_loaded_loras
-                    if self.max_loaded_loras is not None:
-                        assert (
-                            self.max_loaded_loras >= self.max_loras_per_batch
-                        ), "max_loaded_loras must be >= max_loras_per_batch"
+                self.lora_paths = normalized_lora_refs
 
-                    logger.info(
-                        "Loaded %d LoRA adapters: %s",
-                        len(self.lora_paths),
-                        [ref.lora_name for ref in self.lora_paths],
-                    )
+                # Validate max_loaded_loras
+                if self.max_loaded_loras is not None:
+                    assert (
+                        self.max_loaded_loras >= self.max_loras_per_batch
+                    ), "max_loaded_loras must be >= max_loras_per_batch"
+
+                logger.info(
+                    "Loaded %d LoRA adapters: %s",
+                    len(self.lora_paths),
+                    [ref.lora_name for ref in self.lora_paths],
+                )
 
         if self.enable_static_lora:
             check_static_lora_args()
