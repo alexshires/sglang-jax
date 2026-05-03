@@ -227,6 +227,40 @@ class ModelRunner(BaseModelRunner):
             with LoraBatchContext.set_batch(forward_batch):
                 return model(forward_batch, token_to_kv_pool, logits_metadata)
 
+        has_transformer_body = hasattr(self.model, "model")
+        body_returns_topk_ids = (
+            has_transformer_body and "moe" in type(self.model.model).__name__.lower()
+        )
+
+        @partial(
+            jax.jit,
+            donate_argnames=["token_to_kv_pool"],  # just donate KV cache
+            static_argnames=["model_state_def", "mesh", "body_returns_topk_ids"],
+            compiler_options=jit_compiler_options,
+        )
+        def jitted_run_prefill_body_only(
+            model_def,
+            model_state_def,
+            mesh,
+            model_state_leaves,
+            body_returns_topk_ids,
+            forward_batch,
+            token_to_kv_pool,
+        ):
+            model_state = jax.tree_util.tree_unflatten(model_state_def, model_state_leaves)
+            model = nnx.merge(model_def, model_state)
+            with LoraBatchContext.set_batch(forward_batch):
+                body_outputs = model.model(forward_batch, token_to_kv_pool)
+            if body_returns_topk_ids:
+                _, layers_kv_fused, layers_topk_ids = body_outputs
+            elif len(body_outputs) == 4:
+                _, _, layers_kv_fused, _ = body_outputs
+                layers_topk_ids = None
+            else:
+                _, layers_kv_fused, _ = body_outputs
+                layers_topk_ids = None
+            return layers_kv_fused, layers_topk_ids
+
         # Capture base RNG key as a constant in the JIT closure.
         # fold_in(constant, dynamic_step) is computed inside JIT, avoiding
         # the eager jax.random.split that would serialize the host-device pipeline.
@@ -264,7 +298,24 @@ class ModelRunner(BaseModelRunner):
                 logits_metadata,
             )
 
+        def run_prefill_body_only_wrapper(forward_batch):
+            if not has_transformer_body:
+                raise NotImplementedError(
+                    "Prefill cache body-only forward requires a causal LM with a .model body"
+                )
+            token_to_kv_pool = self.token_to_kv_pool
+            return jitted_run_prefill_body_only(
+                model_def,
+                model_state_def,
+                self.mesh,
+                self.model_state_leaves,
+                body_returns_topk_ids,
+                forward_batch,
+                token_to_kv_pool,
+            )
+
         self.jitted_run_model = run_model_wrapper
+        self.jitted_run_prefill_body_only = run_prefill_body_only_wrapper
 
         self.jitted_sampler = partial(
             jitted_sampler,
@@ -836,6 +887,39 @@ class ModelRunner(BaseModelRunner):
                 raise ValueError(f"Invalid forward mode: {forward_batch.forward_mode}")
 
         return ret
+
+    def forward_prefill_body_only(
+        self,
+        forward_batch: ForwardBatch,
+    ) -> tuple[None, int, list[jax.Array] | None]:
+        self.forward_pass_id += 1
+        precision_tracer.start_batch_trace(forward_batch.bid)
+        precision_tracer.set_current_forward_pass_id(self.forward_pass_id)
+        with jax.profiler.TraceAnnotation("_forward_prefill_body_only_raw"):
+            return self._forward_prefill_body_only_raw(forward_batch)
+
+    def _forward_prefill_body_only_raw(
+        self,
+        forward_batch: ForwardBatch,
+    ) -> tuple[None, int, list[jax.Array] | None]:
+        try:
+            ctx = jax.sharding.use_mesh(self.mesh)
+        except AttributeError:
+            try:
+                ctx = jax.set_mesh(self.mesh)
+            except AttributeError:
+                ctx = self.mesh
+        with ctx:
+            cache_miss_count = 0
+            import jax._src.test_util as jtu
+
+            with jtu.count_pjit_cpp_cache_miss() as count:
+                layers_kv_fused, layers_topk_ids = self.jitted_run_prefill_body_only(
+                    forward_batch
+                )
+                cache_miss_count = count()
+            self._set_kv_cache_after_forward(layers_kv_fused)
+        return None, cache_miss_count, layers_topk_ids
 
     def sample(
         self,
