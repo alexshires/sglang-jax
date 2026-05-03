@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import logging
 import math
+import time
 from typing import Any
 
 from sgl_jax.srt.managers.io_struct import (
@@ -50,6 +51,15 @@ class ReqState:
     input_token_ids_logprobs_idx: list = dataclasses.field(default_factory=list)
     output_token_ids_logprobs_val: list = dataclasses.field(default_factory=list)
     output_token_ids_logprobs_idx: list = dataclasses.field(default_factory=list)
+
+@dataclasses.dataclass
+class _ReusablePrefillCacheEntry:
+    key: tuple[int, ...]
+    ref_count: int = 0
+    generation: int = 0
+    last_used: float = dataclasses.field(default_factory=time.monotonic)
+    handle: str | None = None
+    future: asyncio.Task[str] | None = None
 
 
 def _stable_softmax(values: list[float]) -> list[float]:

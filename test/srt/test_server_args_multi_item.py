@@ -49,6 +49,28 @@ def test_prefill_cache_body_only_args_parse():
     assert server_args.disable_overlap_schedule is True
 
 
+def test_reusable_prefill_cache_args_parse():
+    parser = argparse.ArgumentParser()
+    ServerArgs.add_cli_args(parser)
+    args = parser.parse_args(
+        [
+            "--model-path",
+            "dummy-model",
+            "--enable-scoring-cache",
+            "--multi-item-enable-prefill-extend",
+            "--multi-item-score-reuse-prefill-cache-by-prefix",
+            "--multi-item-score-reuse-prefill-cache-ttl",
+            "12.5",
+            "--multi-item-score-reuse-prefill-cache-max-entries",
+            "32",
+        ]
+    )
+    server_args = ServerArgs.from_cli_args(args)
+    assert server_args.multi_item_score_reuse_prefill_cache_by_prefix is True
+    assert server_args.multi_item_score_reuse_prefill_cache_ttl == 12.5
+    assert server_args.multi_item_score_reuse_prefill_cache_max_entries == 32
+
+
 def test_prefill_extend_requires_scoring_cache():
     server_args = ServerArgs(
         model_path="dummy-model",
@@ -209,3 +231,52 @@ def test_prefill_body_only_unpack_handles_common_model_shapes():
 def test_prefill_body_only_unpack_rejects_unknown_shape():
     with pytest.raises(ValueError, match="expected model body to return 2, 3, or 4"):
         _unpack_prefill_body_only_outputs((object(),), body_returns_topk_ids=False)
+
+
+def test_reusable_prefill_cache_requires_prefill_extend():
+    server_args = ServerArgs(
+        model_path="dummy-model",
+        enable_scoring_cache=True,
+        multi_item_score_reuse_prefill_cache_by_prefix=True,
+        multi_item_enable_prefill_extend=False,
+    )
+    with pytest.raises(AssertionError, match=r"prefill\+extend"):
+        server_args.check_server_args()
+
+
+def test_reusable_prefill_cache_requires_scoring_cache():
+    server_args = ServerArgs(
+        model_path="dummy-model",
+        enable_scoring_cache=False,
+        multi_item_enable_prefill_extend=True,
+        multi_item_score_reuse_prefill_cache_by_prefix=True,
+    )
+    with pytest.raises(AssertionError, match="scoring cache"):
+        server_args.check_server_args()
+
+
+def test_reusable_prefill_cache_args_validation():
+    server_args = ServerArgs(
+        model_path="dummy-model",
+        multi_item_score_reuse_prefill_cache_ttl=-1.0,
+    )
+    with pytest.raises(AssertionError, match="ttl must be non-negative"):
+        server_args.check_server_args()
+
+    server_args = ServerArgs(
+        model_path="dummy-model",
+        multi_item_score_reuse_prefill_cache_max_entries=0,
+    )
+    with pytest.raises(AssertionError, match="max-entries must be positive"):
+        server_args.check_server_args()
+
+    server_args = ServerArgs(
+        model_path="dummy-model",
+        enable_scoring_cache=True,
+        multi_item_enable_prefill_extend=True,
+        multi_item_score_reuse_prefill_cache_by_prefix=True,
+        multi_item_prefill_extend_cache_timeout=1.0,
+        multi_item_score_reuse_prefill_cache_ttl=2.0,
+    )
+    with pytest.raises(AssertionError, match="must not exceed"):
+        server_args.check_server_args()
