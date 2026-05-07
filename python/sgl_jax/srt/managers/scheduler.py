@@ -3,6 +3,7 @@
 import concurrent.futures as futures
 import dataclasses
 import faulthandler
+import gc
 import json
 import logging
 import os
@@ -101,6 +102,39 @@ GRAMMAR_TIMEOUT = float(os.environ.get("SGLANG_GRAMMAR_TIMEOUT", 300))
 
 class SyncError(Exception):
     pass
+
+
+def _maybe_freeze_gc_after_warmup(server_args: ServerArgs) -> None:
+    if not getattr(server_args, "enable_gc_freeze", False):
+        return
+    if not hasattr(gc, "freeze"):
+        logger.warning("GC freeze requested but gc.freeze is unavailable.")
+        return
+    try:
+        freeze_before = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+        collected = gc.collect()
+        gc.freeze()
+        freeze_after = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+        logger.info(
+            "Applied gc.freeze after warmup/precompile. collected=%d freeze_before=%d freeze_after=%d gc_count=%s",
+            collected,
+            freeze_before,
+            freeze_after,
+            gc.get_count(),
+        )
+        if getattr(server_args, "gc_freeze_rollback", False):
+            if hasattr(gc, "unfreeze"):
+                gc.unfreeze()
+                rollback_count = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
+                logger.warning(
+                    "Rolled back gc.freeze. freeze_count_after_rollback=%d gc_count=%s",
+                    rollback_count,
+                    gc.get_count(),
+                )
+            else:
+                logger.warning("GC freeze rollback requested but gc.unfreeze is unavailable.")
+    except Exception:
+        logger.exception("Failed to apply gc.freeze after warmup/precompile.")
 
 
 class SendDataError(Exception):
@@ -2051,6 +2085,7 @@ def run_scheduler_process(
     # Create a scheduler and run the event loop
     try:
         scheduler = Scheduler(server_args, port_args)
+        _maybe_freeze_gc_after_warmup(server_args)
         pipe_writer.send(
             {
                 "status": "ready",
@@ -2078,6 +2113,7 @@ def run_scheduler_loop_thread_after_create(
     # Create a scheduler and run the event loop
     try:
         scheduler = Scheduler(server_args, port_args)
+        _maybe_freeze_gc_after_warmup(server_args)
         scheduler_thread = threading.Thread(
             target=scheduler_loop_after_create,
             args=(server_args, scheduler),

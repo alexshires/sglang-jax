@@ -157,6 +157,8 @@ class ServerArgs:
     enable_deterministic_sampling: bool = False
     enable_single_process: bool = False
     enable_nan_detection: bool = False
+    enable_gc_freeze: bool = False
+    gc_freeze_rollback: bool = False
 
     # For sampling
     use_sort_for_toppk_minp: bool = False
@@ -1032,6 +1034,16 @@ class ServerArgs:
             "--enable-single-process",
             action="store_true",
             help="Enable run the engine with single process.",
+        )
+        parser.add_argument(
+            "--enable-gc-freeze",
+            action="store_true",
+            help="Call gc.freeze after scheduler warmup/precompile to reduce GC overhead.",
+        )
+        parser.add_argument(
+            "--gc-freeze-rollback",
+            action="store_true",
+            help="Immediately unfreeze after gc.freeze; useful for validating rollback behavior.",
         )
 
         # For sampling
