@@ -36,14 +36,6 @@ class SchedulerScoringDirectMixin:
 
             seq_lens = extend_lens + prefix_len
             max_seq_len = int(np.max(seq_lens))
-            direct_token_ids_logprob_only_chunk_size = (
-                self._score_from_cache_v2_resolve_direct_token_ids_logprob_only_chunk_size(
-                    direct_token_ids_logprob_only=direct_token_ids_logprob_only,
-                    real_bs=real_bs,
-                    prefix_len=prefix_len,
-                    max_seq_len=max_seq_len,
-                )
-            )
 
             if self.page_size == 1:
                 out_cache_loc = alloc_token_slots(self.tree_cache, extend_num_tokens)
@@ -186,16 +178,14 @@ class SchedulerScoringDirectMixin:
                 extend_prefix_lens=extend_prefix_lens_cpu,
                 extend_logprob_start_lens=extend_logprob_start_lens,
                 extend_input_logprob_token_ids=np.empty((0,), dtype=np.int32),
+                logits_indices=np.cumsum(extend_seq_lens_cpu, dtype=np.int32) - 1,
                 real_bs=real_bs,
+                real_bs_per_dp=[real_bs] + [0] * max(0, self.dp_size - 1),
+                logits_indices_selector=np.arange(real_bs, dtype=np.int32),
+                dp_size=self.dp_size,
+                per_dp_bs_size=padded_bs,
                 lora_ids=["0"] * padded_bs,
                 capture_hidden_mode=CaptureHiddenMode.NULL,
-                next_token_token_ids_logprob_only=direct_token_ids_logprob_only,
-                next_token_token_ids_logprob_only_chunk_size=direct_token_ids_logprob_only_chunk_size,
-                next_token_shared_token_ids=(
-                    np.asarray(label_token_ids, dtype=np.int32)
-                    if direct_token_ids_logprob_only
-                    else None
-                ),
             )
 
             forward_start = time.perf_counter()
