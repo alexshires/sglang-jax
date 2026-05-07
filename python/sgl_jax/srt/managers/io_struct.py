@@ -84,11 +84,6 @@ class BatchStrOut:
 
     # The routed experts for each output token
     output_routed_experts: list[str | None] = None
-    # Optional scheduler-side timings for request instrumentation.
-    scheduler_queue_wait_s: list[float] | None = None
-    scheduler_device_compute_s: list[float] | None = None
-    scheduler_host_overhead_s: list[float] | None = None
-    scheduler_dispatch_count: list[int] | None = None
 
 
 @dataclass
@@ -135,11 +130,6 @@ class BatchTokenIDOut:
 
     # The routed experts for each output token
     output_routed_experts: list[np.ndarray] = None
-    # Optional scheduler-side timings for request instrumentation.
-    scheduler_queue_wait_s: list[float] | None = None
-    scheduler_device_compute_s: list[float] | None = None
-    scheduler_host_overhead_s: list[float] | None = None
-    scheduler_dispatch_count: list[int] | None = None
 
 
 @dataclass
@@ -217,7 +207,7 @@ class PauseGenerationReqInput(BaseReq):
     def __post_init__(self):
         allowed = ["abort", "retract", "in_place"]
         if self.mode not in allowed:
-            raise ValueError(f"Invalid mode: {self.mode!r}. Expected one of {allowed}.")
+            raise ValueError(f"Invalid mode: {self.mode!r}. " f"Expected one of {allowed}.")
 
 
 @dataclass
@@ -431,8 +421,6 @@ class GenerateReqInput:
             self.return_routed_experts = False
         if self.cache_for_scoring is None:
             self.cache_for_scoring = False
-        if self.extend_from_cache is None:
-            self.extend_from_cache = None
 
     def _handle_parallel_sampling(self):
         """Handle parallel sampling parameters and adjust batch size if needed."""
