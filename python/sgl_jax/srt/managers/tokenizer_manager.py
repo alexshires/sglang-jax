@@ -6,7 +6,6 @@ import copy
 import dataclasses
 import json
 import logging
-import math
 import os
 import pickle
 import signal
@@ -20,8 +19,6 @@ from http import HTTPStatus
 from typing import Any
 
 import fastapi
-import jax
-import jax.numpy as jnp
 import uvloop
 import zmq
 import zmq.asyncio
@@ -30,6 +27,12 @@ from fastapi import BackgroundTasks
 from sgl_jax.srt.configs.model_config import ModelConfig
 from sgl_jax.srt.hf_transformers_utils import get_tokenizer
 from sgl_jax.srt.lora.lora_registry import LoRARegistry
+from sgl_jax.srt.managers.tokenizer_score_api_mixin import TokenizerScoreApiMixin
+from sgl_jax.srt.managers.tokenizer_score_common import (
+    _SchedulerSender,
+    ReqState,
+)
+from sgl_jax.srt.managers.tokenizer_score_routing_mixin import TokenizerScoreRoutingMixin
 from sgl_jax.srt.managers.io_struct import (
     AbortReq,
     BatchEmbeddingOut,
@@ -76,49 +79,16 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 logger = logging.getLogger(__name__)
 
 
-@dataclasses.dataclass
-class ReqState:
-    """Store the state a request."""
-
-    out_list: list[dict[Any, Any]]
-    finished: bool
-    event: asyncio.Event
-    obj: GenerateReqInput | EmbeddingReqInput
-
-    # For metrics
-    created_time: float
-    event_loop: asyncio.AbstractEventLoop | None = None
-    finished_time: float = 0.0
-    first_token_time: float = 0.0
-    last_time: float = 0.0
-    last_completion_tokens: int = 1
-
-    # For streaming output
-    last_output_offset: int = 0
-
-    text: str = ""
-    output_ids: list[int] = dataclasses.field(default_factory=list)
-    input_token_logprobs_val: list[float] = dataclasses.field(default_factory=list)
-    input_token_logprobs_idx: list[int] = dataclasses.field(default_factory=list)
-    output_token_logprobs_val: list[float] = dataclasses.field(default_factory=list)
-    output_token_logprobs_idx: list[int] = dataclasses.field(default_factory=list)
-    input_top_logprobs_val: list[list[float]] = dataclasses.field(default_factory=list)
-    input_top_logprobs_idx: list[list[int]] = dataclasses.field(default_factory=list)
-    output_top_logprobs_val: list[list[float]] = dataclasses.field(default_factory=list)
-    output_top_logprobs_idx: list[list[int]] = dataclasses.field(default_factory=list)
-    input_token_ids_logprobs_val: list = dataclasses.field(default_factory=list)
-    input_token_ids_logprobs_idx: list = dataclasses.field(default_factory=list)
-    output_token_ids_logprobs_val: list = dataclasses.field(default_factory=list)
-    output_token_ids_logprobs_idx: list = dataclasses.field(default_factory=list)
-
-
-class TokenizerManager:
+class TokenizerManager(
+    TokenizerScoreApiMixin,
+    TokenizerScoreRoutingMixin,
+):
     """TokenizerManager is a process that tokenizes the text."""
 
     def __init__(
         self,
         server_args: ServerArgs,
-        port_args: PortArgs,
+        port_args: PortArgs | list[PortArgs],
     ):
         # Parse args
         self.server_args = server_args
@@ -134,14 +104,22 @@ class TokenizerManager:
         self.event_loop = None  # Store the event loop to use
 
         # Init inter-process communication
+        scheduler_port_args = port_args if isinstance(port_args, list) else [port_args]
+        if not scheduler_port_args:
+            raise ValueError("TokenizerManager requires at least one PortArgs entry.")
+        primary_port_args = scheduler_port_args[0]
         context = zmq.asyncio.Context(2)
         self.recv_from_detokenizer = get_zmq_socket(
-            context, zmq.PULL, port_args.tokenizer_ipc_name, True
+            context, zmq.PULL, primary_port_args.tokenizer_ipc_name, True
         )
+        scheduler_senders = [
+            get_zmq_socket(context, zmq.PUSH, scheduler_port_arg.scheduler_input_ipc_name, True)
+            for scheduler_port_arg in scheduler_port_args
+        ]
+        self.send_to_scheduler = _SchedulerSender(scheduler_senders)
+        self.scheduler_port_count = self.send_to_scheduler.fan_out
 
-        self.send_to_scheduler = get_zmq_socket(
-            context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
-        )
+        self.send_to_rpc = get_zmq_socket(context, zmq.DEALER, primary_port_args.rpc_ipc_name, True)
 
         # Read model args
         self.model_path = server_args.model_path
@@ -175,7 +153,6 @@ class TokenizerManager:
                 revision=server_args.revision,
                 sub_dir=tokenizer_subdir,
             )
-
         # Store states
         self.no_create_loop = False
         self.rid_to_state: dict[str, ReqState] = {}
@@ -196,12 +173,20 @@ class TokenizerManager:
         self.current_load_lock = asyncio.Lock()
 
         # Communicators
-        self.release_memory_occupation_communicator = _Communicator(self.send_to_scheduler, 1)
-        self.resume_memory_occupation_communicator = _Communicator(self.send_to_scheduler, 1)
-        self.flush_cache_communicator = _Communicator(self.send_to_scheduler, 1)
-        self.profile_communicator = _Communicator(self.send_to_scheduler, 1)
-        self.get_internal_state_communicator = _Communicator(self.send_to_scheduler, 1)
-        self.set_internal_state_communicator = _Communicator(self.send_to_scheduler, 1)
+        self.release_memory_occupation_communicator = _Communicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
+        self.resume_memory_occupation_communicator = _Communicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
+        self.flush_cache_communicator = _Communicator(self.send_to_scheduler, server_args.dp_size)
+        self.profile_communicator = _Communicator(self.send_to_scheduler, server_args.dp_size)
+        self.get_internal_state_communicator = _Communicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
+        self.set_internal_state_communicator = _Communicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
 
         # LoRA
         self.lora_registry = LoRARegistry(self.server_args.lora_paths)
@@ -358,19 +343,21 @@ class TokenizerManager:
         # Build return object
 
         tokenized_obj = TokenizedGenerateReqInput(
-            obj.rid,
-            input_text,
-            input_ids,
-            sampling_params,
-            obj.return_logprob,
-            obj.return_output_logprob_only,
-            obj.logprob_start_len,
-            obj.top_logprobs_num,
-            obj.token_ids_logprob,
-            obj.stream,
-            obj.lora_id,
-            obj.extra_key,
-            obj.return_routed_experts,
+            rid=obj.rid,
+            text=input_text,
+            input_ids=input_ids,
+            sampling_params=sampling_params,
+            return_logprob=obj.return_logprob,
+            return_output_logprob_only=obj.return_output_logprob_only,
+            logprob_start_len=obj.logprob_start_len,
+            top_logprobs_num=obj.top_logprobs_num,
+            token_ids_logprob=obj.token_ids_logprob,
+            stream=obj.stream,
+            lora_id=obj.lora_id,
+            extra_key=obj.extra_key,
+            return_routed_experts=obj.return_routed_experts,
+            cache_for_scoring=bool(obj.cache_for_scoring),
+            extend_from_cache=obj.extend_from_cache,
         )
         # note: When only `return_logprob` is specified, we assume that only the output probability is required.
         if (
@@ -424,28 +411,6 @@ class TokenizerManager:
                 raise ValueError(
                     "Batch tokenization is not needed for input_embeds. Do not set `enable_tokenizer_batch_encode`."
                 )
-
-    def _send_one_request(
-        self,
-        obj: GenerateReqInput | EmbeddingReqInput,
-        tokenized_obj: TokenizedGenerateReqInput | TokenizedEmbeddingReqInput,
-        created_time: float | None = None,
-    ):
-        self.send_to_scheduler.send_pyobj(tokenized_obj)
-        # Capture the caller's event loop so that _notify_state_event can use
-        # call_soon_threadsafe when handle_loop runs on a different thread
-        # (e.g. enable_engine_loop_run_forever_daemon mode).
-        try:
-            caller_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            caller_loop = None
-        state = ReqState(
-            [], False, asyncio.Event(), obj, created_time=created_time, event_loop=caller_loop
-        )
-        # Handle rid being a list (single element) or string
-        rid_key = obj.rid[0] if isinstance(obj.rid, list) else obj.rid
-        self.rid_to_state[rid_key] = state
-        return state
 
     def _notify_state_event(self, state: ReqState) -> None:
         """Thread-safe wrapper around state.event.set().
@@ -539,17 +504,19 @@ class TokenizerManager:
                 self._validate_batch_tokenization_constraints(batch_size, obj)
 
                 tokenized_objs = await self._batch_tokenize_and_process(batch_size, obj)
-
-                for i, tokenized_obj in enumerate(tokenized_objs):
-                    tmp_obj = obj[i]
+                batched_objs = [obj[i] for i in range(batch_size)]
+                for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
                     state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
                     generators.append(self._wait_one_response(tmp_obj, state, request))
                     rids.append(tmp_obj.rid)
             else:
                 # Sequential tokenization and processing
-                for i in range(batch_size):
-                    tmp_obj = obj[i]
-                    tokenized_obj = await self._tokenize_one_request(tmp_obj)
+                batched_objs = [obj[i] for i in range(batch_size)]
+                tokenized_objs = []
+                for tmp_obj in batched_objs:
+                    tokenized_objs.append(await self._tokenize_one_request(tmp_obj))
+
+                for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
                     state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
                     generators.append(self._wait_one_response(tmp_obj, state, request))
                     rids.append(tmp_obj.rid)
@@ -1009,7 +976,6 @@ class TokenizerManager:
                         f"Cache miss occurred {recv_obj.cache_miss_count} times, please check if the precompile logic covers the current scenario"
                     )
                 meta_info["cache_miss_count"] = recv_obj.cache_miss_count
-
             if isinstance(recv_obj, BatchStrOut):
                 state.text += recv_obj.output_strs[i]
                 state.output_ids += recv_obj.output_ids[i]
@@ -1038,7 +1004,14 @@ class TokenizerManager:
                     "meta_info": meta_info,
                 }
 
-            state.finished = recv_obj.finished_reasons[i] is not None
+            # Broadcast prefill can receive one terminal payload per scheduler lane.
+            # Completion is gated here; cache consumers should not read duplicate lane payloads.
+            is_finished_event = recv_obj.finished_reasons[i] is not None
+            if is_finished_event:
+                state.observed_finish_count += 1
+            state.finished = is_finished_event and state.observed_finish_count >= max(
+                1, state.expected_finish_count
+            )
             if state.finished:
                 state.finished_time = time.time()
                 meta_info["e2e_latency"] = state.finished_time - state.created_time
@@ -1083,6 +1056,22 @@ class TokenizerManager:
                 state.output_token_logprobs_idx,
                 return_text_in_logprobs,
             )
+            if (
+                token_ids_logprob is not None
+                and recv_obj.output_token_ids_logprobs_val is not None
+                and len(recv_obj.output_token_ids_logprobs_val) > 0
+            ):
+                state.output_token_ids_logprobs_val.extend(
+                    recv_obj.output_token_ids_logprobs_val[recv_obj_index]
+                )
+                state.output_token_ids_logprobs_idx.extend(
+                    recv_obj.output_token_ids_logprobs_idx[recv_obj_index]
+                )
+                meta_info["output_token_ids_logprobs"] = self.detokenize_top_logprobs_tokens(
+                    state.output_token_ids_logprobs_val,
+                    state.output_token_ids_logprobs_idx,
+                    return_text_in_logprobs,
+                )
             return
         if recv_obj.input_token_logprobs_val is None:
             return
@@ -1232,98 +1221,12 @@ class TokenizerManager:
                 },
             }
         )
-        state.event.set()
+        self._notify_state_event(state)
 
     def _handle_open_session_req_output(self, recv_obj):
         self.session_futures[recv_obj.session_id].set_result(
             recv_obj.session_id if recv_obj.success else None
         )
-
-    async def score_request(
-        self,
-        query: str | list[int] | None = None,
-        items: str | list[str] | list[list[int]] | None = None,
-        label_token_ids: list[int] | None = None,
-        apply_softmax: bool = False,
-        item_first: bool = False,
-        request: Any | None = None,
-    ) -> list[list[float]]:
-        """
-        See Engine.score() for more details.
-        """
-        if label_token_ids is None:
-            raise ValueError("label_token_ids must be provided")
-
-        if self.tokenizer is not None:
-            vocab_size = self.tokenizer.vocab_size
-            for token_id in label_token_ids:
-                if token_id >= vocab_size:
-                    raise ValueError(
-                        f"Token ID {token_id} is out of vocabulary (vocab size: {vocab_size})"
-                    )
-
-        # Handle string or tokenized query/items
-        if isinstance(query, str) and (
-            isinstance(items, str)
-            or (isinstance(items, list) and (not items or isinstance(items[0], str)))
-        ):
-            # Both query and items are text
-            items_list = [items] if isinstance(items, str) else items
-            if item_first:
-                prompts = [f"{item}{query}" for item in items_list]
-            else:
-                prompts = [f"{query}{item}" for item in items_list]
-            batch_request = GenerateReqInput(
-                text=prompts,
-                return_logprob=True,
-                token_ids_logprob=label_token_ids,
-                stream=False,
-                sampling_params={"max_new_tokens": 1},
-            )
-        elif (
-            isinstance(query, list)
-            and isinstance(items, list)
-            and items
-            and isinstance(items[0], list)
-        ):
-            # Both query and items are token IDs
-            if item_first:
-                input_ids_list = [item + query for item in items]
-            else:
-                input_ids_list = [query + item for item in items]
-            batch_request = GenerateReqInput(
-                input_ids=input_ids_list,
-                return_logprob=True,
-                token_ids_logprob=label_token_ids,
-                stream=False,
-                sampling_params={"max_new_tokens": 1},
-            )
-        else:
-            raise ValueError("Invalid combination of query/items types for score_request.")
-
-        results = await self.generate_request(batch_request, request).__anext__()
-        scores = []
-
-        for result in results:
-            # Get logprobs for each token
-            logprobs = {}
-            for logprob, token_id, _ in result["meta_info"].get("output_token_ids_logprobs", [])[0]:
-                if token_id in label_token_ids:
-                    logprobs[token_id] = logprob
-
-            # Get scores in order of label_token_ids
-            score_list = [logprobs.get(token_id, float("-inf")) for token_id in label_token_ids]
-
-            # Apply softmax to logprobs if needed
-            if apply_softmax:
-                score_list = jax.nn.softmax(jnp.asarray(score_list), axis=0).tolist()
-            else:
-                # Convert logprobs to probabilities if not using softmax
-                score_list = [math.exp(x) if x != float("-inf") else 0.0 for x in score_list]
-
-            scores.append(score_list)
-
-        return scores
 
 
 async def print_exception_wrapper(func):
@@ -1366,33 +1269,56 @@ class _Communicator[T]:
     def __init__(self, sender, fan_out: int):
         self._sender = sender
         self._fan_out = fan_out
+        self._lock = asyncio.Lock()
         self._result_event: asyncio.Event | None = None
         self._result_values: list[T] | None = None
-        self._ready_queue: deque[asyncio.Future] = deque()
+        self._expected_results = fan_out
 
-    async def __call__(self, obj):
-        ready_event = asyncio.Event()
-        if self._result_event is not None or len(self._ready_queue) > 0:
-            self._ready_queue.append(ready_event)
-            await ready_event.wait()
-            assert self._result_event is None
-            assert self._result_values is None
+    async def __call__(
+        self,
+        obj,
+        timeout: float | None = None,
+        scheduler_idx: int | None = None,
+        broadcast: bool | None = None,
+    ):
+        """Auto-broadcast when waiting for multiple scheduler-lane responses."""
+        async with self._lock:
+            self._result_event = asyncio.Event()
+            self._result_values = []
+            send_all = (
+                bool(broadcast)
+                if broadcast is not None
+                else self._fan_out > 1 and scheduler_idx is None
+            )
+            self._expected_results = self._fan_out if send_all or obj is None else 1
+            try:
+                if obj is not None:
+                    if send_all and hasattr(self._sender, "send_pyobj_all"):
+                        self._sender.send_pyobj_all(obj)
+                    elif scheduler_idx is not None and hasattr(self._sender, "send_pyobj_to"):
+                        self._sender.send_pyobj_to(scheduler_idx, obj)
+                    else:
+                        self._sender.send_pyobj(obj)
 
-        if obj:
-            self._sender.send_pyobj(obj)
+                wait_coro = self._result_event.wait()
+                if timeout is not None and timeout > 0:
+                    await asyncio.wait_for(wait_coro, timeout=timeout)
+                else:
+                    await wait_coro
 
-        self._result_event = asyncio.Event()
-        self._result_values = []
-        await self._result_event.wait()
-        result_values = self._result_values
-        self._result_event = self._result_values = None
-
-        if len(self._ready_queue) > 0:
-            self._ready_queue.popleft().set()
-
-        return result_values
+                return list(self._result_values)
+            finally:
+                self._result_event = None
+                self._result_values = None
+                self._expected_results = self._fan_out
 
     def handle_recv(self, recv_obj: T):
+        if self._result_values is None or self._result_event is None:
+            logger.warning(
+                "Dropping communicator response with no active waiter. type=%s",
+                type(recv_obj).__name__,
+            )
+            return
         self._result_values.append(recv_obj)
-        if len(self._result_values) == self._fan_out:
+        if len(self._result_values) >= self._expected_results:
             self._result_event.set()

@@ -68,6 +68,68 @@ logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 
+def _resolve_dp_scheduler_device_partitions(
+    server_args: ServerArgs,
+    available_device_ids: list[int],
+) -> list[list[int]]:
+    dp_size = int(getattr(server_args, "dp_size", 1) or 1)
+    if dp_size <= 1:
+        device_indexes = list(server_args.device_indexes or available_device_ids)
+        return [device_indexes]
+
+    tensor_parallel_size = int(getattr(server_args, "tp_size", 1) or 1)
+    if tensor_parallel_size <= 0:
+        raise ValueError("tp_size must be positive when dp_size > 1.")
+
+    requested_device_ids = list(server_args.device_indexes or available_device_ids)
+    total_required_devices = dp_size * tensor_parallel_size
+    if len(requested_device_ids) != total_required_devices:
+        raise ValueError(
+            "dp_size serving requires an exact device partition: "
+            f"got {len(requested_device_ids)} device(s), need {total_required_devices} "
+            f"for dp_size={dp_size} and tp_size={tensor_parallel_size}."
+        )
+
+    return [
+        requested_device_ids[start : start + tensor_parallel_size]
+        for start in range(0, total_required_devices, tensor_parallel_size)
+    ]
+
+
+def _build_scheduler_launch_plan(
+    server_args: ServerArgs,
+    port_args: PortArgs,
+) -> list[tuple[ServerArgs, PortArgs, int]]:
+    if server_args.device == "tpu" and not server_args.enable_single_process:
+        # Avoid parent-side TPU PJRT initialization before scheduler subprocesses spawn.
+        total_required_devices = max(
+            1,
+            int(getattr(server_args, "tp_size", 1) or 1)
+            * int(getattr(server_args, "dp_size", 1) or 1),
+        )
+        available_device_ids = list(range(total_required_devices))
+    else:
+        available_device_ids = [device.id for device in jax.devices()]
+    device_partitions = _resolve_dp_scheduler_device_partitions(server_args, available_device_ids)
+    plan: list[tuple[ServerArgs, PortArgs, int]] = []
+    for dp_rank, device_indexes in enumerate(device_partitions):
+        lane_server_args = dataclasses.replace(
+            server_args,
+            device_indexes=list(device_indexes),
+            dp_size=1,
+        )
+        if dp_rank == 0:
+            lane_port_args = port_args
+        else:
+            lane_port_args = dataclasses.replace(
+                PortArgs.init_new(server_args),
+                tokenizer_ipc_name=port_args.tokenizer_ipc_name,
+                detokenizer_ipc_name=port_args.detokenizer_ipc_name,
+            )
+        plan.append((lane_server_args, lane_port_args, dp_rank))
+    return plan
+
+
 class Engine(EngineBase):
     """
     The entry point to the inference engine.
@@ -567,20 +629,22 @@ def _launch_subprocesses(
 
     scheduler_procs = []
     scheduler_pipe_readers = []
-    reader, writer = mp.Pipe(duplex=False)
-    proc = mp.Process(
-        target=run_scheduler_process,
-        args=(
-            server_args,
-            port_args,
-            None,
-            writer,
-        ),
-    )
-    # with memory_saver_adapter.configure_subprocess():
-    proc.start()
-    scheduler_procs.append(proc)
-    scheduler_pipe_readers.append(reader)
+    scheduler_launch_plan = _build_scheduler_launch_plan(server_args, port_args)
+    for lane_server_args, lane_port_args, dp_rank in scheduler_launch_plan:
+        reader, writer = mp.Pipe(duplex=False)
+        proc = mp.Process(
+            target=run_scheduler_process,
+            args=(
+                lane_server_args,
+                lane_port_args,
+                dp_rank,
+                writer,
+            ),
+        )
+        # with memory_saver_adapter.configure_subprocess():
+        proc.start()
+        scheduler_procs.append(proc)
+        scheduler_pipe_readers.append(reader)
 
     if server_args.node_rank >= 1:
         # In multi-node cases, non-zero rank nodes do not need to run tokenizer or detokenizer,
@@ -616,7 +680,11 @@ def _launch_subprocesses(
     detoken_proc.start()
 
     # Launch tokenizer process
-    tokenizer_manager = TokenizerManager(server_args, port_args)
+    tokenizer_port_args = [lane_port_args for _, lane_port_args, _ in scheduler_launch_plan]
+    tokenizer_manager = TokenizerManager(server_args, tokenizer_port_args)
+    tokenizer_manager.scheduler_pids = [
+        proc.pid for proc in scheduler_procs if getattr(proc, "pid", None) is not None
+    ]
 
     # Initialize templates
     template_manager = TemplateManager()
@@ -631,7 +699,7 @@ def _launch_subprocesses(
             data = scheduler_pipe_readers[i].recv()
         except EOFError:
             logger.error(
-                "Node %s jax_scheduler is dead. Please check if there are relevant logs.",
+                "Scheduler lane %s is dead. Please check if there are relevant logs.",
                 i,
             )
             scheduler_procs[i].join()
@@ -665,11 +733,16 @@ def _launch_threads(
         server_args.model_path, server_args.tokenizer_path
     )
 
-    scheduler_threads = []
     scheduler_infos = []
     scheduler_pipe_readers = []
-    scheduler_info = run_scheduler_loop_thread_after_create(server_args, port_args)
-    scheduler_infos.append(scheduler_info)
+    scheduler_launch_plan = _build_scheduler_launch_plan(server_args, port_args)
+    for lane_server_args, lane_port_args, dp_rank in scheduler_launch_plan:
+        scheduler_info = run_scheduler_loop_thread_after_create(
+            lane_server_args,
+            lane_port_args,
+            dp_rank=dp_rank,
+        )
+        scheduler_infos.append(scheduler_info)
 
     if server_args.node_rank >= 1:
         # In multi-node cases, non-zero rank nodes do not need to run tokenizer or detokenizer,
@@ -685,9 +758,12 @@ def _launch_threads(
 
         launch_dummy_health_check_server(server_args.host, server_args.port)
 
-        for thread in scheduler_threads:
-            thread.join()
-            logger.error("Scheduler %s terminated", thread.name)
+        for scheduler_info in scheduler_infos:
+            scheduler_thread = scheduler_info.get("scheduler_thread")
+            if scheduler_thread is None:
+                continue
+            scheduler_thread.join()
+            logger.error("Scheduler or DataParallelController %s terminated", scheduler_thread.name)
         return None, None, None
 
     # Launch detokenizer thread
@@ -702,7 +778,8 @@ def _launch_threads(
     detoken_thread.start()
 
     # Launch tokenizer process
-    tokenizer_manager = TokenizerManager(server_args, port_args)
+    tokenizer_port_args = [lane_port_args for _, lane_port_args, _ in scheduler_launch_plan]
+    tokenizer_manager = TokenizerManager(server_args, tokenizer_port_args)
 
     # Initialize templates
     template_manager = TemplateManager()
