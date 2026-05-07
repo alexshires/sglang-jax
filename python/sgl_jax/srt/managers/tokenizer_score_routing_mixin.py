@@ -84,7 +84,9 @@ class TokenizerScoreRoutingMixin:
                 for tokenized_obj in tokenized_objs
             }
             if len(extend_handles) == 1:
-                scheduler_idx = self._score_lane_scheduler_index(next(iter(extend_handles)))
+                extend_handle = next(iter(extend_handles))
+                if extend_handle:
+                    scheduler_idx = self._score_lane_scheduler_index(extend_handle)
 
         payload = tokenized_objs[0] if len(tokenized_objs) == 1 else tokenized_objs
         if scheduler_idx is not None:
