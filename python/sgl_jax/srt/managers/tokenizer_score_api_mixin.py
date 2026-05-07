@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import math
+import logging
 from typing import Any
 
 from sgl_jax.srt.managers.io_struct import GenerateReqInput
 from sgl_jax.srt.managers.tokenizer_score_common import _stable_softmax
+from sgl_jax.srt.validation import validate_score_request
+
+logger = logging.getLogger(__name__)
 
 
 class TokenizerScoreApiMixin:
