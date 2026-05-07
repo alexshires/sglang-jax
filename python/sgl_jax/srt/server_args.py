@@ -206,6 +206,23 @@ class ServerArgs:
     multi_item_score_direct_warmup_apply_softmax: bool = False
     # Emit per-request score-path metrics to logs.
     multi_item_score_fastpath_log_metrics: bool = False
+    # Optional ingress coalescing and lane-aware score admission controls.
+    score_scheduler_global_microbatch_window_ms: float = 0.0
+    score_scheduler_global_microbatch_poll_interval_ms: float = 0.5
+    score_scheduler_short_prompt_tokens_threshold: int = 2048
+    score_scheduler_short_lane_max_inflight: int = 0
+    score_scheduler_long_lane_max_inflight: int = 0
+    score_scheduler_enable_lane_isolation: bool = False
+    score_scheduler_lane_isolation_short_burst: int = 2
+    score_scheduler_lane_isolation_long_burst: int = 1
+    score_scheduler_dynamic_items_per_step_enable: bool = False
+    score_scheduler_dynamic_items_per_step_pressure_threshold: int = 64
+    score_scheduler_dynamic_items_per_step_short_lane_bias: float = 1.0
+    score_scheduler_dynamic_items_per_step_long_lane_bias: float = 0.75
+    score_scheduler_dynamic_items_per_step_short_lane_min: int = 32
+    score_scheduler_dynamic_items_per_step_long_lane_min: int = 16
+    score_scheduler_cache_admission_bias_enable: bool = False
+    score_scheduler_cache_admission_bias_require_hit: bool = True
     # Allow radix cache to keep score-prefill prefixes alive across requests.
     enable_scoring_cache: bool = False
 
@@ -1262,6 +1279,99 @@ class ServerArgs:
             help="Emit per-/v1/score path metrics including fastpath counters and timings.",
         )
         parser.add_argument(
+            "--score-scheduler-global-microbatch-window-ms",
+            type=float,
+            default=ServerArgs.score_scheduler_global_microbatch_window_ms,
+            help="Score ingress coalescing window in milliseconds; 0 disables.",
+        )
+        parser.add_argument(
+            "--score-scheduler-global-microbatch-poll-interval-ms",
+            type=float,
+            default=ServerArgs.score_scheduler_global_microbatch_poll_interval_ms,
+            help="Polling interval in milliseconds used during score coalescing.",
+        )
+        parser.add_argument(
+            "--score-scheduler-short-prompt-tokens-threshold",
+            type=int,
+            default=ServerArgs.score_scheduler_short_prompt_tokens_threshold,
+            help="Prompt-token threshold used to classify score requests into lanes.",
+        )
+        parser.add_argument(
+            "--score-scheduler-short-lane-max-inflight",
+            type=int,
+            default=ServerArgs.score_scheduler_short_lane_max_inflight,
+            help="Max in-flight requests for the short score lane; 0 disables.",
+        )
+        parser.add_argument(
+            "--score-scheduler-long-lane-max-inflight",
+            type=int,
+            default=ServerArgs.score_scheduler_long_lane_max_inflight,
+            help="Max in-flight requests for the long score lane; 0 disables.",
+        )
+        parser.add_argument(
+            "--score-scheduler-enable-lane-isolation",
+            action="store_true",
+            help="Enable short/long score-lane admission isolation.",
+        )
+        parser.add_argument(
+            "--score-scheduler-lane-isolation-short-burst",
+            type=int,
+            default=ServerArgs.score_scheduler_lane_isolation_short_burst,
+            help="Consecutive short-lane admissions attempted per isolation cycle.",
+        )
+        parser.add_argument(
+            "--score-scheduler-lane-isolation-long-burst",
+            type=int,
+            default=ServerArgs.score_scheduler_lane_isolation_long_burst,
+            help="Consecutive long-lane admissions attempted per isolation cycle.",
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-enable",
+            action="store_true",
+            help="Enable queue-depth-aware dynamic items_per_step control.",
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-pressure-threshold",
+            type=int,
+            default=ServerArgs.score_scheduler_dynamic_items_per_step_pressure_threshold,
+            help="Queue-pressure threshold for reducing score-from-cache v2 items_per_step.",
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-short-lane-bias",
+            type=float,
+            default=ServerArgs.score_scheduler_dynamic_items_per_step_short_lane_bias,
+            help="Scaling bias applied to dynamic items_per_step in the short lane.",
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-long-lane-bias",
+            type=float,
+            default=ServerArgs.score_scheduler_dynamic_items_per_step_long_lane_bias,
+            help="Scaling bias applied to dynamic items_per_step in the long lane.",
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-short-lane-min",
+            type=int,
+            default=ServerArgs.score_scheduler_dynamic_items_per_step_short_lane_min,
+            help="Minimum dynamic items_per_step floor for the short lane.",
+        )
+        parser.add_argument(
+            "--score-scheduler-dynamic-items-per-step-long-lane-min",
+            type=int,
+            default=ServerArgs.score_scheduler_dynamic_items_per_step_long_lane_min,
+            help="Minimum dynamic items_per_step floor for the long lane.",
+        )
+        parser.add_argument(
+            "--score-scheduler-cache-admission-bias-enable",
+            action="store_true",
+            help="Prefer score requests that can reuse an existing scoring cache handle.",
+        )
+        parser.add_argument(
+            "--score-scheduler-cache-admission-bias-require-hit",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.score_scheduler_cache_admission_bias_require_hit,
+            help="Require proven scoring-cache hits before cache-biased admission.",
+        )
+        parser.add_argument(
             "--enable-scoring-cache",
             action="store_true",
             help="Enable radix cache for score-prefill prefixes.",
@@ -1505,6 +1615,42 @@ class ServerArgs:
                 "--multi-item-score-direct-hot-shape-bs, or "
                 "--multi-item-score-from-cache-v2-items-per-step."
             )
+        assert self.score_scheduler_global_microbatch_window_ms >= 0, (
+            "--score-scheduler-global-microbatch-window-ms must be non-negative"
+        )
+        assert self.score_scheduler_global_microbatch_poll_interval_ms > 0, (
+            "--score-scheduler-global-microbatch-poll-interval-ms must be positive"
+        )
+        assert self.score_scheduler_short_prompt_tokens_threshold > 0, (
+            "--score-scheduler-short-prompt-tokens-threshold must be positive"
+        )
+        assert self.score_scheduler_short_lane_max_inflight >= 0, (
+            "--score-scheduler-short-lane-max-inflight must be non-negative"
+        )
+        assert self.score_scheduler_long_lane_max_inflight >= 0, (
+            "--score-scheduler-long-lane-max-inflight must be non-negative"
+        )
+        assert self.score_scheduler_lane_isolation_short_burst > 0, (
+            "--score-scheduler-lane-isolation-short-burst must be positive"
+        )
+        assert self.score_scheduler_lane_isolation_long_burst > 0, (
+            "--score-scheduler-lane-isolation-long-burst must be positive"
+        )
+        assert self.score_scheduler_dynamic_items_per_step_pressure_threshold > 0, (
+            "--score-scheduler-dynamic-items-per-step-pressure-threshold must be positive"
+        )
+        assert self.score_scheduler_dynamic_items_per_step_short_lane_bias > 0, (
+            "--score-scheduler-dynamic-items-per-step-short-lane-bias must be positive"
+        )
+        assert self.score_scheduler_dynamic_items_per_step_long_lane_bias > 0, (
+            "--score-scheduler-dynamic-items-per-step-long-lane-bias must be positive"
+        )
+        assert self.score_scheduler_dynamic_items_per_step_short_lane_min > 0, (
+            "--score-scheduler-dynamic-items-per-step-short-lane-min must be positive"
+        )
+        assert self.score_scheduler_dynamic_items_per_step_long_lane_min > 0, (
+            "--score-scheduler-dynamic-items-per-step-long-lane-min must be positive"
+        )
 
     def check_lora_server_args(self):
         """Validate and normalize LoRA-related server arguments."""
