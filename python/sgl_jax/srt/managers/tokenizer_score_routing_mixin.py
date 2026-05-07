@@ -24,13 +24,6 @@ class TokenizerScoreRoutingMixin:
             return None
         return zlib.crc32(cache_handle.encode("utf-8")) % fan_out
 
-    def _can_use_local_request_ingress(self, tokenized_obj) -> bool:
-        if not callable(getattr(self, "local_request_submitter", None)):
-            return False
-        if self._scheduler_sender_fan_out() > 1:
-            return False
-        return bool(getattr(tokenized_obj, "cache_for_scoring", False))
-
     def _send_one_request(
         self,
         obj: GenerateReqInput | EmbeddingReqInput,
@@ -41,22 +34,7 @@ class TokenizerScoreRoutingMixin:
             caller_loop = asyncio.get_running_loop()
         except RuntimeError:
             caller_loop = None
-        use_local_ingress = self._can_use_local_request_ingress(tokenized_obj)
         expected_finish_count = 1
-        if use_local_ingress:
-            state = ReqState(
-                [],
-                False,
-                asyncio.Event(),
-                obj,
-                created_time=created_time,
-                event_loop=caller_loop,
-                expected_finish_count=expected_finish_count,
-            )
-            rid_key = obj.rid[0] if isinstance(obj.rid, list) else obj.rid
-            self.rid_to_state[rid_key] = state
-            self.local_request_submitter(tokenized_obj)
-            return state
         if (
             bool(getattr(tokenized_obj, "cache_for_scoring", False))
             and self._scheduler_sender_fan_out() > 1

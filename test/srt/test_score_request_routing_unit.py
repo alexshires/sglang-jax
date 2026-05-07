@@ -1,5 +1,7 @@
+import asyncio
 from types import SimpleNamespace
 
+from sgl_jax.srt.managers.tokenizer_manager import _Communicator
 from sgl_jax.srt.managers.tokenizer_score_routing_mixin import (
     TokenizerScoreRoutingMixin,
 )
@@ -9,7 +11,6 @@ class _DummyTokenizerManager(TokenizerScoreRoutingMixin):
     def __init__(self, fan_out: int = 1):
         self.send_to_scheduler = _FakeSchedulerSender(fan_out)
         self.rid_to_state = {}
-        self.local_request_submitter = None
 
     def _notify_state_event(self, state):
         state.event.set()
@@ -65,3 +66,20 @@ def test_send_one_request_routes_cache_extend_to_hashed_scheduler_lane():
     assert manager.send_to_scheduler.sent == []
     assert manager.send_to_scheduler.sent_all == []
     assert state.expected_finish_count == 1
+
+
+def test_communicator_broadcasts_by_default_for_multi_lane_waiters():
+    async def run_test():
+        sender = _FakeSchedulerSender(fan_out=2)
+        communicator = _Communicator(sender, fan_out=2)
+
+        task = asyncio.create_task(communicator("payload"))
+        await asyncio.sleep(0)
+
+        assert sender.sent_all == ["payload"]
+        assert sender.sent == []
+        communicator.handle_recv("lane-0")
+        communicator.handle_recv("lane-1")
+        assert await task == ["lane-0", "lane-1"]
+
+    asyncio.run(run_test())

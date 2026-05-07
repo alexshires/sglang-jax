@@ -187,7 +187,6 @@ class TokenizerManager(
         self.set_internal_state_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
-        self.local_request_submitter = None
 
         # LoRA
         self.lora_registry = LoRARegistry(self.server_args.lora_paths)
@@ -1272,20 +1271,27 @@ class _Communicator[T]:
         self._lock = asyncio.Lock()
         self._result_event: asyncio.Event | None = None
         self._result_values: list[T] | None = None
+        self._expected_results = fan_out
 
     async def __call__(
         self,
         obj,
         timeout: float | None = None,
         scheduler_idx: int | None = None,
-        broadcast: bool = False,
+        broadcast: bool | None = None,
     ):
         async with self._lock:
             self._result_event = asyncio.Event()
             self._result_values = []
+            send_all = (
+                bool(broadcast)
+                if broadcast is not None
+                else self._fan_out > 1 and scheduler_idx is None
+            )
+            self._expected_results = self._fan_out if send_all or obj is None else 1
             try:
                 if obj is not None:
-                    if broadcast and hasattr(self._sender, "send_pyobj_all"):
+                    if send_all and hasattr(self._sender, "send_pyobj_all"):
                         self._sender.send_pyobj_all(obj)
                     elif scheduler_idx is not None and hasattr(self._sender, "send_pyobj_to"):
                         self._sender.send_pyobj_to(scheduler_idx, obj)
@@ -1302,6 +1308,7 @@ class _Communicator[T]:
             finally:
                 self._result_event = None
                 self._result_values = None
+                self._expected_results = self._fan_out
 
     def handle_recv(self, recv_obj: T):
         if self._result_values is None or self._result_event is None:
@@ -1311,5 +1318,5 @@ class _Communicator[T]:
             )
             return
         self._result_values.append(recv_obj)
-        if len(self._result_values) >= self._fan_out:
+        if len(self._result_values) >= self._expected_results:
             self._result_event.set()
