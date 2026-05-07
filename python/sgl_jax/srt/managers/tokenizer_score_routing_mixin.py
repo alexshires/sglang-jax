@@ -2,7 +2,21 @@
 
 from __future__ import annotations
 
-from sgl_jax.srt.managers.tokenizer_score_common import *
+import asyncio
+import logging
+import os
+import zlib
+from http import HTTPStatus
+
+from sgl_jax.srt.managers.io_struct import (
+    EmbeddingReqInput,
+    GenerateReqInput,
+    TokenizedEmbeddingReqInput,
+    TokenizedGenerateReqInput,
+)
+from sgl_jax.srt.managers.tokenizer_score_common import ReqState
+
+logger = logging.getLogger(__name__)
 
 
 class TokenizerScoreRoutingMixin:
@@ -58,18 +72,7 @@ class TokenizerScoreRoutingMixin:
             caller_loop = asyncio.get_running_loop()
         except RuntimeError:
             caller_loop = None
-        can_use_local_request_ingress = getattr(
-            self, "_can_use_local_request_ingress", lambda _tokenized_obj: False
-        )
-        scheduler_sender_fan_out = getattr(
-            self,
-            "_scheduler_sender_fan_out",
-            lambda: getattr(self.send_to_scheduler, "fan_out", 1),
-        )
-        score_lane_scheduler_index = getattr(
-            self, "_score_lane_scheduler_index", lambda _extend_from_cache: None
-        )
-        use_local_ingress = can_use_local_request_ingress(tokenized_obj)
+        use_local_ingress = self._can_use_local_request_ingress(tokenized_obj)
         expected_finish_count = 1
         if use_local_ingress:
             state = ReqState(
@@ -87,12 +90,12 @@ class TokenizerScoreRoutingMixin:
             return state
         if (
             bool(getattr(tokenized_obj, "cache_for_scoring", False))
-            and scheduler_sender_fan_out() > 1
+            and self._scheduler_sender_fan_out() > 1
         ):
             self.send_to_scheduler.send_pyobj_all(tokenized_obj)
-            expected_finish_count = scheduler_sender_fan_out()
+            expected_finish_count = self._scheduler_sender_fan_out()
         else:
-            scheduler_idx = score_lane_scheduler_index(
+            scheduler_idx = self._score_lane_scheduler_index(
                 getattr(tokenized_obj, "extend_from_cache", None)
             )
             if scheduler_idx is not None:
@@ -129,14 +132,7 @@ class TokenizerScoreRoutingMixin:
             caller_loop = asyncio.get_running_loop()
         except RuntimeError:
             caller_loop = None
-        can_use_local_request_ingress = getattr(
-            self, "_can_use_local_request_ingress", lambda _tokenized_obj: False
-        )
-        score_lane_scheduler_index = getattr(
-            self, "_score_lane_scheduler_index", lambda _extend_from_cache: None
-        )
-
-        if len(tokenized_objs) == 1 and can_use_local_request_ingress(tokenized_objs[0]):
+        if len(tokenized_objs) == 1 and self._can_use_local_request_ingress(tokenized_objs[0]):
             states: list[ReqState] = []
             for obj in objs:
                 state = ReqState(
@@ -161,7 +157,7 @@ class TokenizerScoreRoutingMixin:
                 getattr(tokenized_obj, "extend_from_cache", None) == extend_from_cache
                 for tokenized_obj in tokenized_objs
             ):
-                scheduler_idx = score_lane_scheduler_index(extend_from_cache)
+                scheduler_idx = self._score_lane_scheduler_index(extend_from_cache)
         if scheduler_idx is not None:
             self.send_to_scheduler.send_pyobj_to(scheduler_idx, payload)
         else:
@@ -228,11 +224,7 @@ class TokenizerScoreRoutingMixin:
                     },
                 }
             )
-            notify_state_event = getattr(self, "_notify_state_event", None)
-            if notify_state_event is not None:
-                notify_state_event(state)
-            else:
-                state.event.set()
+            self._notify_state_event(state)
             self.rid_to_state.pop(rid, None)
 
     def _mark_scheduler_unavailable(self, message: str) -> None:
@@ -242,7 +234,7 @@ class TokenizerScoreRoutingMixin:
         self.health_check_failed = True
         self._fail_pending_requests(message)
 
-    def _check_scheduler_health(self) -> bool:
+    def _check_and_handle_scheduler_health(self) -> bool:
         if self.scheduler_unavailable_error is not None:
             return False
         message = self._build_scheduler_unavailable_message()
@@ -252,7 +244,7 @@ class TokenizerScoreRoutingMixin:
         return False
 
     def _raise_if_scheduler_unavailable(self) -> None:
-        if self._check_scheduler_health():
+        if self._check_and_handle_scheduler_health():
             return
         raise ValueError(
             self.scheduler_unavailable_error

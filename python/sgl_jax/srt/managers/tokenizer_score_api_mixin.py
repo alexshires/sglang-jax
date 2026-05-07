@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from sgl_jax.srt.managers.tokenizer_score_common import *
+import math
+from typing import Any
+
+from sgl_jax.srt.managers.io_struct import GenerateReqInput
+from sgl_jax.srt.managers.tokenizer_score_common import _stable_softmax
 
 
 class TokenizerScoreApiMixin:

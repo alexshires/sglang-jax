@@ -15,6 +15,7 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime
+from http import HTTPStatus
 from typing import Any
 
 import fastapi
@@ -27,9 +28,7 @@ from sgl_jax.srt.configs.model_config import ModelConfig
 from sgl_jax.srt.hf_transformers_utils import get_tokenizer
 from sgl_jax.srt.lora.lora_registry import LoRARegistry
 from sgl_jax.srt.managers.tokenizer_score_api_mixin import TokenizerScoreApiMixin
-from sgl_jax.srt.managers.tokenizer_score_cache_mixin import TokenizerScoreCacheMixin
 from sgl_jax.srt.managers.tokenizer_score_common import (
-    _CorrelatedCommunicator,
     _SchedulerSender,
     ReqState,
 )
@@ -57,10 +56,8 @@ from sgl_jax.srt.managers.io_struct import (
     ProfileReqType,
     ReleaseMemoryOccupationReqInput,
     ReleaseMemoryOccupationReqOutput,
-    ReleaseScoringCacheReqOutput,
     ResumeMemoryOccupationReqInput,
     ResumeMemoryOccupationReqOutput,
-    ScoreFromCacheReqOutput,
     SetInternalStateReq,
     SetInternalStateReqOutput,
     TokenizedEmbeddingReqInput,
@@ -84,7 +81,6 @@ logger = logging.getLogger(__name__)
 
 class TokenizerManager(
     TokenizerScoreApiMixin,
-    TokenizerScoreCacheMixin,
     TokenizerScoreRoutingMixin,
 ):
     """TokenizerManager is a process that tokenizes the text."""
@@ -122,7 +118,6 @@ class TokenizerManager(
         ]
         self.send_to_scheduler = _SchedulerSender(scheduler_senders)
         self.scheduler_port_count = self.send_to_scheduler.fan_out
-        self.score_replica_lane_count = self.scheduler_port_count
 
         self.send_to_rpc = get_zmq_socket(context, zmq.DEALER, primary_port_args.rpc_ipc_name, True)
 
@@ -185,12 +180,6 @@ class TokenizerManager(
             self.send_to_scheduler, server_args.dp_size
         )
         self.flush_cache_communicator = _Communicator(self.send_to_scheduler, server_args.dp_size)
-        self.release_scoring_cache_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
-        )
-        self.score_from_cache_v2_communicator = _CorrelatedCommunicator(
-            self.send_to_scheduler, server_args.dp_size
-        )
         self.profile_communicator = _Communicator(self.send_to_scheduler, server_args.dp_size)
         self.get_internal_state_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
@@ -200,10 +189,6 @@ class TokenizerManager(
         )
         self.local_rpc_submitter = None
         self.local_request_submitter = None
-        self.score_fastpath_attempted = 0
-        self.score_fastpath_succeeded = 0
-        self.score_fastpath_fallback = 0
-        self.score_fastpath_fallback_reasons: dict[str, int] = {}
 
         # LoRA
         self.lora_registry = LoRARegistry(self.server_args.lora_paths)
@@ -231,14 +216,6 @@ class TokenizerManager(
                 (
                     FlushCacheReqOutput,
                     self.flush_cache_communicator.handle_recv,
-                ),
-                (
-                    ReleaseScoringCacheReqOutput,
-                    self.release_scoring_cache_communicator.handle_recv,
-                ),
-                (
-                    ScoreFromCacheReqOutput,
-                    self.score_from_cache_v2_communicator.handle_recv,
                 ),
                 (
                     ProfileReqOutput,
@@ -479,7 +456,7 @@ class TokenizerManager(
                         raise ValueError(
                             f"Request is disconnected from the client side (type 1). Abort request rid={obj.rid}"
                         ) from e
-                if not self._check_scheduler_health():
+                if not self._check_and_handle_scheduler_health():
                     raise ValueError(
                         self.scheduler_unavailable_error
                         or "Scheduler subprocess is unavailable. Please restart the server."
@@ -498,10 +475,11 @@ class TokenizerManager(
                 # Check if this was an abort/error created by scheduler
                 if isinstance(out["meta_info"].get("finish_reason"), dict):
                     finish_reason = out["meta_info"]["finish_reason"]
-                    if finish_reason.get("type") == "abort":
-                        raise ValueError(
-                            finish_reason.get("message") or "Request aborted by scheduler."
-                        )
+                    if (
+                        finish_reason.get("type") == "abort"
+                        and finish_reason.get("status_code") == HTTPStatus.BAD_REQUEST
+                    ):
+                        raise ValueError(finish_reason["message"])
 
                 yield out
                 break
@@ -1027,15 +1005,6 @@ class TokenizerManager(
                         f"Cache miss occurred {recv_obj.cache_miss_count} times, please check if the precompile logic covers the current scenario"
                     )
                 meta_info["cache_miss_count"] = recv_obj.cache_miss_count
-            if getattr(recv_obj, "scheduler_queue_wait_s", None) is not None:
-                meta_info["scheduler_queue_wait_s"] = recv_obj.scheduler_queue_wait_s[i]
-            if getattr(recv_obj, "scheduler_device_compute_s", None) is not None:
-                meta_info["scheduler_device_compute_s"] = recv_obj.scheduler_device_compute_s[i]
-            if getattr(recv_obj, "scheduler_host_overhead_s", None) is not None:
-                meta_info["scheduler_host_overhead_s"] = recv_obj.scheduler_host_overhead_s[i]
-            if getattr(recv_obj, "scheduler_dispatch_count", None) is not None:
-                meta_info["scheduler_dispatch_count"] = recv_obj.scheduler_dispatch_count[i]
-
             if isinstance(recv_obj, BatchStrOut):
                 state.text += recv_obj.output_strs[i]
                 state.output_ids += recv_obj.output_ids[i]
@@ -1279,11 +1248,7 @@ class TokenizerManager(
                 },
             }
         )
-        notify_state_event = getattr(self, "_notify_state_event", None)
-        if notify_state_event is not None:
-            notify_state_event(state)
-        else:
-            state.event.set()
+        self._notify_state_event(state)
 
     def _handle_open_session_req_output(self, recv_obj):
         self.session_futures[recv_obj.session_id].set_result(
@@ -1344,11 +1309,6 @@ class _Communicator[T]:
         broadcast: bool = False,
     ):
         async with self._lock:
-            if self._result_event is not None or self._result_values is not None:
-                raise RuntimeError(
-                    "Communicator received a new call while a previous call is still active."
-                )
-
             self._result_event = asyncio.Event()
             self._result_values = []
             try:
