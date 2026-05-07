@@ -509,6 +509,61 @@ class Engine(EngineBase):
             )
         )
 
+    def prefill_scoring_cache(self, query: str | list[int] | None = None) -> str:
+        """Prefill a query once and return a reusable scoring cache handle."""
+        return self.loop.run_until_complete(
+            self.tokenizer_manager.prefill_scoring_cache(query=query)
+        )
+
+    async def async_prefill_scoring_cache(
+        self,
+        query: str | list[int] | None = None,
+    ) -> str:
+        """Asynchronous version of prefill_scoring_cache()."""
+        return await self.tokenizer_manager.prefill_scoring_cache(query=query)
+
+    def score_from_cache(
+        self,
+        cache_handle: str,
+        items: str | list[str] | list[list[int]] | None = None,
+        label_token_ids: list[int] | None = None,
+        apply_softmax: bool = False,
+    ) -> list[list[float]]:
+        """Score items against a previously prefetched query cache handle."""
+        return self.loop.run_until_complete(
+            self.tokenizer_manager.score_from_cache(
+                cache_handle=cache_handle,
+                items=items,
+                label_token_ids=label_token_ids,
+                apply_softmax=apply_softmax,
+            )
+        )
+
+    async def async_score_from_cache(
+        self,
+        cache_handle: str,
+        items: str | list[str] | list[list[int]] | None = None,
+        label_token_ids: list[int] | None = None,
+        apply_softmax: bool = False,
+    ) -> list[list[float]]:
+        """Asynchronous version of score_from_cache()."""
+        return await self.tokenizer_manager.score_from_cache(
+            cache_handle=cache_handle,
+            items=items,
+            label_token_ids=label_token_ids,
+            apply_softmax=apply_softmax,
+        )
+
+    def release_scoring_cache(self, cache_handle: str) -> bool:
+        """Release a reusable scoring cache handle."""
+        return self.loop.run_until_complete(
+            self.tokenizer_manager.release_scoring_cache(cache_handle)
+        )
+
+    async def async_release_scoring_cache(self, cache_handle: str) -> bool:
+        """Asynchronous version of release_scoring_cache()."""
+        return await self.tokenizer_manager.release_scoring_cache(cache_handle)
+
     async def async_score(
         self,
         query: str | list[int] | None = None,
