@@ -22,7 +22,6 @@ class TestValidationError:
     """Tests for ValidationError exception class."""
 
     def test_basic_creation(self):
-        """Test creating a ValidationError with all parameters."""
         error = ValidationError(
             message="test error",
             error_type="invalid_request_error",
@@ -36,7 +35,6 @@ class TestValidationError:
         assert str(error) == "test error"
 
     def test_to_dict_full(self):
-        """Test to_dict with all fields."""
         error = ValidationError(
             message="test error",
             error_type="invalid_request_error",
@@ -54,7 +52,6 @@ class TestValidationError:
         }
 
     def test_to_dict_minimal(self):
-        """Test to_dict with only required fields."""
         error = ValidationError(
             message="test error",
             error_type="invalid_request_error",
@@ -68,7 +65,6 @@ class TestValidationError:
         }
 
     def test_http_status_400(self):
-        """Test that most errors return 400."""
         error = ValidationError(
             message="test",
             error_type="invalid_request_error",
@@ -77,7 +73,6 @@ class TestValidationError:
         assert error.get_http_status() == 400
 
     def test_http_status_422_vocab(self):
-        """Test that vocab errors return 422."""
         error = ValidationError(
             message="test",
             error_type="invalid_value_error",
@@ -86,7 +81,6 @@ class TestValidationError:
         assert error.get_http_status() == 422
 
     def test_http_status_422_negative(self):
-        """Test that negative token ID errors return 422."""
         error = ValidationError(
             message="test",
             error_type="invalid_value_error",
@@ -98,12 +92,9 @@ class TestValidationError:
 class TestValidateScoreRequest:
     """Tests for validate_score_request function."""
 
-    # =========================================================================
     # Query validation tests
-    # =========================================================================
 
     def test_query_missing(self):
-        """Test error when query is None."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query=None,
@@ -114,7 +105,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.param == "query"
 
     def test_query_empty_string(self):
-        """Test error when query is empty string."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="",
@@ -124,7 +114,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "empty_query"
 
     def test_query_empty_list(self):
-        """Test error when query is empty token list."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query=[],
@@ -134,7 +123,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "empty_query"
 
     def test_query_invalid_type(self):
-        """Test error when query is neither string nor list."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query=123,
@@ -144,7 +132,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "invalid_query_type"
 
     def test_query_list_with_non_integers(self):
-        """Test error when query list contains non-integers."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query=[1, "two", 3],
@@ -153,12 +140,9 @@ class TestValidateScoreRequest:
             )
         assert exc_info.value.code == "invalid_token_id_type"
 
-    # =========================================================================
     # Items validation tests
-    # =========================================================================
 
     def test_items_missing(self):
-        """Test error when items is None."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -168,7 +152,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "missing_items"
 
     def test_items_not_list(self):
-        """Test error when items is not a list."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -178,7 +161,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "invalid_items_type"
 
     def test_items_empty_list(self):
-        """Test error when items is empty list."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -188,7 +170,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "empty_items"
 
     def test_items_mixed_types_with_query(self):
-        """Test error when items type doesn't match query type."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="text query",
@@ -198,7 +179,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "mixed_input_types"
 
     def test_items_inconsistent_types_text_mode(self):
-        """Test error when items contains non-strings in text mode."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -208,7 +188,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "invalid_items_type"
 
     def test_items_inconsistent_types_token_mode(self):
-        """Test error when items contains non-lists in token mode."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query=[1, 2, 3],
@@ -218,7 +197,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "invalid_items_type"
 
     def test_items_token_mode_non_integer(self):
-        """Test error when token mode items contain non-integers."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query=[1, 2, 3],
@@ -228,7 +206,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "invalid_token_id_type"
 
     def test_label_token_ids_missing(self):
-        """Test error when label_token_ids is None."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -238,7 +215,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "missing_label_token_ids"
 
     def test_label_token_ids_not_list(self):
-        """Test error when label_token_ids is not a list."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -248,7 +224,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "invalid_label_token_ids_type"
 
     def test_label_token_ids_empty(self):
-        """Test error when label_token_ids is empty."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -258,7 +233,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "empty_label_token_ids"
 
     def test_label_token_ids_non_integer(self):
-        """Test error when label_token_ids contains non-integer."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -268,7 +242,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "invalid_token_id_type"
 
     def test_label_token_ids_negative(self):
-        """Test error when label_token_ids contains negative value."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -279,7 +252,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.get_http_status() == 422
 
     def test_label_token_ids_exceeds_vocab(self):
-        """Test error when label_token_ids exceeds vocabulary size."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -290,12 +262,9 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "token_id_exceeds_vocab"
         assert exc_info.value.get_http_status() == 422
 
-    # =========================================================================
     # Boolean parameter validation tests
-    # =========================================================================
 
     def test_apply_softmax_not_boolean(self):
-        """Test error when apply_softmax is not boolean."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -306,7 +275,6 @@ class TestValidateScoreRequest:
         assert exc_info.value.code == "invalid_apply_softmax_type"
 
     def test_item_first_not_boolean(self):
-        """Test error when item_first is not boolean."""
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
                 query="test",
@@ -316,12 +284,9 @@ class TestValidateScoreRequest:
             )
         assert exc_info.value.code == "invalid_item_first_type"
 
-    # =========================================================================
     # Valid request tests
-    # =========================================================================
 
     def test_valid_text_mode_request(self):
-        """Test that valid text mode request passes validation."""
         # Should not raise
         validate_score_request(
             query="What is the answer?",
@@ -332,7 +297,6 @@ class TestValidateScoreRequest:
         )
 
     def test_valid_token_mode_request(self):
-        """Test that valid token mode request passes validation."""
         # Should not raise
         validate_score_request(
             query=[1, 2, 3, 4],
@@ -343,7 +307,6 @@ class TestValidateScoreRequest:
         )
 
     def test_valid_request_with_vocab_size(self):
-        """Test that valid request with vocab_size passes."""
         # Should not raise
         validate_score_request(
             query="test",
@@ -353,7 +316,6 @@ class TestValidateScoreRequest:
         )
 
     def test_valid_single_item(self):
-        """Test that single item request is valid."""
         # Should not raise
         validate_score_request(
             query="test",
@@ -362,7 +324,6 @@ class TestValidateScoreRequest:
         )
 
     def test_valid_empty_string_item(self):
-        """Test that empty string item is valid (for candidate scoring)."""
         # Should not raise - empty items are valid for scoring candidates
         validate_score_request(
             query="The answer is",

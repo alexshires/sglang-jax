@@ -113,9 +113,7 @@ def validate_score_request(
             apply_softmax=True,
         )
     """
-    # =========================================================================
     # Validate query
-    # =========================================================================
     if query is None:
         raise ValidationError(
             message="query is required",
@@ -160,9 +158,7 @@ def validate_score_request(
             code="invalid_query_type",
         )
 
-    # =========================================================================
     # Validate items
-    # =========================================================================
     if items is None:
         raise ValidationError(
             message="items is required",
@@ -189,7 +185,7 @@ def validate_score_request(
 
     # Determine input modes
     query_is_text = isinstance(query, str)
-    items_is_text = isinstance(items[0], str) if items else True
+    items_is_text = isinstance(items[0], str)
 
     # Check type consistency between query and items
     if query_is_text != items_is_text:
@@ -235,9 +231,7 @@ def validate_score_request(
                     code="invalid_items_type",
                 )
 
-    # =========================================================================
     # Validate label_token_ids
-    # =========================================================================
     if label_token_ids is None:
         raise ValidationError(
             message="label_token_ids is required",
@@ -286,9 +280,7 @@ def validate_score_request(
                 code="token_id_exceeds_vocab",
             )
 
-    # =========================================================================
     # Validate boolean parameters
-    # =========================================================================
     if not isinstance(apply_softmax, bool):
         raise ValidationError(
             message=f"apply_softmax must be a boolean, got {type(apply_softmax).__name__}",
