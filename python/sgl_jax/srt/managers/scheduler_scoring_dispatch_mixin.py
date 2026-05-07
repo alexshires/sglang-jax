@@ -1,6 +1,33 @@
 """Scheduler score dispatch and chunk planning helpers."""
 
+import logging
+import math
+import os
+import time
 from types import SimpleNamespace
+
+import jax
+import numpy as np
+from jax import numpy as jnp
+
+from sgl_jax.srt.managers.io_struct import ScoreFromCacheReqInput, ScoreFromCacheReqOutput
+from sgl_jax.srt.managers.schedule_batch import (
+    ModelWorkerBatch,
+    Req,
+    ScheduleBatch,
+    acc_global_bid,
+)
+from sgl_jax.srt.managers.utils import validate_input_length
+from sgl_jax.srt.mem_cache.common import alloc_token_slots
+from sgl_jax.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
+from sgl_jax.srt.sampling.sampling_batch_info import SamplingBatchInfo
+from sgl_jax.srt.utils.jax_utils import get_device_name
+
+logger = logging.getLogger(__name__)
+
+SCORE_V2_DIRECT_TOKEN_IDS_LOGPROB_ONLY_LARGE_CHUNK_SIZE = 16384
+SCORE_V2_DIRECT_TOKEN_IDS_LOGPROB_ONLY_LARGE_CHUNK_MIN_BS = 256
+SCORE_V2_DIRECT_TOKEN_IDS_LOGPROB_ONLY_LARGE_CHUNK_MAX_SEQ_LEN = 4096
 
 
 class SchedulerScoringDispatchMixin:
@@ -46,12 +73,8 @@ class SchedulerScoringDispatchMixin:
             or effective_capacity <= 1
             or total_items <= 1
         ):
-            return (
-                effective_items_per_step,
-                dispatch_token_budget,
-                replica_lane_count,
-                topology_name,
-            )
+            policy = (effective_items_per_step, dispatch_token_budget, replica_lane_count, topology_name)
+            return policy
 
         lane_scale = replica_lane_count if lane_name == "long" else max(1, replica_lane_count - 1)
         boosted_items_per_step = max(
@@ -71,10 +94,8 @@ class SchedulerScoringDispatchMixin:
         return boosted_items_per_step, dispatch_token_budget, replica_lane_count, topology_name
 
     def _score_from_cache_v2_use_direct_label_only(self, *, label_only_logprob: bool) -> bool:
-        return bool(
-            label_only_logprob
-            and getattr(self.server_args, "multi_item_score_direct_label_only", False)
-        )
+        direct_enabled = getattr(self.server_args, "multi_item_score_direct_label_only", False)
+        return bool(label_only_logprob and direct_enabled)
 
     def _score_from_cache_v2_use_direct_token_ids_logprob_only(self) -> bool:
         if bool(
@@ -169,10 +190,7 @@ class SchedulerScoringDispatchMixin:
             and real_bs >= SCORE_V2_DIRECT_TOKEN_IDS_LOGPROB_ONLY_LARGE_CHUNK_MIN_BS
             and max_seq_len <= SCORE_V2_DIRECT_TOKEN_IDS_LOGPROB_ONLY_LARGE_CHUNK_MAX_SEQ_LEN
         ):
-            return max(
-                chunk_size,
-                SCORE_V2_DIRECT_TOKEN_IDS_LOGPROB_ONLY_LARGE_CHUNK_SIZE,
-            )
+            return max(chunk_size, SCORE_V2_DIRECT_TOKEN_IDS_LOGPROB_ONLY_LARGE_CHUNK_SIZE)
         return chunk_size
 
     def _score_from_cache_v2_resolve_direct_hot_shape(
@@ -183,14 +201,11 @@ class SchedulerScoringDispatchMixin:
         real_cache_loc_tokens: int,
         max_seq_len: int,
     ) -> tuple[int, int, int]:
-        hot_bs = max(
-            0,
-            int(getattr(self.server_args, "multi_item_score_direct_hot_shape_bs", 0) or 0),
-        )
-        hot_tokens = max(
-            0,
-            int(getattr(self.server_args, "multi_item_score_direct_hot_shape_tokens", 0) or 0),
-        )
+        hot_bs_arg = getattr(self.server_args, "multi_item_score_direct_hot_shape_bs", 0) or 0
+        hot_tokens_name = "multi_item_score_direct_hot_shape_tokens"
+        hot_tokens_arg = getattr(self.server_args, hot_tokens_name, 0) or 0
+        hot_bs = max(0, int(hot_bs_arg))
+        hot_tokens = max(0, int(hot_tokens_arg))
         hot_token_rounding = max(
             0,
             int(
@@ -694,13 +709,10 @@ class SchedulerScoringDispatchMixin:
 
     @staticmethod
     def _estimate_score_from_cache_v2_words(prefix_len: int, items: list[list[int]]) -> int:
-        # Conservative host-side int32-sized tensor estimate for this chunk.
         total_item_tokens = sum(len(item) for item in items)
         total_fill_tokens = sum(prefix_len + len(item) for item in items)
         max_item_len = max((len(item) for item in items), default=0)
         bs = len(items)
-        # Terms loosely track main arrays: flat input ids, seq/prefix/extend lengths,
-        # req_to_token writes, and token-id-logprob tensors.
         return (
             total_item_tokens
             + total_fill_tokens
@@ -720,7 +732,6 @@ class SchedulerScoringDispatchMixin:
         if items_per_step <= 0:
             items_per_step = 1
 
-        # Stable length-aware packing: longer items first, original order tie-break.
         indexed_items = list(enumerate(items_2d))
         indexed_items.sort(key=lambda pair: (-len(pair[1]), pair[0]))
 
