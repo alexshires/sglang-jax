@@ -168,6 +168,9 @@ class ServerArgs:
     multi_item_enable_prefill_extend: bool = False
     multi_item_extend_batch_size: int = 32
     multi_item_prefill_extend_cache_timeout: float = 60.0
+    # For single-process engines, allow direct scheduler-thread score RPC only
+    # above this item-count threshold. 256 matches the high-fanout scorer rows.
+    multi_item_score_local_rpc_min_items: int = 256
     # Allow radix cache to keep score-prefill prefixes alive across requests.
     enable_scoring_cache: bool = False
 
@@ -1054,6 +1057,15 @@ class ServerArgs:
             ),
         )
         parser.add_argument(
+            "--multi-item-score-local-rpc-min-items",
+            type=int,
+            default=ServerArgs.multi_item_score_local_rpc_min_items,
+            help=(
+                "Minimum item count required before single-process score requests "
+                "submit directly to the scheduler thread instead of local ZMQ."
+            ),
+        )
+        parser.add_argument(
             "--enable-scoring-cache",
             action="store_true",
             help="Enable radix cache for score-prefill prefixes.",
@@ -1212,6 +1224,9 @@ class ServerArgs:
         )
         assert self.multi_item_prefill_extend_cache_timeout >= 0, (
             "--multi-item-prefill-extend-cache-timeout must be non-negative"
+        )
+        assert self.multi_item_score_local_rpc_min_items >= 0, (
+            "--multi-item-score-local-rpc-min-items must be non-negative"
         )
         if self.multi_item_enable_prefill_extend:
             assert self.enable_scoring_cache, (

@@ -536,7 +536,7 @@ class TokenizerManager(
 
                 tokenized_objs = await self._batch_tokenize_and_process(batch_size, obj)
                 batched_objs = [obj[i] for i in range(batch_size)]
-                if self.server_args.enable_tokenizer_batch_send:
+                if getattr(self.server_args, "enable_tokenizer_batch_send", False):
                     states = self._send_batch_requests(
                         batched_objs,
                         tokenized_objs,
@@ -557,7 +557,7 @@ class TokenizerManager(
                 for tmp_obj in batched_objs:
                     tokenized_objs.append(await self._tokenize_one_request(tmp_obj))
 
-                if self.server_args.enable_tokenizer_batch_send:
+                if getattr(self.server_args, "enable_tokenizer_batch_send", False):
                     states = self._send_batch_requests(
                         batched_objs,
                         tokenized_objs,
