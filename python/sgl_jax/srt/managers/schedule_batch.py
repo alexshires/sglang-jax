@@ -177,6 +177,8 @@ class Req:
         multimodal_embedding: list[list[float]] | None = None,
         deepstack_visual_embedding: list[list[float]] | None = None,
         deepstack_visual_pos_mask: list[int] | None = None,
+        cache_for_scoring: bool = False,
+        extend_from_cache: str | None = None,
     ):
         # Input and output info
         self.rid = rid
@@ -203,6 +205,8 @@ class Req:
         # Sampling info
         self.sampling_params = sampling_params
         self.return_hidden_states = return_hidden_states
+        self.cache_for_scoring = cache_for_scoring
+        self.extend_from_cache = extend_from_cache
 
         # Extra key for cache namespace isolation (e.g., cache_salt, lora_id)
         if lora_id is not None:
@@ -2096,6 +2100,7 @@ class ScheduleBatch:
             return_output_logprob_only=self.return_output_logprob_only,
             top_logprobs_nums=top_logprobs_nums,
             token_ids_logprobs=token_ids_logprobs,
+            is_prefill_only=self.is_prefill_only,
             sampling_info=sampling_info,
             positions=positions_cpu,
             mrope_positions=None,
@@ -2280,6 +2285,7 @@ class ScheduleBatch:
             return_output_logprob_only=self.return_output_logprob_only,
             top_logprobs_nums=self.top_logprobs_nums,
             token_ids_logprobs=self.token_ids_logprobs,
+            is_prefill_only=self.is_prefill_only,
             sampling_info=self.sampling_info,
             positions=positions_cpu,
             mrope_positions=mrope_positions_cpu,
@@ -2740,6 +2746,8 @@ class ModelWorkerBatch:
     # For padding
     real_bs: int
     real_bs_per_dp: list[int]
+    is_prefill_only: bool = False
+    extend_start_loc: np.ndarray | None = None
 
     # Maps "original request order" (DP-rank-then-req flat order) to the
     # DP-interleaved padded slot in the global batch. Host code applies
