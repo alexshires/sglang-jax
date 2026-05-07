@@ -98,6 +98,7 @@ class _SchedulerSender:
 class _CorrelatedWaiter[T]:
     event: asyncio.Event
     values: list[T]
+    expected_results: int
 
 
 class _CorrelatedCommunicator[T]:
@@ -123,13 +124,21 @@ class _CorrelatedCommunicator[T]:
         if rid in self._pending:
             raise RuntimeError(f"Duplicate in-flight correlated request rid={rid!r}.")
 
-        waiter = _CorrelatedWaiter(event=asyncio.Event(), values=[])
+        broadcasts = broadcast and hasattr(self._sender, "send_pyobj_all")
+        sends_to_lane = scheduler_idx is not None and hasattr(self._sender, "send_pyobj_to")
+        expected_results = max(1, self._fan_out) if broadcasts else 1
+
+        waiter = _CorrelatedWaiter(
+            event=asyncio.Event(),
+            values=[],
+            expected_results=expected_results,
+        )
         self._pending[rid] = waiter
         try:
             if obj is not None:
-                if broadcast and hasattr(self._sender, "send_pyobj_all"):
+                if broadcasts:
                     self._sender.send_pyobj_all(obj)
-                elif scheduler_idx is not None and hasattr(self._sender, "send_pyobj_to"):
+                elif sends_to_lane:
                     self._sender.send_pyobj_to(scheduler_idx, obj)
                 else:
                     self._sender.send_pyobj(obj)
@@ -162,5 +171,5 @@ class _CorrelatedCommunicator[T]:
             return
 
         waiter.values.append(recv_obj)
-        if len(waiter.values) >= self._fan_out:
+        if len(waiter.values) >= waiter.expected_results:
             waiter.event.set()
