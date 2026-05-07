@@ -1,19 +1,13 @@
 """Scheduler scoring state, ingress, and admission helpers."""
 
-import concurrent.futures as futures
-import queue
-
 import zmq
 
 from sgl_jax.srt.managers.schedule_batch import Req, ScheduleBatch
-from sgl_jax.srt.managers.scheduler_scoring_common import _LocalSchedulerRpcEnvelope
 from sgl_jax.srt.server_args import ServerArgs
 
 
 class SchedulerScoringStateMixin:
     def init_scoring_state(self, server_args: ServerArgs) -> None:
-        self.local_rpc_queue: queue.SimpleQueue[_LocalSchedulerRpcEnvelope] = queue.SimpleQueue()
-
         # Workstream B: Store cached nodes for prefill+extend
         # Map:
         # rid -> (
@@ -792,31 +786,6 @@ class SchedulerScoringStateMixin:
                         if seen:
                             score_path_frames[path] += 1
 
-                local_rpc_queue = getattr(self, "local_rpc_queue", None)
-                if local_rpc_queue is not None:
-                    while True:
-                        try:
-                            recv_local = local_rpc_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                        rpc_frame_count += 1
-                        recv_reqs.append(recv_local)
-                        rpc_req_count += 1
-                        rpc_frame_paths = {
-                            "rpc_score_from_cache_v2": False,
-                            "rpc_release_scoring_cache": False,
-                        }
-                        local_req = recv_local.req_obj
-                        if isinstance(local_req, ScoreFromCacheReqInput):
-                            score_path_counts["rpc_score_from_cache_v2"] += 1
-                            rpc_frame_paths["rpc_score_from_cache_v2"] = True
-                        elif isinstance(local_req, ReleaseScoringCacheReqInput):
-                            score_path_counts["rpc_release_scoring_cache"] += 1
-                            rpc_frame_paths["rpc_release_scoring_cache"] = True
-                        for path, seen in rpc_frame_paths.items():
-                            if seen:
-                                score_path_frames[path] += 1
-
             _drain_ingress_once()
             initial_batch_size = tokenizer_req_count + rpc_req_count
             coalesce_window_s = max(
@@ -874,35 +843,10 @@ class SchedulerScoringStateMixin:
             recv_reqs = self.broadcast_pyobj(recv_reqs)
         return recv_reqs
 
-    def submit_local_rpc(self, req_obj) -> futures.Future:
-        future: futures.Future = futures.Future()
-        self.local_rpc_queue.put(_LocalSchedulerRpcEnvelope(req_obj=req_obj, result_future=future))
-        return future
-
-    def submit_local_request(self, req_obj) -> None:
-        self.local_rpc_queue.put(_LocalSchedulerRpcEnvelope(req_obj=req_obj, result_future=None))
-
     def process_input_requests(self, recv_reqs: list):
         self._evict_expired_scoring_cache_nodes()
         for recv_req in recv_reqs:
-            local_result_future = None
-            dispatch_req = recv_req
-            if isinstance(recv_req, _LocalSchedulerRpcEnvelope):
-                local_result_future = recv_req.result_future
-                dispatch_req = recv_req.req_obj
-
-            try:
-                output = self._request_dispatcher(dispatch_req)
-            except Exception as exc:
-                if local_result_future is not None and not local_result_future.done():
-                    local_result_future.set_exception(exc)
-                raise
-
-            if local_result_future is not None:
-                if not local_result_future.done():
-                    local_result_future.set_result(output)
-                continue
-
+            output = self._request_dispatcher(recv_req)
             if output is not None:
                 if self._comm_backend is not None:
                     self._comm_backend.send_pyobj(output)
