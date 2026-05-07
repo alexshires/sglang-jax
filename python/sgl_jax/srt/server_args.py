@@ -127,6 +127,7 @@ class ServerArgs:
     disable_radix_cache: bool = False
     allow_auto_truncate: bool = False
     enable_tokenizer_batch_encode: bool = False
+    enable_tokenizer_batch_send: bool = False
     disable_overlap_schedule: bool = False
     enable_precision_tracer: bool = False
 
@@ -907,6 +908,11 @@ class ServerArgs:
             "--enable-tokenizer-batch-encode",
             action="store_true",
             help="Enable batch tokenization for improved performance when processing multiple text inputs. Do not use with image inputs, pre-tokenized input_ids, or input_embeds.",
+        )
+        parser.add_argument(
+            "--enable-tokenizer-batch-send",
+            action="store_true",
+            help="Send tokenized batch requests to the scheduler as one ZMQ payload.",
         )
         parser.add_argument(
             "--enable-precision-tracer",
