@@ -393,7 +393,11 @@ class SchedulerScoringDispatchMixin:
             extend_prefix_lens=extend_prefix_lens_cpu,
             extend_logprob_start_lens=extend_logprob_start_lens,
             extend_input_logprob_token_ids=np.empty((0,), dtype=np.int32),
+            logits_indices=np.empty((0,), dtype=np.int32),
             real_bs=1,
+            real_bs_per_dp=[1] + [0] * max(0, self.dp_size - 1),
+            dp_size=self.dp_size,
+            per_dp_bs_size=1,
             lora_ids=["0"],
             capture_hidden_mode=CaptureHiddenMode.NULL,
         )
