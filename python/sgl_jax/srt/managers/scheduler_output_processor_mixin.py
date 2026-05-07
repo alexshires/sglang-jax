@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import jax
@@ -12,6 +13,8 @@ from sgl_jax.srt.layers.routed_experts_capturer import get_global_experts_captur
 from sgl_jax.srt.managers.io_struct import AbortReq, BatchTokenIDOut
 from sgl_jax.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBatch
 from sgl_jax.srt.mem_cache.common import release_kv_cache
+from sgl_jax.srt.mem_cache.radix_cache import RadixKey
+from sgl_jax.srt.mem_cache.swa_radix_cache import SWARadixCache
 from sgl_jax.srt.precision_tracer import precision_tracer
 from sgl_jax.srt.utils.common_utils import cdiv
 
@@ -45,6 +48,99 @@ class SchedulerOutputProcessorMixin:
             bid=req.latest_bid,
         )
         req.routed_experts = np.transpose(tmp, (1, 0, 2))
+
+    def cache_finished_req_for_scoring(self: Scheduler, req: Req):
+        release_kv_cache(req, self.tree_cache)
+
+        lane_name = "default"
+        if hasattr(self, "_score_scheduler_lane_from_prefix_len"):
+            lane_name = self._score_scheduler_lane_from_prefix_len(
+                self, len(req.origin_input_ids)
+            )
+
+        reused_existing_handle = False
+        prefix_key = self._normalize_scoring_cache_prefix_key(
+            req.origin_input_ids,
+            req.extra_key,
+        )
+        if prefix_key is not None:
+            handle_candidates = sorted(
+                self.scoring_cache_prefix_handles_by_key.get(prefix_key, set())
+            )
+            for cached_handle in handle_candidates:
+                existing_entry = self.scoring_cache_nodes.get(cached_handle)
+                if existing_entry is None:
+                    continue
+                (
+                    existing_node,
+                    _,
+                    existing_prefix_ids,
+                    existing_prefix_indices,
+                    existing_extra_key,
+                    _,
+                ) = self._unpack_scoring_cache_entry(existing_entry)
+                if existing_node is None:
+                    continue
+                if isinstance(self.tree_cache, SWARadixCache):
+                    swa_uuid_for_lock = self.tree_cache.inc_lock_ref(existing_node)
+                else:
+                    self.tree_cache.inc_lock_ref(existing_node)
+                    swa_uuid_for_lock = None
+                self.scoring_cache_nodes[req.rid] = (
+                    existing_node,
+                    swa_uuid_for_lock,
+                    existing_prefix_ids,
+                    existing_prefix_indices,
+                    existing_extra_key,
+                    time.monotonic(),
+                )
+                self._register_scoring_cache_handle(
+                    req.rid,
+                    existing_prefix_ids,
+                    existing_extra_key,
+                )
+                self._record_scoring_cache_lookup(
+                    path="cache_for_scoring",
+                    hit=True,
+                    lane_name=lane_name,
+                )
+                self._record_scoring_cache_handle_created()
+                reused_existing_handle = True
+                break
+
+        if reused_existing_handle:
+            return
+
+        prefix_indices, last_node, _, _ = self.tree_cache.match_prefix(
+            key=RadixKey(req.origin_input_ids, req.extra_key)
+        )
+        if last_node is None:
+            logger.warning(
+                "Skipping scoring cache for rid=%s because radix node is missing.",
+                req.rid,
+            )
+            return
+
+        if isinstance(self.tree_cache, SWARadixCache):
+            swa_uuid_for_lock = self.tree_cache.inc_lock_ref(last_node)
+        else:
+            self.tree_cache.inc_lock_ref(last_node)
+            swa_uuid_for_lock = None
+        self.scoring_cache_nodes[req.rid] = (
+            last_node,
+            swa_uuid_for_lock,
+            req.origin_input_ids,
+            prefix_indices,
+            req.extra_key,
+            time.monotonic(),
+        )
+        self._register_scoring_cache_handle(req.rid, req.origin_input_ids, req.extra_key)
+        self._record_scoring_cache_lookup(
+            path="cache_for_scoring",
+            hit=False,
+            lane_name=lane_name,
+        )
+        self._record_scoring_cache_handle_created()
 
     def process_batch_result_prefill(
         self: Scheduler,
@@ -140,7 +236,10 @@ class SchedulerOutputProcessorMixin:
                                 >= precision_tracer.get_max_requests()
                             ):
                                 precision_tracer.stop_trace()
-                        release_kv_cache(req, self.tree_cache)
+                        if req.cache_for_scoring:
+                            self.cache_finished_req_for_scoring(req)
+                        else:
+                            release_kv_cache(req, self.tree_cache)
                     elif not info.decoding_reqs or req not in info.decoding_reqs:
                         # This updates radix so others can match
                         self.tree_cache.cache_unfinished_req(req)
