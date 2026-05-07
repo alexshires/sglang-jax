@@ -27,17 +27,11 @@ class TokenizerScoreCacheMixin:
         scheduler_fan_out = self._scheduler_sender_fan_out()
         try:
             req = ReleaseScoringCacheReqInput(rid=cache_handle)
-            if self._can_use_local_score_rpc():
-                outputs = await self._submit_local_score_rpc(
-                    req,
-                    timeout=timeout_s if timeout_s > 0 else None,
-                )
-            else:
-                outputs = await self.release_scoring_cache_communicator(
-                    req,
-                    timeout=timeout_s if timeout_s > 0 else None,
-                    broadcast=scheduler_fan_out > 1,
-                )
+            outputs = await self.release_scoring_cache_communicator(
+                req,
+                timeout=timeout_s if timeout_s > 0 else None,
+                broadcast=scheduler_fan_out > 1,
+            )
         except TimeoutError:
             logger.error(
                 "Timed out releasing prefill+extend cache handle=%s (timeout=%.2fs).",
@@ -186,16 +180,10 @@ class TokenizerScoreCacheMixin:
                 token_budget=request_token_budget,
                 max_total_tokens=request_max_total_tokens,
             )
-            if self._can_use_local_score_rpc(total_items=len(items)):
-                outputs = await self._submit_local_score_rpc(
-                    req,
-                    timeout=timeout_s if timeout_s > 0 else None,
-                )
-            else:
-                outputs = await self.score_from_cache_v2_communicator(
-                    req,
-                    timeout=timeout_s if timeout_s > 0 else None,
-                )
+            outputs = await self.score_from_cache_v2_communicator(
+                req,
+                timeout=timeout_s if timeout_s > 0 else None,
+            )
             if not outputs:
                 return ScoreFromCacheReqOutput(
                     success=False,
