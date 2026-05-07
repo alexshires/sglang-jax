@@ -80,6 +80,10 @@ class _SchedulerSender:
         sender.send_pyobj(obj)
 
     def send_pyobj_to(self, scheduler_idx: int, obj):
+        if not 0 <= scheduler_idx < len(self._senders):
+            raise IndexError(
+                f"scheduler_idx={scheduler_idx} out of range for {len(self._senders)} senders"
+            )
         self._senders[scheduler_idx].send_pyobj(obj)
 
     def send_pyobj_all(self, obj):

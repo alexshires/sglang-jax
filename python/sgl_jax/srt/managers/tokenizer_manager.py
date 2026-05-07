@@ -1004,10 +1004,12 @@ class TokenizerManager(
                     "meta_info": meta_info,
                 }
 
-            finished_reason = recv_obj.finished_reasons[i] is not None
-            if finished_reason:
+            # Broadcast prefill can receive one terminal payload per scheduler lane.
+            # Completion is gated here; cache consumers should not read duplicate lane payloads.
+            is_finished_event = recv_obj.finished_reasons[i] is not None
+            if is_finished_event:
                 state.observed_finish_count += 1
-            state.finished = finished_reason and state.observed_finish_count >= max(
+            state.finished = is_finished_event and state.observed_finish_count >= max(
                 1, state.expected_finish_count
             )
             if state.finished:
@@ -1261,7 +1263,6 @@ class SignalHandler:
         kill_process_tree(os.getpid())
 
 
-@dataclasses.dataclass
 class _Communicator[T]:
     """Note: The communicator now only run up to 1 in-flight request at any time."""
 
@@ -1280,6 +1281,7 @@ class _Communicator[T]:
         scheduler_idx: int | None = None,
         broadcast: bool | None = None,
     ):
+        """Auto-broadcast when waiting for multiple scheduler-lane responses."""
         async with self._lock:
             self._result_event = asyncio.Event()
             self._result_values = []
