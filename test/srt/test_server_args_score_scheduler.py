@@ -5,6 +5,24 @@ import pytest
 from sgl_jax.srt.server_args import ServerArgs
 
 
+def test_score_v2_allow_reqpool_oversubscribe_flag_parsing():
+    parser = argparse.ArgumentParser()
+    ServerArgs.add_cli_args(parser)
+    args = parser.parse_args(
+        ["--model-path", "dummy-model", "--score-v2-allow-reqpool-oversubscribe"]
+    )
+    server_args = ServerArgs.from_cli_args(args)
+    assert server_args.score_v2_allow_reqpool_oversubscribe is True
+
+
+def test_score_v2_allow_reqpool_oversubscribe_default_false():
+    parser = argparse.ArgumentParser()
+    ServerArgs.add_cli_args(parser)
+    args = parser.parse_args(["--model-path", "dummy-model"])
+    server_args = ServerArgs.from_cli_args(args)
+    assert server_args.score_v2_allow_reqpool_oversubscribe is False
+
+
 def test_score_scheduler_controls_parse():
     parser = argparse.ArgumentParser()
     ServerArgs.add_cli_args(parser)
