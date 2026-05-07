@@ -19,8 +19,6 @@ from sgl_jax.srt.validation import (
 
 
 class TestValidationError:
-    """Tests for ValidationError exception class."""
-
     def test_basic_creation(self):
         error = ValidationError(
             message="test error",
@@ -90,8 +88,6 @@ class TestValidationError:
 
 
 class TestValidateScoreRequest:
-    """Tests for validate_score_request function."""
-
     # Query validation tests
 
     def test_query_missing(self):
@@ -205,6 +201,16 @@ class TestValidateScoreRequest:
             )
         assert exc_info.value.code == "invalid_token_id_type"
 
+    def test_items_token_mode_empty_item(self):
+        with pytest.raises(ValidationError) as exc_info:
+            validate_score_request(
+                query=[1, 2, 3],
+                items=[[1, 2], [], [3]],
+                label_token_ids=[1, 2],
+            )
+        assert exc_info.value.code == "empty_item"
+        assert exc_info.value.param == "items"
+
     def test_label_token_ids_missing(self):
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
@@ -274,6 +280,16 @@ class TestValidateScoreRequest:
             )
         assert exc_info.value.code == "invalid_apply_softmax_type"
 
+    def test_apply_softmax_int_not_boolean(self):
+        with pytest.raises(ValidationError) as exc_info:
+            validate_score_request(
+                query="test",
+                items=["item"],
+                label_token_ids=[1, 2],
+                apply_softmax=1,
+            )
+        assert exc_info.value.code == "invalid_apply_softmax_type"
+
     def test_item_first_not_boolean(self):
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
@@ -281,6 +297,16 @@ class TestValidateScoreRequest:
                 items=["item"],
                 label_token_ids=[1, 2],
                 item_first=1,
+            )
+        assert exc_info.value.code == "invalid_item_first_type"
+
+    def test_item_first_string_not_boolean(self):
+        with pytest.raises(ValidationError) as exc_info:
+            validate_score_request(
+                query="test",
+                items=["item"],
+                label_token_ids=[1, 2],
+                item_first="true",
             )
         assert exc_info.value.code == "invalid_item_first_type"
 

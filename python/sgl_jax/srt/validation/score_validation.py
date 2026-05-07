@@ -211,6 +211,13 @@ def validate_score_request(
                     param="items",
                     code="invalid_items_type",
                 )
+            if len(item) == 0:
+                raise ValidationError(
+                    message=f"items[{i}] token list cannot be empty",
+                    error_type="invalid_value_error",
+                    param="items",
+                    code="empty_item",
+                )
             # Check that all elements in the list are integers
             non_ints = [x for x in item if not isinstance(x, int)]
             if non_ints:
