@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+import logging
 import math
 from typing import Any
 
@@ -9,6 +10,8 @@ from sgl_jax.srt.managers.io_struct import (
     EmbeddingReqInput,
     GenerateReqInput,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -89,3 +92,84 @@ class _SchedulerSender:
     def send_pyobj_all(self, obj):
         for sender in self._senders:
             sender.send_pyobj(obj)
+
+
+@dataclasses.dataclass
+class _CorrelatedWaiter[T]:
+    event: asyncio.Event
+    values: list[T]
+    expected_results: int
+
+
+class _CorrelatedCommunicator[T]:
+    """Allow multiple in-flight RPCs by correlating responses with `rid`."""
+
+    def __init__(self, sender, fan_out: int):
+        self._sender = sender
+        self._fan_out = fan_out
+        self._pending: dict[str, _CorrelatedWaiter[T]] = {}
+
+    async def __call__(
+        self,
+        obj,
+        timeout: float | None = None,
+        scheduler_idx: int | None = None,
+        broadcast: bool = False,
+    ):
+        rid = getattr(obj, "rid", None)
+        if not rid:
+            raise ValueError(
+                "Correlated communicator requires request objects with non-empty `rid`."
+            )
+        if rid in self._pending:
+            raise RuntimeError(f"Duplicate in-flight correlated request rid={rid!r}.")
+
+        broadcasts = broadcast and hasattr(self._sender, "send_pyobj_all")
+        sends_to_lane = scheduler_idx is not None and hasattr(self._sender, "send_pyobj_to")
+        expected_results = max(1, self._fan_out) if broadcasts else 1
+
+        waiter = _CorrelatedWaiter(
+            event=asyncio.Event(),
+            values=[],
+            expected_results=expected_results,
+        )
+        self._pending[rid] = waiter
+        try:
+            if obj is not None:
+                if broadcasts:
+                    self._sender.send_pyobj_all(obj)
+                elif sends_to_lane:
+                    self._sender.send_pyobj_to(scheduler_idx, obj)
+                else:
+                    self._sender.send_pyobj(obj)
+
+            wait_coro = waiter.event.wait()
+            if timeout is not None and timeout > 0:
+                await asyncio.wait_for(wait_coro, timeout=timeout)
+            else:
+                await wait_coro
+            return list(waiter.values)
+        finally:
+            self._pending.pop(rid, None)
+
+    def handle_recv(self, recv_obj: T):
+        rid = getattr(recv_obj, "rid", None)
+        if not rid:
+            logger.warning(
+                "Dropping correlated communicator response missing rid. type=%s",
+                type(recv_obj).__name__,
+            )
+            return
+
+        waiter = self._pending.get(rid)
+        if waiter is None:
+            logger.warning(
+                "Dropping correlated communicator response with no active waiter. rid=%s type=%s",
+                rid,
+                type(recv_obj).__name__,
+            )
+            return
+
+        waiter.values.append(recv_obj)
+        if len(waiter.values) >= waiter.expected_results:
+            waiter.event.set()

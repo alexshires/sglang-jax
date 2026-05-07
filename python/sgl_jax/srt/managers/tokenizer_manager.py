@@ -28,7 +28,9 @@ from sgl_jax.srt.configs.model_config import ModelConfig
 from sgl_jax.srt.hf_transformers_utils import get_tokenizer
 from sgl_jax.srt.lora.lora_registry import LoRARegistry
 from sgl_jax.srt.managers.tokenizer_score_api_mixin import TokenizerScoreApiMixin
+from sgl_jax.srt.managers.tokenizer_score_cache_mixin import TokenizerScoreCacheMixin
 from sgl_jax.srt.managers.tokenizer_score_common import (
+    _CorrelatedCommunicator,
     _SchedulerSender,
     ReqState,
 )
@@ -56,8 +58,10 @@ from sgl_jax.srt.managers.io_struct import (
     ProfileReqType,
     ReleaseMemoryOccupationReqInput,
     ReleaseMemoryOccupationReqOutput,
+    ReleaseScoringCacheReqOutput,
     ResumeMemoryOccupationReqInput,
     ResumeMemoryOccupationReqOutput,
+    ScoreFromCacheReqOutput,
     SetInternalStateReq,
     SetInternalStateReqOutput,
     TokenizedEmbeddingReqInput,
@@ -81,6 +85,7 @@ logger = logging.getLogger(__name__)
 
 class TokenizerManager(
     TokenizerScoreApiMixin,
+    TokenizerScoreCacheMixin,
     TokenizerScoreRoutingMixin,
 ):
     """TokenizerManager is a process that tokenizes the text."""
@@ -180,6 +185,12 @@ class TokenizerManager(
             self.send_to_scheduler, server_args.dp_size
         )
         self.flush_cache_communicator = _Communicator(self.send_to_scheduler, server_args.dp_size)
+        self.release_scoring_cache_communicator = _Communicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
+        self.score_from_cache_v2_communicator = _CorrelatedCommunicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
         self.profile_communicator = _Communicator(self.send_to_scheduler, server_args.dp_size)
         self.get_internal_state_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
@@ -187,6 +198,10 @@ class TokenizerManager(
         self.set_internal_state_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
+        self.score_fastpath_attempted = 0
+        self.score_fastpath_succeeded = 0
+        self.score_fastpath_fallback = 0
+        self.score_fastpath_fallback_reasons: dict[str, int] = {}
 
         # LoRA
         self.lora_registry = LoRARegistry(self.server_args.lora_paths)
@@ -214,6 +229,14 @@ class TokenizerManager(
                 (
                     FlushCacheReqOutput,
                     self.flush_cache_communicator.handle_recv,
+                ),
+                (
+                    ReleaseScoringCacheReqOutput,
+                    self.release_scoring_cache_communicator.handle_recv,
+                ),
+                (
+                    ScoreFromCacheReqOutput,
+                    self.score_from_cache_v2_communicator.handle_recv,
                 ),
                 (
                     ProfileReqOutput,

@@ -168,6 +168,20 @@ class ServerArgs:
     multi_item_enable_prefill_extend: bool = False
     multi_item_extend_batch_size: int = 32
     multi_item_prefill_extend_cache_timeout: float = 60.0
+    # Experimental score-from-cache fastpath v2.
+    # Default OFF to preserve production behavior.
+    multi_item_enable_score_from_cache_v2: bool = False
+    # Internal chunk size. 64 matches the measured high-parallelism scorer page size.
+    multi_item_score_from_cache_v2_items_per_step: int = 64
+    # Enable per-request items_per_step downshift from token budget.
+    multi_item_score_from_cache_v2_adaptive_chunk_by_token_budget: bool = False
+    # Target token budget per score-from-cache v2 dispatch.
+    # A value <= 0 disables token-budget sizing.
+    multi_item_score_from_cache_v2_token_budget: int = 0
+    # Floor for adaptive items_per_step.
+    multi_item_score_from_cache_v2_min_items_per_step: int = 1
+    # Emit per-request score-path metrics to logs.
+    multi_item_score_fastpath_log_metrics: bool = False
     # Allow radix cache to keep score-prefill prefixes alive across requests.
     enable_scoring_cache: bool = False
 
@@ -1054,6 +1068,45 @@ class ServerArgs:
             ),
         )
         parser.add_argument(
+            "--multi-item-enable-score-from-cache-v2",
+            action="store_true",
+            help="Enable experimental v2 score-from-cache fastpath.",
+        )
+        parser.add_argument(
+            "--multi-item-score-from-cache-v2-items-per-step",
+            type=int,
+            default=ServerArgs.multi_item_score_from_cache_v2_items_per_step,
+            help="Internal chunk size for score-from-cache v2 fastpath.",
+        )
+        parser.add_argument(
+            "--multi-item-score-from-cache-v2-adaptive-chunk-by-token-budget",
+            action="store_true",
+            help=(
+                "Enable per-request score-from-cache v2 chunk-size adaptation "
+                "using token-budget controls."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-from-cache-v2-token-budget",
+            type=int,
+            default=ServerArgs.multi_item_score_from_cache_v2_token_budget,
+            help=(
+                "Target token budget per score-from-cache v2 dispatch "
+                "(<=0 disables adaptive budget sizing)."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-from-cache-v2-min-items-per-step",
+            type=int,
+            default=ServerArgs.multi_item_score_from_cache_v2_min_items_per_step,
+            help="Minimum items_per_step floor for adaptive score-from-cache v2 sizing.",
+        )
+        parser.add_argument(
+            "--multi-item-score-fastpath-log-metrics",
+            action="store_true",
+            help="Emit per-/v1/score path metrics including fastpath counters and timings.",
+        )
+        parser.add_argument(
             "--enable-scoring-cache",
             action="store_true",
             help="Enable radix cache for score-prefill prefixes.",
@@ -1213,9 +1266,31 @@ class ServerArgs:
         assert self.multi_item_prefill_extend_cache_timeout >= 0, (
             "--multi-item-prefill-extend-cache-timeout must be non-negative"
         )
+        assert self.multi_item_score_from_cache_v2_items_per_step > 0, (
+            "--multi-item-score-from-cache-v2-items-per-step must be positive"
+        )
+        assert self.multi_item_score_from_cache_v2_token_budget >= 0, (
+            "--multi-item-score-from-cache-v2-token-budget must be non-negative"
+        )
+        assert self.multi_item_score_from_cache_v2_min_items_per_step > 0, (
+            "--multi-item-score-from-cache-v2-min-items-per-step must be positive"
+        )
+        if self.multi_item_score_from_cache_v2_adaptive_chunk_by_token_budget:
+            assert self.multi_item_score_from_cache_v2_token_budget > 0, (
+                "Adaptive token-budget chunk sizing requires "
+                "--multi-item-score-from-cache-v2-token-budget > 0."
+            )
         if self.multi_item_enable_prefill_extend:
             assert self.enable_scoring_cache, (
                 "prefill+extend scoring requires scoring cache. Please pass --enable-scoring-cache."
+            )
+        if self.multi_item_enable_score_from_cache_v2:
+            assert self.multi_item_enable_prefill_extend, (
+                "score-from-cache v2 requires prefill+extend to be enabled. "
+                "Please pass --multi-item-enable-prefill-extend."
+            )
+            assert self.enable_scoring_cache, (
+                "score-from-cache v2 requires scoring cache. Please pass --enable-scoring-cache."
             )
 
     def check_lora_server_args(self):
