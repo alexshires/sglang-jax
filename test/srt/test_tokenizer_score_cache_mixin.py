@@ -93,7 +93,7 @@ def test_prefill_scoring_cache_builds_prefill_only_request():
     assert len(manager.generated_requests) == 1
     req = manager.generated_requests[0]
     assert req.input_ids == manager.tokenizer.encode("hi", add_special_tokens=False)
-    assert req.sampling_params == {"max_new_tokens": 0}
+    assert req.sampling_params == {"max_new_tokens": 1}
     assert req.return_logprob is False
     assert req.cache_for_scoring is True
     assert req.is_single is True
