@@ -4,19 +4,343 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import uuid
 
 from sgl_jax.srt.managers.io_struct import (
+    GenerateReqInput,
     ReleaseScoringCacheReqInput,
     ScoreFromCacheReqInput,
     ScoreFromCacheReqOutput,
 )
+from sgl_jax.srt.managers.tokenizer_score_common import _stable_softmax
 from sgl_jax.srt.server_args import ServerArgs
+from sgl_jax.srt.validation import ValidationError
 
 logger = logging.getLogger(__name__)
 
 
 class TokenizerScoreCacheMixin:
+    def _normalize_score_query_tokens(self, query: str | list[int] | None) -> list[int]:
+        if query is None:
+            raise ValidationError("query is required", param="query", code="missing_query")
+        if isinstance(query, str):
+            if len(query) == 0:
+                raise ValidationError("query cannot be empty", param="query", code="empty_query")
+            if self.tokenizer is None:
+                raise ValidationError(
+                    "Tokenizer is required for text scoring.",
+                    param="query",
+                    code="tokenizer_required",
+                )
+            return self.tokenizer.encode(query, add_special_tokens=False)
+        if not isinstance(query, list):
+            raise ValidationError(
+                f"query must be a string or list of integers, got {type(query).__name__}",
+                param="query",
+                code="invalid_query_type",
+            )
+        if len(query) == 0:
+            raise ValidationError("query token list cannot be empty", param="query", code="empty_query")
+        if any(not isinstance(token_id, int) for token_id in query):
+            raise ValidationError(
+                "query contains non-integer values in token input mode",
+                param="query",
+                code="invalid_token_id_type",
+            )
+        return query
+
+    def _normalize_score_item_tokens(
+        self,
+        items: str | list[str] | list[list[int]] | None,
+    ) -> list[list[int]]:
+        if items is None:
+            raise ValidationError("items is required", param="items", code="missing_items")
+        if isinstance(items, str):
+            items = [items]
+        if not isinstance(items, list):
+            raise ValidationError(
+                "items must be a list of strings or list of token ID lists",
+                param="items",
+                code="invalid_items_type",
+            )
+        if len(items) == 0:
+            raise ValidationError("items cannot be empty", param="items", code="empty_items")
+        if isinstance(items[0], str):
+            if self.tokenizer is None:
+                raise ValidationError(
+                    "Tokenizer is required for text scoring.",
+                    param="items",
+                    code="tokenizer_required",
+                )
+            for idx, item in enumerate(items):
+                if not isinstance(item, str):
+                    raise ValidationError(
+                        f"items[{idx}] must be a string when using text input mode",
+                        param="items",
+                        code="mixed_item_types",
+                    )
+            return [self.tokenizer.encode(item, add_special_tokens=False) for item in items]
+
+        normalized_items: list[list[int]] = []
+        for idx, item in enumerate(items):
+            if not isinstance(item, list):
+                raise ValidationError(
+                    f"items[{idx}] must be a list of integers when using token input mode",
+                    param="items",
+                    code="invalid_item_type",
+                )
+            if len(item) == 0:
+                raise ValidationError(
+                    f"items[{idx}] must contain at least one token",
+                    param="items",
+                    code="empty_item",
+                )
+            if any(not isinstance(token_id, int) for token_id in item):
+                raise ValidationError(
+                    f"items[{idx}] contains non-integer values",
+                    param="items",
+                    code="invalid_token_id_type",
+                )
+            normalized_items.append(item)
+        return normalized_items
+
+    def _validate_label_token_ids_for_score(
+        self,
+        label_token_ids: list[int] | None,
+        *,
+        apply_softmax: bool,
+    ) -> None:
+        if label_token_ids is None:
+            raise ValidationError(
+                "label_token_ids is required",
+                param="label_token_ids",
+                code="missing_label_token_ids",
+            )
+        if not isinstance(label_token_ids, list) or len(label_token_ids) == 0:
+            raise ValidationError(
+                "label_token_ids must be a non-empty list of integers",
+                param="label_token_ids",
+                code="invalid_label_token_ids",
+            )
+        if not isinstance(apply_softmax, bool):
+            raise ValidationError(
+                f"apply_softmax must be a boolean, got {type(apply_softmax).__name__}",
+                param="apply_softmax",
+                code="invalid_apply_softmax",
+            )
+        vocab_size = len(self.tokenizer) if self.tokenizer is not None else None
+        for idx, token_id in enumerate(label_token_ids):
+            if not isinstance(token_id, int):
+                raise ValidationError(
+                    f"label_token_ids[{idx}] must be an integer",
+                    param="label_token_ids",
+                    code="invalid_token_id_type",
+                )
+            if token_id < 0:
+                raise ValidationError(
+                    f"label_token_ids[{idx}] is negative ({token_id})",
+                    error_type="invalid_value_error",
+                    param="label_token_ids",
+                    code="token_id_negative",
+                )
+            if vocab_size is not None and token_id >= vocab_size:
+                raise ValidationError(
+                    f"label_token_ids[{idx}] ({token_id}) exceeds vocabulary size ({vocab_size})",
+                    error_type="invalid_value_error",
+                    param="label_token_ids",
+                    code="token_id_exceeds_vocab",
+                )
+
+    async def prefill_scoring_cache(self, query: str | list[int] | None = None) -> str:
+        query_tokens = self._normalize_score_query_tokens(query)
+        return await self._prefill_and_cache(query_tokens)
+
+    async def score_from_cache(
+        self,
+        cache_handle: str,
+        items: str | list[str] | list[list[int]] | None = None,
+        label_token_ids: list[int] | None = None,
+        apply_softmax: bool = False,
+    ) -> list[list[float]]:
+        if not isinstance(cache_handle, str) or len(cache_handle) == 0:
+            raise ValidationError(
+                "cache_handle must be a non-empty string",
+                param="cache_handle",
+                code="invalid_cache_handle",
+            )
+        item_tokens_list = self._normalize_score_item_tokens(items)
+        self._validate_label_token_ids_for_score(
+            label_token_ids,
+            apply_softmax=apply_softmax,
+        )
+        (
+            resolved_items_per_step,
+            resolved_max_total_tokens,
+            resolved_token_budget,
+        ) = self._resolve_score_from_cache_v2_items_per_step(
+            query_tokens=[],
+            items=item_tokens_list,
+        )
+        fastpath_out = await self._score_from_cache_fastpath_v2(
+            cache_handle=cache_handle,
+            items=item_tokens_list,
+            label_token_ids=label_token_ids,
+            apply_softmax=apply_softmax,
+            items_per_step=resolved_items_per_step,
+            token_budget=resolved_token_budget,
+            max_total_tokens=resolved_max_total_tokens,
+        )
+        if not fastpath_out.success:
+            error_msg = fastpath_out.error_msg or fastpath_out.fallback_reason or "unknown_error"
+            raise RuntimeError(f"score_from_cache failed: {error_msg}")
+        if len(fastpath_out.scores) != len(item_tokens_list):
+            raise RuntimeError(
+                "score_from_cache returned wrong score count: "
+                f"{len(fastpath_out.scores)} != {len(item_tokens_list)}."
+            )
+        return fastpath_out.scores
+
+    async def release_scoring_cache(self, cache_handle: str) -> bool:
+        if not isinstance(cache_handle, str) or len(cache_handle) == 0:
+            raise ValidationError(
+                "cache_handle must be a non-empty string",
+                param="cache_handle",
+                code="invalid_cache_handle",
+            )
+        return await self._release_cache(cache_handle)
+
+    async def _prefill_and_cache(self, query_tokens: list[int]) -> str:
+        cache_handle = uuid.uuid4().hex
+        logger.debug(
+            "Prefill+extend: starting prefill cache request rid=%s query_tokens=%d",
+            cache_handle,
+            len(query_tokens),
+        )
+        req = GenerateReqInput(
+            input_ids=query_tokens,
+            sampling_params={"max_new_tokens": 0},
+            return_logprob=False,
+            cache_for_scoring=True,
+            is_single=True,
+            rid=cache_handle,
+        )
+        async for _ in self.generate_request(req):
+            pass
+        logger.debug("Prefill+extend: prefill cache ready rid=%s", cache_handle)
+        return cache_handle
+
+    async def _batched_extend_score(
+        self,
+        cache_handle: str,
+        items: list[list[int]],
+        label_token_ids: list[int],
+        apply_softmax: bool = False,
+    ) -> list[list[float]]:
+        scores, _ = await self._batched_extend_score_with_metrics(
+            cache_handle=cache_handle,
+            items=items,
+            label_token_ids=label_token_ids,
+            apply_softmax=apply_softmax,
+        )
+        return scores
+
+    async def _batched_extend_score_with_metrics(
+        self,
+        cache_handle: str,
+        items: list[list[int]],
+        label_token_ids: list[int],
+        apply_softmax: bool = False,
+    ) -> tuple[list[list[float]], dict[str, float | int]]:
+        if not items:
+            return (
+                [],
+                {
+                    "dispatch_count": 0,
+                    "queue_wait_s": 0.0,
+                    "device_compute_s": 0.0,
+                    "host_orchestration_s": 0.0,
+                    "lifecycle_requests_sent": 0,
+                    "lifecycle_results_received": 0,
+                },
+            )
+        logger.debug(
+            "Prefill+extend: scoring extend batch handle=%s batch_items=%d",
+            cache_handle,
+            len(items),
+        )
+        requests = GenerateReqInput(
+            input_ids=items,
+            sampling_params={"max_new_tokens": 0},
+            return_logprob=True,
+            return_output_logprob_only=False,
+            token_ids_logprob=label_token_ids,
+            extend_from_cache=cache_handle,
+            stream=False,
+        )
+        results = []
+        async for res in self.generate_request(requests):
+            if isinstance(res, list):
+                results.extend(res)
+            else:
+                results.append(res)
+        if all("index" in result for result in results):
+            results.sort(key=lambda x: x["index"])
+        if len(results) != len(items):
+            raise RuntimeError(
+                f"Expected {len(items)} extend results for cache handle {cache_handle}, "
+                f"but got {len(results)}."
+            )
+
+        scores = []
+        for result in results:
+            meta_info = result.get("meta_info", {})
+            finish_reason = meta_info.get("finish_reason")
+            if isinstance(finish_reason, dict) and finish_reason.get("type") == "abort":
+                raise RuntimeError(
+                    "Prefill+extend extend request aborted for "
+                    f"{meta_info.get('id', '<unknown>')}: {finish_reason}"
+                )
+            output_logprobs = meta_info.get("output_token_ids_logprobs", [])
+            if not output_logprobs or not output_logprobs[0]:
+                raise RuntimeError(
+                    "output_token_ids_logprobs is empty for prefill+extend request "
+                    f"{meta_info.get('id', '<unknown>')}."
+                )
+            logprobs_map = {}
+            for logprob, token_id, _ in output_logprobs[0]:
+                if token_id in label_token_ids:
+                    logprobs_map[token_id] = logprob
+            item_scores = [
+                logprobs_map.get(token_id, float("-inf")) for token_id in label_token_ids
+            ]
+            if all(score == float("-inf") for score in item_scores):
+                raise RuntimeError(
+                    "No requested label token IDs were found in output_token_ids_logprobs for "
+                    f"{meta_info.get('id', '<unknown>')}."
+                )
+            if apply_softmax:
+                scores.append(_stable_softmax(item_scores))
+            else:
+                scores.append([math.exp(x) if x != float("-inf") else 0.0 for x in item_scores])
+
+        logger.debug(
+            "Prefill+extend: completed extend batch handle=%s batch_items=%d",
+            cache_handle,
+            len(items),
+        )
+        return (
+            scores,
+            {
+                "dispatch_count": 1,
+                "queue_wait_s": 0.0,
+                "device_compute_s": 0.0,
+                "host_orchestration_s": 0.0,
+                "lifecycle_requests_sent": len(items),
+                "lifecycle_results_received": len(results),
+            },
+        )
+
     async def _release_cache(self, cache_handle: str):
         """Release the cached query."""
         self.auto_create_handle_loop()

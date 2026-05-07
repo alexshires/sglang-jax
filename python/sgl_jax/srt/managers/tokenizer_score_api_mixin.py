@@ -59,6 +59,20 @@ class TokenizerScoreApiMixin:
                 code="too_many_items",
             )
 
+        if getattr(self.server_args, "multi_item_enable_prefill_extend", False):
+            if item_first:
+                raise ValidationError(
+                    message="item_first=True is not supported with prefill+extend scoring",
+                    param="item_first",
+                    code="unsupported_item_first",
+                )
+            return await self.score_prefill_extend(
+                query_tokens=self._normalize_score_query_tokens(query),
+                item_tokens_list=self._normalize_score_item_tokens(items),
+                label_token_ids=label_token_ids,
+                apply_softmax=apply_softmax,
+            )
+
         if isinstance(query, str) and (
             isinstance(items, str)
             or (isinstance(items, list) and (not items or isinstance(items[0], str)))
