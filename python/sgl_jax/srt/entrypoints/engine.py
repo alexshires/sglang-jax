@@ -712,8 +712,6 @@ def _launch_subprocesses(
 
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
-    if tokenizer_manager.scheduler_pids:
-        scheduler_info["scheduler_pids"] = list(tokenizer_manager.scheduler_pids)
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
     return tokenizer_manager, template_manager, scheduler_info
 
@@ -782,7 +780,6 @@ def _launch_threads(
     # Launch tokenizer process
     tokenizer_port_args = [lane_port_args for _, lane_port_args, _ in scheduler_launch_plan]
     tokenizer_manager = TokenizerManager(server_args, tokenizer_port_args)
-    tokenizer_manager.scheduler_pids = []
 
     # Initialize templates
     template_manager = TemplateManager()
@@ -799,12 +796,6 @@ def _launch_threads(
     assert len(scheduler_infos) > 0, "scheduler_infos is empty"
     scheduler_info = scheduler_infos[0]
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
-    if len(scheduler_infos) == 1:
-        scheduler = scheduler_info.get("scheduler")
-        if scheduler is not None and hasattr(scheduler, "submit_local_rpc"):
-            tokenizer_manager.local_rpc_submitter = scheduler.submit_local_rpc
-        if scheduler is not None and hasattr(scheduler, "submit_local_request"):
-            tokenizer_manager.local_request_submitter = scheduler.submit_local_request
     return tokenizer_manager, template_manager, scheduler_info
 
 

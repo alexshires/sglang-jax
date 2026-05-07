@@ -187,7 +187,6 @@ class TokenizerManager(
         self.set_internal_state_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
-        self.local_rpc_submitter = None
         self.local_request_submitter = None
 
         # LoRA
@@ -233,8 +232,6 @@ class TokenizerManager(
             ]
         )
         self.wait_timeout = int(os.environ.get("SGLANG_WAIT_TIMEOUT", "4"))
-        self.scheduler_pids: list[int] = []
-        self.scheduler_unavailable_error: str | None = None
 
     async def generate_request(
         self,
@@ -456,11 +453,6 @@ class TokenizerManager(
                         raise ValueError(
                             f"Request is disconnected from the client side (type 1). Abort request rid={obj.rid}"
                         ) from e
-                if not self._check_and_handle_scheduler_health():
-                    raise ValueError(
-                        self.scheduler_unavailable_error
-                        or "Scheduler subprocess is unavailable. Please restart the server."
-                    ) from None
                 continue
 
             out = state.out_list[-1]
@@ -514,20 +506,10 @@ class TokenizerManager(
 
                 tokenized_objs = await self._batch_tokenize_and_process(batch_size, obj)
                 batched_objs = [obj[i] for i in range(batch_size)]
-                if getattr(self.server_args, "enable_tokenizer_batch_send", False):
-                    states = self._send_batch_requests(
-                        batched_objs,
-                        tokenized_objs,
-                        created_time,
-                    )
-                    for tmp_obj, state in zip(batched_objs, states, strict=True):
-                        generators.append(self._wait_one_response(tmp_obj, state, request))
-                        rids.append(tmp_obj.rid)
-                else:
-                    for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
-                        state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
-                        generators.append(self._wait_one_response(tmp_obj, state, request))
-                        rids.append(tmp_obj.rid)
+                for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
+                    state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
+                    generators.append(self._wait_one_response(tmp_obj, state, request))
+                    rids.append(tmp_obj.rid)
             else:
                 # Sequential tokenization and processing
                 batched_objs = [obj[i] for i in range(batch_size)]
@@ -535,20 +517,10 @@ class TokenizerManager(
                 for tmp_obj in batched_objs:
                     tokenized_objs.append(await self._tokenize_one_request(tmp_obj))
 
-                if getattr(self.server_args, "enable_tokenizer_batch_send", False):
-                    states = self._send_batch_requests(
-                        batched_objs,
-                        tokenized_objs,
-                        created_time,
-                    )
-                    for tmp_obj, state in zip(batched_objs, states, strict=True):
-                        generators.append(self._wait_one_response(tmp_obj, state, request))
-                        rids.append(tmp_obj.rid)
-                else:
-                    for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
-                        state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
-                        generators.append(self._wait_one_response(tmp_obj, state, request))
-                        rids.append(tmp_obj.rid)
+                for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
+                    state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
+                    generators.append(self._wait_one_response(tmp_obj, state, request))
+                    rids.append(tmp_obj.rid)
         else:
             # FIXME: When using batch and parallel_sample_num together, the perf is not optimal.
             if batch_size > 128:
