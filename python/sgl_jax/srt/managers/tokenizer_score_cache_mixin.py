@@ -219,7 +219,7 @@ class TokenizerScoreCacheMixin:
         )
         req = GenerateReqInput(
             input_ids=query_tokens,
-            sampling_params={"max_new_tokens": 0},
+            sampling_params={"max_new_tokens": 1},
             return_logprob=False,
             cache_for_scoring=True,
             is_single=True,
@@ -271,7 +271,7 @@ class TokenizerScoreCacheMixin:
         )
         requests = GenerateReqInput(
             input_ids=items,
-            sampling_params={"max_new_tokens": 0},
+            sampling_params={"max_new_tokens": 1},
             return_logprob=True,
             return_output_logprob_only=False,
             token_ids_logprob=label_token_ids,
