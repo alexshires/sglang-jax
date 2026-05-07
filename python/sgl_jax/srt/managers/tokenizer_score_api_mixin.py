@@ -173,17 +173,14 @@ class TokenizerScoreApiMixin:
         )
         # Comprehensive validation per RFC-006
         vocab_size = len(self.tokenizer) if self.tokenizer is not None else None
-        try:
-            validate_score_request(
-                query=query,
-                items=items,
-                label_token_ids=label_token_ids,
-                apply_softmax=apply_softmax,
-                item_first=item_first,
-                vocab_size=vocab_size,
-            )
-        except ValidationError as e:
-            raise ValueError(e.message) from e
+        validate_score_request(
+            query=query,
+            items=items,
+            label_token_ids=label_token_ids,
+            apply_softmax=apply_softmax,
+            item_first=item_first,
+            vocab_size=vocab_size,
+        )
 
         max_multi_item_count = int(getattr(self.server_args, "max_multi_item_count", 0) or 0)
         if (
