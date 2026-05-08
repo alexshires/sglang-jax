@@ -1,10 +1,12 @@
 from types import SimpleNamespace
 
 from sgl_jax.srt.managers.io_struct import ScoreFromCacheReqInput, ScoreFromCacheReqOutput
-from sgl_jax.srt.managers.scheduler_scoring_execute_mixin import SchedulerScoringExecuteMixin
+from sgl_jax.srt.managers import scheduler_scoring_execute_mixin
 
 
-class _FakeScheduler(SchedulerScoringExecuteMixin):
+class _FakeScheduler(scheduler_scoring_execute_mixin.SchedulerScoringExecuteMixin):
+    """Minimal host contract for SchedulerScoringExecuteMixin capacity tests."""
+
     def __init__(self, *, allow_reqpool_oversubscribe: bool):
         self.enable_overlap = False
         self.server_args = SimpleNamespace(
@@ -196,6 +198,22 @@ def test_score_from_cache_v2_clamps_to_max_running_requests_by_default():
 
 def test_score_from_cache_v2_can_oversubscribe_to_live_req_pool_size():
     scheduler = _FakeScheduler(allow_reqpool_oversubscribe=True)
+
+    out = scheduler.score_from_cache_v2(_make_req(item_count=50))
+
+    assert out.success is True
+    assert out.effective_items_per_step == 25
+    assert out.dispatch_count == 2
+    assert scheduler.chunk_sizes == [25, 25]
+
+
+def test_score_from_cache_v2_env_override_allows_oversubscribe(monkeypatch):
+    monkeypatch.setattr(
+        scheduler_scoring_execute_mixin,
+        "SCORE_V2_ALLOW_REQPOOL_OVERSUBSCRIBE",
+        True,
+    )
+    scheduler = _FakeScheduler(allow_reqpool_oversubscribe=False)
 
     out = scheduler.score_from_cache_v2(_make_req(item_count=50))
 

@@ -1340,13 +1340,13 @@ class ServerArgs:
             "--score-scheduler-dynamic-items-per-step-short-lane-bias",
             type=float,
             default=ServerArgs.score_scheduler_dynamic_items_per_step_short_lane_bias,
-            help="Scaling bias applied to dynamic items_per_step in the short lane.",
+            help="Positive multiplier for dynamic items_per_step in the short lane.",
         )
         parser.add_argument(
             "--score-scheduler-dynamic-items-per-step-long-lane-bias",
             type=float,
             default=ServerArgs.score_scheduler_dynamic_items_per_step_long_lane_bias,
-            help="Scaling bias applied to dynamic items_per_step in the long lane.",
+            help="Positive multiplier for dynamic items_per_step in the long lane.",
         )
         parser.add_argument(
             "--score-scheduler-dynamic-items-per-step-short-lane-min",
@@ -1651,6 +1651,23 @@ class ServerArgs:
         assert self.score_scheduler_dynamic_items_per_step_long_lane_min > 0, (
             "--score-scheduler-dynamic-items-per-step-long-lane-min must be positive"
         )
+        if self.score_scheduler_dynamic_items_per_step_enable:
+            if self.score_scheduler_short_lane_max_inflight > 0:
+                assert (
+                    self.score_scheduler_dynamic_items_per_step_short_lane_min
+                    <= self.score_scheduler_short_lane_max_inflight
+                ), (
+                    "--score-scheduler-dynamic-items-per-step-short-lane-min must be <= "
+                    "--score-scheduler-short-lane-max-inflight when that cap is enabled"
+                )
+            if self.score_scheduler_long_lane_max_inflight > 0:
+                assert (
+                    self.score_scheduler_dynamic_items_per_step_long_lane_min
+                    <= self.score_scheduler_long_lane_max_inflight
+                ), (
+                    "--score-scheduler-dynamic-items-per-step-long-lane-min must be <= "
+                    "--score-scheduler-long-lane-max-inflight when that cap is enabled"
+                )
 
     def check_lora_server_args(self):
         """Validate and normalize LoRA-related server arguments."""

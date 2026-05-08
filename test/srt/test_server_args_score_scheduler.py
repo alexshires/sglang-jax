@@ -104,3 +104,25 @@ def test_score_scheduler_controls_reject_non_positive_dynamic_pressure_threshold
     )
     with pytest.raises(AssertionError, match="dynamic-items-per-step-pressure-threshold"):
         server_args.check_server_args()
+
+
+def test_score_scheduler_controls_reject_short_lane_floor_above_enabled_cap():
+    server_args = ServerArgs(
+        model_path="dummy-model",
+        score_scheduler_dynamic_items_per_step_enable=True,
+        score_scheduler_short_lane_max_inflight=8,
+        score_scheduler_dynamic_items_per_step_short_lane_min=16,
+    )
+    with pytest.raises(AssertionError, match="short-lane-min"):
+        server_args.check_server_args()
+
+
+def test_score_scheduler_controls_reject_long_lane_floor_above_enabled_cap():
+    server_args = ServerArgs(
+        model_path="dummy-model",
+        score_scheduler_dynamic_items_per_step_enable=True,
+        score_scheduler_long_lane_max_inflight=4,
+        score_scheduler_dynamic_items_per_step_long_lane_min=8,
+    )
+    with pytest.raises(AssertionError, match="long-lane-min"):
+        server_args.check_server_args()
