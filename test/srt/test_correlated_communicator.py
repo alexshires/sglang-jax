@@ -1,3 +1,5 @@
+"""Unit tests for the private correlated tokenizer-manager response contract."""
+
 import asyncio
 from dataclasses import dataclass
 
@@ -20,6 +22,9 @@ class _DummySender:
         self.sent = []
 
     def send_pyobj(self, obj):
+        self.sent.append(obj)
+
+    def send_pyobj_all(self, obj):
         self.sent.append(obj)
 
 
@@ -61,12 +66,18 @@ def test_correlated_communicator_requires_non_empty_rid():
 def test_correlated_communicator_waits_for_fanout():
     async def run():
         communicator = _CorrelatedCommunicator(_DummySender(), fan_out=2)
-        task = asyncio.create_task(communicator(_Req(rid="x"), timeout=1.0))
+        task = asyncio.create_task(
+            communicator(_Req(rid="x"), timeout=1.0, broadcast=True)
+        )
         await asyncio.sleep(0)
 
         communicator.handle_recv(_Resp(rid="x", value=10))
-        await asyncio.sleep(0)
-        assert not task.done()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.05)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("Expected communicator to wait for full fanout.")
 
         communicator.handle_recv(_Resp(rid="x", value=11))
         out = await task

@@ -152,18 +152,16 @@ def jax_trace_context(log_dir: str):
 
 class CustomTestCase(unittest.TestCase):
     def _callTestMethod(self, method):
-        if getattr(method, "__unittest_skip__", False):
-            raise unittest.SkipTest(getattr(method, "__unittest_skip_why__", ""))
-
         max_retry = int(os.environ.get("SGLANG_TEST_MAX_RETRY", "1" if is_in_ci() else "0"))
         try:
             retry(
                 lambda: super(CustomTestCase, self)._callTestMethod(method),
                 max_retry=max_retry,
+                should_retry=lambda e: not isinstance(e, unittest.SkipTest),
             )
         except Exception as e:
             if isinstance(e.__cause__, unittest.SkipTest):
-                raise e.__cause__
+                raise e.__cause__ from None
             raise
 
 

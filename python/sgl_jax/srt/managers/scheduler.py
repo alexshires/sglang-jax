@@ -106,6 +106,11 @@ class SyncError(Exception):
 
 def _maybe_freeze_gc_after_warmup(server_args: ServerArgs) -> None:
     if not getattr(server_args, "enable_gc_freeze", False):
+        if getattr(server_args, "gc_freeze_rollback", False):
+            logger.warning(
+                "--gc-freeze-rollback was set without --enable-gc-freeze; no GC freeze "
+                "or rollback will be applied."
+            )
         return
     if not hasattr(gc, "freeze"):
         logger.warning("GC freeze requested but gc.freeze is unavailable.")
@@ -116,7 +121,7 @@ def _maybe_freeze_gc_after_warmup(server_args: ServerArgs) -> None:
         gc.freeze()
         freeze_after = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else -1
         logger.info(
-            "Applied gc.freeze after warmup/precompile. collected=%d freeze_before=%d freeze_after=%d gc_count=%s",
+            "Applied gc.freeze after scheduler precompile/warmup. collected=%d freeze_before=%d freeze_after=%d gc_count=%s",
             collected,
             freeze_before,
             freeze_after,
@@ -134,7 +139,7 @@ def _maybe_freeze_gc_after_warmup(server_args: ServerArgs) -> None:
             else:
                 logger.warning("GC freeze rollback requested but gc.unfreeze is unavailable.")
     except Exception:
-        logger.exception("Failed to apply gc.freeze after warmup/precompile.")
+        logger.exception("Failed to apply gc.freeze after scheduler precompile/warmup.")
 
 
 class SendDataError(Exception):

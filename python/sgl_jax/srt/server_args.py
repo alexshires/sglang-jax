@@ -1038,12 +1038,19 @@ class ServerArgs:
         parser.add_argument(
             "--enable-gc-freeze",
             action="store_true",
-            help="Call gc.freeze after scheduler warmup/precompile to reduce GC overhead.",
+            help=(
+                "Call gc.freeze after scheduler precompile/warmup to reduce GC overhead. "
+                "In single-process mode this is process-global and also affects tokenizer "
+                "and server objects."
+            ),
         )
         parser.add_argument(
             "--gc-freeze-rollback",
             action="store_true",
-            help="Immediately unfreeze after gc.freeze; useful for validating rollback behavior.",
+            help=(
+                "Immediately unfreeze after --enable-gc-freeze applies gc.freeze; useful "
+                "for validating rollback behavior."
+            ),
         )
 
         # For sampling

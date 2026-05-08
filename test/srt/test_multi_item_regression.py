@@ -2,23 +2,31 @@
 Regression checks for multi-item score API correctness.
 """
 
+import os
+import tempfile
 import unittest
 
 import jax
 
 from sgl_jax.srt.entrypoints.engine import Engine
-from sgl_jax.test.test_utils import CustomTestCase
+from sgl_jax.test.score_test_utils import get_label_token_ids, get_tokenizer
+from sgl_jax.test.test_utils import DEFAULT_SMALL_MODEL_NAME_FOR_TEST, CustomTestCase
 
-TEST_MODEL_NAME = "/models/Qwen/Qwen3-0.6B"
-LABEL_TOKEN_IDS = [9834, 902]
-QUERY_IDS = [1957, 1437, 25975, 25]
+TEST_MODEL_NAME = os.getenv("SGLANG_TEST_MODEL", DEFAULT_SMALL_MODEL_NAME_FOR_TEST)
+DOWNLOAD_DIR = os.getenv("SGLANG_TEST_DOWNLOAD_DIR", tempfile.gettempdir())
+QUERY_TEXT = "Classify the statement:"
 BASE_ITEMS = [
-    [358, 2948, 419, 1985, 13],
-    [1096, 374, 17478, 323, 38123, 13],
-    [1084, 4278, 438, 3601, 13],
-    [56938, 4271, 323, 4937, 9691, 13],
-    [2806, 5802, 279, 3349, 13],
+    "This answer is correct.",
+    "This answer is wrong.",
+    "The statement is uncertain.",
+    "The response is incomplete.",
+    "The evidence supports the claim.",
 ]
+
+
+def _skip_if_no_tpu() -> None:
+    if not any(device.platform == "tpu" for device in jax.devices()):
+        raise unittest.SkipTest("Multi-item regression tests require TPU.")
 
 
 def _max_abs_diff(vec_a: list[float], vec_b: list[float]) -> float:
@@ -34,7 +42,7 @@ def _build_score_engine() -> Engine:
         random_seed=3,
         node_rank=0,
         mem_fraction_static=0.6,
-        download_dir="/dev/shm",
+        download_dir=DOWNLOAD_DIR,
         dtype="bfloat16",
         skip_server_warmup=True,
         attention_backend="fa",
@@ -52,21 +60,27 @@ def _build_score_engine() -> Engine:
 
 
 class TestMultiItemRegression(CustomTestCase):
+    @classmethod
+    def setUpClass(cls):
+        _skip_if_no_tpu()
+        cls.tokenizer = get_tokenizer(TEST_MODEL_NAME)
+
     def test_prefill_extend_flow_no_regression(self):
         engine = _build_score_engine()
         try:
             items = [BASE_ITEMS[i % len(BASE_ITEMS)] for i in range(16)]
+            label_token_ids = get_label_token_ids(self.tokenizer, [" A", " B"])
 
             first_scores = engine.score(
-                query=QUERY_IDS,
+                query=QUERY_TEXT,
                 items=items,
-                label_token_ids=LABEL_TOKEN_IDS,
+                label_token_ids=label_token_ids,
                 apply_softmax=True,
             )
             second_scores = engine.score(
-                query=QUERY_IDS,
+                query=QUERY_TEXT,
                 items=items,
-                label_token_ids=LABEL_TOKEN_IDS,
+                label_token_ids=label_token_ids,
                 apply_softmax=True,
             )
 
