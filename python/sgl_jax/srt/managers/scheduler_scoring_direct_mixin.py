@@ -209,6 +209,14 @@ class SchedulerScoringDirectMixin:
         cache_loc_cpu = np.zeros(aligned_prefix_tokens, dtype=np.int32)
         cache_loc_cpu[:prefix_len] = prefix_cache_loc
 
+        sampling_info = SamplingBatchInfo.generate_for_precompile_all_greedy(
+            1,
+            vocab_size=self.model_config.vocab_size,
+        )
+        # SamplingMetadata expects this optional field on the schedule-batch
+        # sampling object even when skip_sample=True.
+        sampling_info.vocab_mask = None
+
         batch = ModelWorkerBatch(
             bid=acc_global_bid(),
             forward_mode=ForwardMode.EXTEND,
@@ -217,10 +225,7 @@ class SchedulerScoringDirectMixin:
             seq_lens=seq_lens_cpu,
             out_cache_loc=prefix_cache_loc,
             req_pool_indices=np.asarray([0], dtype=np.int32),
-            sampling_info=SamplingBatchInfo.generate_for_precompile_all_greedy(
-                1,
-                vocab_size=self.model_config.vocab_size,
-            ),
+            sampling_info=sampling_info,
             positions=positions_cpu,
             extend_start_loc=extend_start_loc,
             cache_loc=cache_loc_cpu,
@@ -241,15 +246,25 @@ class SchedulerScoringDirectMixin:
             lora_ids=["0"],
             capture_hidden_mode=CaptureHiddenMode.NULL,
         )
-        logits_output, _, _ = self.tp_worker.forward_batch_generation(
-            model_worker_batch=batch,
-            launch_done=None,
-            skip_sample=True,
-            sampling_metadata=None,
-        )
-        if logits_output is not None and logits_output.next_token_logits is not None:
-            logits_output.next_token_logits.block_until_ready()
-        return prefix_cache_loc, prefix_alloc
+        try:
+            logits_output, _, _ = self.tp_worker.forward_batch_generation(
+                model_worker_batch=batch,
+                launch_done=None,
+                skip_sample=True,
+                sampling_metadata=None,
+            )
+            if logits_output is not None and logits_output.next_token_logits is not None:
+                logits_output.next_token_logits.block_until_ready()
+            return prefix_cache_loc, prefix_alloc
+        except Exception:
+            if prefix_alloc.size > 0:
+                try:
+                    self.token_to_kv_pool_allocator.free(prefix_alloc)
+                except Exception:
+                    logger.exception(
+                        "Direct bulk score warmup cleanup failed while freeing prefix materialization slots."
+                    )
+            raise
 
     def _run_score_direct_label_only_warmup(self) -> None:
         prefix_alloc = np.empty((0,), dtype=np.int32)
