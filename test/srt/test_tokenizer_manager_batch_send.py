@@ -1,4 +1,5 @@
 import asyncio
+import zlib
 from types import SimpleNamespace
 
 import pytest
@@ -14,10 +15,14 @@ from sgl_jax.srt.managers.scheduler_scoring_state_mixin import (
 )
 from sgl_jax.srt.managers.tokenizer_manager import TokenizerManager
 from sgl_jax.srt.managers.tokenizer_score_common import ReqState
+from sgl_jax.srt.managers.tokenizer_score_routing_mixin import (
+    TokenizerScoreRoutingMixin,
+)
 
 
 class _NoopSender:
-    def __init__(self):
+    def __init__(self, fan_out: int = 1):
+        self.fan_out = fan_out
         self.calls = []
 
     def send_pyobj(self, obj):
@@ -26,13 +31,14 @@ class _NoopSender:
     def send_pyobj_to(self, scheduler_idx, obj):
         self.calls.append((scheduler_idx, obj))
 
+    def send_pyobj_all(self, obj):
+        self.calls.append(("all", obj))
 
-class _FakeBatchSendManager:
-    _send_batch_requests = TokenizerManager._send_batch_requests
 
-    def __init__(self):
+class _FakeBatchSendManager(TokenizerScoreRoutingMixin):
+    def __init__(self, fan_out: int = 1):
         self.rid_to_state = {}
-        self.send_to_scheduler = _NoopSender()
+        self.send_to_scheduler = _NoopSender(fan_out=fan_out)
 
     def _raise_if_scheduler_unavailable(self):
         return None
@@ -136,7 +142,7 @@ class _FakeSchedulerIngress:
         }
 
 
-def test_send_batch_requests_sends_single_payload_and_tracks_all_states():
+def test_send_batch_requests_sends_one_zmq_frame_and_tracks_all_states():
     manager = _FakeBatchSendManager()
     reqs = [SimpleNamespace(rid="rid-a"), SimpleNamespace(rid="rid-b")]
     tokenized_objs = [SimpleNamespace(tok=1), SimpleNamespace(tok=2)]
@@ -148,6 +154,28 @@ def test_send_batch_requests_sends_single_payload_and_tracks_all_states():
     assert manager.send_to_scheduler.calls == [("default", tokenized_objs)]
 
 
+def test_send_batch_requests_returns_no_states_for_empty_batch():
+    manager = _FakeBatchSendManager()
+
+    states = manager._send_batch_requests([], [], created_time=0.0)
+
+    assert states == []
+    assert manager.rid_to_state == {}
+    assert manager.send_to_scheduler.calls == []
+
+
+def test_send_batch_requests_unwraps_single_element_payload():
+    manager = _FakeBatchSendManager()
+    req = SimpleNamespace(rid="rid-a")
+    tokenized_obj = SimpleNamespace(tok=1)
+
+    states = manager._send_batch_requests([req], [tokenized_obj], created_time=1.0)
+
+    assert len(states) == 1
+    assert manager.rid_to_state == {"rid-a": states[0]}
+    assert manager.send_to_scheduler.calls == [("default", tokenized_obj)]
+
+
 def test_send_batch_requests_rejects_length_mismatch():
     manager = _FakeBatchSendManager()
 
@@ -155,6 +183,57 @@ def test_send_batch_requests_rejects_length_mismatch():
         manager._send_batch_requests(
             [SimpleNamespace(rid="rid-a")], [], created_time=0.0
         )
+
+
+def test_send_batch_requests_routes_uniform_extend_cache_batch_to_lane():
+    manager = _FakeBatchSendManager(fan_out=4)
+    cache_handle = "cache-handle-1"
+    reqs = [SimpleNamespace(rid="rid-a"), SimpleNamespace(rid="rid-b")]
+    tokenized_objs = [
+        SimpleNamespace(extend_from_cache=cache_handle),
+        SimpleNamespace(extend_from_cache=cache_handle),
+    ]
+
+    states = manager._send_batch_requests(reqs, tokenized_objs, created_time=1.0)
+
+    expected_idx = zlib.crc32(cache_handle.encode("utf-8")) % 4
+    assert len(states) == 2
+    assert manager.send_to_scheduler.calls == [(expected_idx, tokenized_objs)]
+
+
+def test_send_batch_requests_falls_back_for_heterogeneous_extend_handles():
+    manager = _FakeBatchSendManager(fan_out=4)
+    reqs = [SimpleNamespace(rid="rid-a"), SimpleNamespace(rid="rid-b")]
+    tokenized_objs = [
+        SimpleNamespace(extend_from_cache="cache-a"),
+        SimpleNamespace(extend_from_cache="cache-b"),
+    ]
+
+    states = manager._send_batch_requests(reqs, tokenized_objs, created_time=1.0)
+
+    expected_calls = [
+        (zlib.crc32(b"cache-a") % 4, tokenized_objs[0]),
+        (zlib.crc32(b"cache-b") % 4, tokenized_objs[1]),
+    ]
+    assert len(states) == 2
+    assert manager.send_to_scheduler.calls == expected_calls
+
+
+def test_send_batch_requests_falls_back_for_cache_for_scoring_broadcast():
+    manager = _FakeBatchSendManager(fan_out=4)
+    reqs = [SimpleNamespace(rid="rid-a"), SimpleNamespace(rid="rid-b")]
+    tokenized_objs = [
+        SimpleNamespace(cache_for_scoring=True),
+        SimpleNamespace(cache_for_scoring=True),
+    ]
+
+    states = manager._send_batch_requests(reqs, tokenized_objs, created_time=1.0)
+
+    assert [state.expected_finish_count for state in states] == [4, 4]
+    assert manager.send_to_scheduler.calls == [
+        ("all", tokenized_objs[0]),
+        ("all", tokenized_objs[1]),
+    ]
 
 
 @pytest.mark.parametrize("enable_batch_send", [False, True])

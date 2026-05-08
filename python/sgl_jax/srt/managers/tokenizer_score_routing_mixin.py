@@ -71,6 +71,14 @@ class TokenizerScoreRoutingMixin:
     ) -> list[ReqState]:
         if len(objs) != len(tokenized_objs):
             raise ValueError("objs and tokenized_objs must have the same length")
+        if not tokenized_objs:
+            return []
+
+        if any(bool(getattr(obj, "cache_for_scoring", False)) for obj in tokenized_objs):
+            return [
+                self._send_one_request(obj, tokenized_obj, created_time)
+                for obj, tokenized_obj in zip(objs, tokenized_objs, strict=True)
+            ]
 
         try:
             caller_loop = asyncio.get_running_loop()
@@ -78,15 +86,21 @@ class TokenizerScoreRoutingMixin:
             caller_loop = None
 
         scheduler_idx = None
-        if tokenized_objs:
-            extend_handles = {
-                getattr(tokenized_obj, "extend_from_cache", None)
-                for tokenized_obj in tokenized_objs
-            }
-            if len(extend_handles) == 1:
-                extend_handle = next(iter(extend_handles))
-                if extend_handle:
-                    scheduler_idx = self._score_lane_scheduler_index(extend_handle)
+        extend_handles = [
+            getattr(tokenized_obj, "extend_from_cache", None)
+            for tokenized_obj in tokenized_objs
+        ]
+        non_empty_extend_handles = {handle for handle in extend_handles if handle}
+        if len(non_empty_extend_handles) > 1 or (
+            non_empty_extend_handles and any(not handle for handle in extend_handles)
+        ):
+            return [
+                self._send_one_request(obj, tokenized_obj, created_time)
+                for obj, tokenized_obj in zip(objs, tokenized_objs, strict=True)
+            ]
+        if len(non_empty_extend_handles) == 1:
+            extend_handle = next(iter(non_empty_extend_handles))
+            scheduler_idx = self._score_lane_scheduler_index(extend_handle)
 
         payload = tokenized_objs[0] if len(tokenized_objs) == 1 else tokenized_objs
         if scheduler_idx is not None:
