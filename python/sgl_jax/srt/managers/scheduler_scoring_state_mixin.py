@@ -1,5 +1,6 @@
 """Scheduler scoring state, ingress, and admission helpers."""
 
+import logging
 import time
 from collections import deque
 
@@ -7,12 +8,44 @@ import numpy as np
 import zmq
 
 from sgl_jax.srt.managers.io_struct import (
+    AbortReq,
+    ContinueGenerationReqInput,
+    FlushCacheReqInput,
+    GetInternalStateReq,
+    PauseGenerationReqInput,
+    ProfileReq,
     ReleaseScoringCacheReqInput,
     ScoreFromCacheReqInput,
+    SetInternalStateReq,
     TokenizedGenerateReqInput,
 )
 from sgl_jax.srt.managers.schedule_batch import Req, ScheduleBatch
 from sgl_jax.srt.server_args import ServerArgs
+
+logger = logging.getLogger(__name__)
+
+_SCORE_SCHEDULER_MAX_MICROBATCH_WINDOW_S = 0.1
+_SCORE_SCHEDULER_DEFAULT_LANE_BURST = 1
+
+_SCHEDULER_INGRESS_REQ_TYPES = (
+    TokenizedGenerateReqInput,
+    AbortReq,
+    ProfileReq,
+    FlushCacheReqInput,
+    ReleaseScoringCacheReqInput,
+    ScoreFromCacheReqInput,
+    GetInternalStateReq,
+    SetInternalStateReq,
+    PauseGenerationReqInput,
+    ContinueGenerationReqInput,
+)
+
+# Higher priority requests are moved earlier within their lane. Reusing an
+# existing scoring prefix is preferred over creating new cache work.
+_CACHE_ADMISSION_PRIORITY_NONE = 0
+_CACHE_ADMISSION_PRIORITY_EXTEND_MISS = 1
+_CACHE_ADMISSION_PRIORITY_CACHE_PREFIX_HIT = 2
+_CACHE_ADMISSION_PRIORITY_EXTEND_HIT = 3
 
 
 class SchedulerScoringStateMixin:
@@ -112,11 +145,21 @@ class SchedulerScoringStateMixin:
         self.score_label_only_legacy_kernel_calls = 0
         self.score_label_only_token_ids_only_calls = 0
         # Score ingress coalescing + lane fairness controls.
-        self.score_scheduler_global_microbatch_window_s = max(
+        requested_microbatch_window_s = max(
             0.0,
             float(getattr(server_args, "score_scheduler_global_microbatch_window_ms", 0.0))
             / 1000.0,
         )
+        self.score_scheduler_global_microbatch_window_s = min(
+            requested_microbatch_window_s,
+            _SCORE_SCHEDULER_MAX_MICROBATCH_WINDOW_S,
+        )
+        if requested_microbatch_window_s > _SCORE_SCHEDULER_MAX_MICROBATCH_WINDOW_S:
+            logger.warning(
+                "Clamping score scheduler microbatch window from %.6fs to %.6fs.",
+                requested_microbatch_window_s,
+                _SCORE_SCHEDULER_MAX_MICROBATCH_WINDOW_S,
+            )
         self.score_scheduler_global_microbatch_poll_s = max(
             0.0001,
             float(getattr(server_args, "score_scheduler_global_microbatch_poll_interval_ms", 0.5))
@@ -270,6 +313,21 @@ class SchedulerScoringStateMixin:
         }
         self.score_scheduler_topology_name = self._detect_score_scheduler_topology_name()
 
+    @staticmethod
+    def _snapshot_int(req_owner, attr_name: str, default: int) -> int:
+        value = getattr(req_owner, attr_name, default)
+        return int(default if value is None else value)
+
+    @staticmethod
+    def _snapshot_float(req_owner, attr_name: str, default: float) -> float:
+        value = getattr(req_owner, attr_name, default)
+        return float(default if value is None else value)
+
+    @staticmethod
+    def _snapshot_bool(req_owner, attr_name: str, default: bool) -> bool:
+        value = getattr(req_owner, attr_name, default)
+        return bool(default if value is None else value)
+
     def add_scoring_internal_state(self, ret: dict) -> None:
         score_from_cache_v2_attempted = self.score_from_cache_v2_attempted
         score_timing_totals_s = {
@@ -307,17 +365,17 @@ class SchedulerScoringStateMixin:
             "succeeded": self.score_from_cache_v2_succeeded,
             "fallback": self.score_from_cache_v2_fallback,
             "fallback_reasons": dict(self.score_from_cache_v2_fallback_reasons),
-            "label_only_fused_kernel_calls": int(
-                getattr(self, "score_label_only_fused_kernel_calls", 0) or 0
+            "label_only_fused_kernel_calls": SchedulerScoringStateMixin._snapshot_int(
+                self, "score_label_only_fused_kernel_calls", 0
             ),
-            "label_only_fused_kernel_softmax_calls": int(
-                getattr(self, "score_label_only_fused_kernel_softmax_calls", 0) or 0
+            "label_only_fused_kernel_softmax_calls": SchedulerScoringStateMixin._snapshot_int(
+                self, "score_label_only_fused_kernel_softmax_calls", 0
             ),
-            "label_only_legacy_kernel_calls": int(
-                getattr(self, "score_label_only_legacy_kernel_calls", 0) or 0
+            "label_only_legacy_kernel_calls": SchedulerScoringStateMixin._snapshot_int(
+                self, "score_label_only_legacy_kernel_calls", 0
             ),
-            "label_only_token_ids_only_calls": int(
-                getattr(self, "score_label_only_token_ids_only_calls", 0) or 0
+            "label_only_token_ids_only_calls": SchedulerScoringStateMixin._snapshot_int(
+                self, "score_label_only_token_ids_only_calls", 0
             ),
             "timing_totals_s": score_timing_totals_s,
             "timing_mean_s": score_timing_mean_s,
@@ -355,44 +413,48 @@ class SchedulerScoringStateMixin:
             "score_path_frames": score_path_frames,
             "score_path_messages_per_frame": score_path_messages_per_frame,
             "score_coalescing": {
-                "window_s": float(
-                    getattr(self, "score_scheduler_global_microbatch_window_s", 0.0) or 0.0
+                "window_s": SchedulerScoringStateMixin._snapshot_float(
+                    self, "score_scheduler_global_microbatch_window_s", 0.0
                 ),
-                "poll_interval_s": float(
-                    getattr(self, "score_scheduler_global_microbatch_poll_s", 0.0005) or 0.0005
+                "poll_interval_s": SchedulerScoringStateMixin._snapshot_float(
+                    self, "score_scheduler_global_microbatch_poll_s", 0.0005
                 ),
-                "windows": int(getattr(self, "score_scheduler_microbatch_windows", 0) or 0),
-                "added_requests_total": int(
-                    getattr(self, "score_scheduler_microbatch_added_requests", 0) or 0
+                "windows": SchedulerScoringStateMixin._snapshot_int(
+                    self, "score_scheduler_microbatch_windows", 0
                 ),
-                "max_added_requests": int(
-                    getattr(self, "score_scheduler_microbatch_max_added_requests", 0) or 0
+                "added_requests_total": SchedulerScoringStateMixin._snapshot_int(
+                    self, "score_scheduler_microbatch_added_requests", 0
+                ),
+                "max_added_requests": SchedulerScoringStateMixin._snapshot_int(
+                    self, "score_scheduler_microbatch_max_added_requests", 0
                 ),
             },
         }
         ret["score_scheduler_admission_metrics"] = {
-            "short_prompt_tokens_threshold": int(
-                getattr(self, "score_scheduler_short_prompt_tokens_threshold", 2048) or 2048
+            "short_prompt_tokens_threshold": SchedulerScoringStateMixin._snapshot_int(
+                self, "score_scheduler_short_prompt_tokens_threshold", 2048
             ),
-            "short_lane_max_inflight": int(
-                getattr(self, "score_scheduler_short_lane_max_inflight", 0) or 0
+            "short_lane_max_inflight": SchedulerScoringStateMixin._snapshot_int(
+                self, "score_scheduler_short_lane_max_inflight", 0
             ),
-            "long_lane_max_inflight": int(
-                getattr(self, "score_scheduler_long_lane_max_inflight", 0) or 0
+            "long_lane_max_inflight": SchedulerScoringStateMixin._snapshot_int(
+                self, "score_scheduler_long_lane_max_inflight", 0
             ),
-            "lane_isolation_enabled": bool(
-                getattr(self, "score_scheduler_enable_lane_isolation", False)
+            "lane_isolation_enabled": SchedulerScoringStateMixin._snapshot_bool(
+                self, "score_scheduler_enable_lane_isolation", False
             ),
-            "lane_isolation_short_burst": int(
-                getattr(self, "score_scheduler_lane_isolation_short_burst", 2) or 2
+            "lane_isolation_short_burst": SchedulerScoringStateMixin._snapshot_int(
+                self, "score_scheduler_lane_isolation_short_burst", 2
             ),
-            "lane_isolation_long_burst": int(
-                getattr(self, "score_scheduler_lane_isolation_long_burst", 1) or 1
+            "lane_isolation_long_burst": SchedulerScoringStateMixin._snapshot_int(
+                self, "score_scheduler_lane_isolation_long_burst", 1
             ),
-            "lane_isolation_rounds": int(
-                getattr(self, "score_scheduler_lane_isolation_rounds", 0) or 0
+            "lane_isolation_rounds": SchedulerScoringStateMixin._snapshot_int(
+                self, "score_scheduler_lane_isolation_rounds", 0
             ),
-            "attempted": int(getattr(self, "score_scheduler_lane_admission_attempted", 0) or 0),
+            "attempted": SchedulerScoringStateMixin._snapshot_int(
+                self, "score_scheduler_lane_admission_attempted", 0
+            ),
             "admitted_by_lane": dict(
                 SchedulerScoringStateMixin._lane_counter(
                     self, "score_scheduler_lane_admission_admitted"
@@ -420,39 +482,35 @@ class SchedulerScoringStateMixin:
                 SchedulerScoringStateMixin._lane_counter(self, "score_scheduler_lane_waiting_max")
             ),
             "dynamic_items_per_step": {
-                "enabled": bool(
-                    getattr(self, "score_scheduler_dynamic_items_per_step_enable", False)
+                "enabled": SchedulerScoringStateMixin._snapshot_bool(
+                    self, "score_scheduler_dynamic_items_per_step_enable", False
                 ),
-                "pressure_threshold": int(
-                    getattr(self, "score_scheduler_dynamic_items_per_step_pressure_threshold", 64)
-                    or 64
+                "pressure_threshold": SchedulerScoringStateMixin._snapshot_int(
+                    self, "score_scheduler_dynamic_items_per_step_pressure_threshold", 64
                 ),
-                "short_lane_bias": float(
-                    getattr(self, "score_scheduler_dynamic_items_per_step_short_lane_bias", 1.0)
-                    or 1.0
+                "short_lane_bias": SchedulerScoringStateMixin._snapshot_float(
+                    self, "score_scheduler_dynamic_items_per_step_short_lane_bias", 1.0
                 ),
-                "long_lane_bias": float(
-                    getattr(self, "score_scheduler_dynamic_items_per_step_long_lane_bias", 0.75)
-                    or 0.75
+                "long_lane_bias": SchedulerScoringStateMixin._snapshot_float(
+                    self, "score_scheduler_dynamic_items_per_step_long_lane_bias", 0.75
                 ),
-                "short_lane_min": int(
-                    getattr(self, "score_scheduler_dynamic_items_per_step_short_lane_min", 32) or 32
+                "short_lane_min": SchedulerScoringStateMixin._snapshot_int(
+                    self, "score_scheduler_dynamic_items_per_step_short_lane_min", 32
                 ),
-                "long_lane_min": int(
-                    getattr(self, "score_scheduler_dynamic_items_per_step_long_lane_min", 16) or 16
+                "long_lane_min": SchedulerScoringStateMixin._snapshot_int(
+                    self, "score_scheduler_dynamic_items_per_step_long_lane_min", 16
                 ),
-                "requests": int(
-                    getattr(self, "score_scheduler_dynamic_items_per_step_requests", 0) or 0
+                "requests": SchedulerScoringStateMixin._snapshot_int(
+                    self, "score_scheduler_dynamic_items_per_step_requests", 0
                 ),
-                "requested_total": int(
-                    getattr(self, "score_scheduler_dynamic_items_per_step_requested_total", 0) or 0
+                "requested_total": SchedulerScoringStateMixin._snapshot_int(
+                    self, "score_scheduler_dynamic_items_per_step_requested_total", 0
                 ),
-                "effective_total": int(
-                    getattr(self, "score_scheduler_dynamic_items_per_step_effective_total", 0) or 0
+                "effective_total": SchedulerScoringStateMixin._snapshot_int(
+                    self, "score_scheduler_dynamic_items_per_step_effective_total", 0
                 ),
-                "max_queue_pressure": int(
-                    getattr(self, "score_scheduler_dynamic_items_per_step_max_queue_pressure", 0)
-                    or 0
+                "max_queue_pressure": SchedulerScoringStateMixin._snapshot_int(
+                    self, "score_scheduler_dynamic_items_per_step_max_queue_pressure", 0
                 ),
                 "requested_by_lane": dict(
                     SchedulerScoringStateMixin._lane_counter(
@@ -471,11 +529,11 @@ class SchedulerScoringStateMixin:
                 ),
             },
             "cache_admission_bias": {
-                "enabled": bool(
-                    getattr(self, "score_scheduler_cache_admission_bias_enable", False)
+                "enabled": SchedulerScoringStateMixin._snapshot_bool(
+                    self, "score_scheduler_cache_admission_bias_enable", False
                 ),
-                "require_hit": bool(
-                    getattr(self, "score_scheduler_cache_admission_bias_require_hit", True)
+                "require_hit": SchedulerScoringStateMixin._snapshot_bool(
+                    self, "score_scheduler_cache_admission_bias_require_hit", True
                 ),
                 "candidates_by_lane": dict(
                     SchedulerScoringStateMixin._lane_counter(
@@ -522,7 +580,9 @@ class SchedulerScoringStateMixin:
             return "default"
         threshold = max(
             1,
-            int(getattr(req_owner, "score_scheduler_short_prompt_tokens_threshold", 2048) or 2048),
+            SchedulerScoringStateMixin._snapshot_int(
+                req_owner, "score_scheduler_short_prompt_tokens_threshold", 2048
+            ),
         )
         prompt_tokens = len(getattr(req, "origin_input_ids", []) or [])
         return "short" if prompt_tokens <= threshold else "long"
@@ -531,10 +591,18 @@ class SchedulerScoringStateMixin:
     def _lane_cap(req_owner, lane: str) -> int:
         if lane == "short":
             return max(
-                0, int(getattr(req_owner, "score_scheduler_short_lane_max_inflight", 0) or 0)
+                0,
+                SchedulerScoringStateMixin._snapshot_int(
+                    req_owner, "score_scheduler_short_lane_max_inflight", 0
+                ),
             )
         if lane == "long":
-            return max(0, int(getattr(req_owner, "score_scheduler_long_lane_max_inflight", 0) or 0))
+            return max(
+                0,
+                SchedulerScoringStateMixin._snapshot_int(
+                    req_owner, "score_scheduler_long_lane_max_inflight", 0
+                ),
+            )
         return 0
 
     @staticmethod
@@ -582,28 +650,30 @@ class SchedulerScoringStateMixin:
     @staticmethod
     def _cache_admission_priority(req_owner, req: Req) -> int:
         if not bool(getattr(req_owner, "score_scheduler_cache_admission_bias_enable", False)):
-            return 0
+            return _CACHE_ADMISSION_PRIORITY_NONE
 
         extend_handle = getattr(req, "extend_from_cache", None)
         if isinstance(extend_handle, str) and extend_handle:
             scoring_cache_nodes = getattr(req_owner, "scoring_cache_nodes", {})
             if extend_handle in scoring_cache_nodes:
-                return 3
+                return _CACHE_ADMISSION_PRIORITY_EXTEND_HIT
             if bool(getattr(req_owner, "score_scheduler_cache_admission_bias_require_hit", True)):
-                return 0
-            return 1
+                return _CACHE_ADMISSION_PRIORITY_NONE
+            return _CACHE_ADMISSION_PRIORITY_EXTEND_MISS
 
         if not bool(getattr(req, "cache_for_scoring", False)):
-            return 0
+            return _CACHE_ADMISSION_PRIORITY_NONE
 
         prefix_key = req_owner._normalize_scoring_cache_prefix_key(
             getattr(req, "origin_input_ids", None),
             getattr(req, "extra_key", None),
         )
         if prefix_key is None:
-            return 0
+            return _CACHE_ADMISSION_PRIORITY_NONE
         prefix_registry = getattr(req_owner, "scoring_cache_prefix_handles_by_key", {})
-        return 2 if prefix_key in prefix_registry else 0
+        if prefix_key in prefix_registry:
+            return _CACHE_ADMISSION_PRIORITY_CACHE_PREFIX_HIT
+        return _CACHE_ADMISSION_PRIORITY_NONE
 
     @staticmethod
     def _iter_waiting_queue(req_owner, waiting_queue: list[Req]) -> list[Req]:
@@ -671,17 +741,26 @@ class SchedulerScoringStateMixin:
         )
         short_burst = max(
             1,
-            int(getattr(req_owner, "score_scheduler_lane_isolation_short_burst", 2) or 2),
+            SchedulerScoringStateMixin._snapshot_int(
+                req_owner, "score_scheduler_lane_isolation_short_burst", 2
+            ),
         )
         long_burst = max(
             1,
-            int(getattr(req_owner, "score_scheduler_lane_isolation_long_burst", 1) or 1),
+            SchedulerScoringStateMixin._snapshot_int(
+                req_owner, "score_scheduler_lane_isolation_long_burst", 1
+            ),
         )
 
         ordered_waiting_queue: list[Req] = []
         # Short-first weighted round robin keeps short-lane score traffic from
-        # being dominated by long-lane queue depth, while still admitting long/default.
-        lane_plan = (("short", short_burst), ("default", 1), ("long", long_burst))
+        # being dominated by long-lane queue depth. The default lane represents
+        # non-score/general traffic and intentionally gets one slot per round.
+        lane_plan = (
+            ("short", short_burst),
+            ("default", _SCORE_SCHEDULER_DEFAULT_LANE_BURST),
+            ("long", long_burst),
+        )
         while any(lane_queues[lane_name] for lane_name in lane_queues):
             round_made_progress = False
             for lane_name, burst in lane_plan:
@@ -713,9 +792,20 @@ class SchedulerScoringStateMixin:
     def _score_scheduler_lane_from_prefix_len(req_owner, prefix_len: int) -> str:
         threshold = max(
             1,
-            int(getattr(req_owner, "score_scheduler_short_prompt_tokens_threshold", 2048) or 2048),
+            SchedulerScoringStateMixin._snapshot_int(
+                req_owner, "score_scheduler_short_prompt_tokens_threshold", 2048
+            ),
         )
         return "short" if int(prefix_len) <= threshold else "long"
+
+    @staticmethod
+    def _unpack_ingress_payload(recv_obj) -> list:
+        if isinstance(recv_obj, (list, tuple)):
+            if len(recv_obj) == 0:
+                return []
+            if all(isinstance(req, _SCHEDULER_INGRESS_REQ_TYPES) for req in recv_obj):
+                return list(recv_obj)
+        return [recv_obj]
 
     def recv_requests(self) -> list[Req]:
         """Receive results at node_rank = 0 and broadcast it to all other Node ranks."""
@@ -737,9 +827,7 @@ class SchedulerScoringStateMixin:
                     except zmq.ZMQError:
                         break
                     tokenizer_frame_count += 1
-                    unpacked_reqs = (
-                        list(recv_obj) if isinstance(recv_obj, (list, tuple)) else [recv_obj]
-                    )
+                    unpacked_reqs = SchedulerScoringStateMixin._unpack_ingress_payload(recv_obj)
                     recv_reqs.extend(unpacked_reqs)
                     tokenizer_req_count += len(unpacked_reqs)
                     tokenizer_frame_paths = {
@@ -775,9 +863,7 @@ class SchedulerScoringStateMixin:
                     except zmq.ZMQError:
                         break
                     rpc_frame_count += 1
-                    unpacked_reqs = (
-                        list(recv_obj) if isinstance(recv_obj, (list, tuple)) else [recv_obj]
-                    )
+                    unpacked_reqs = SchedulerScoringStateMixin._unpack_ingress_payload(recv_obj)
                     recv_reqs.extend(unpacked_reqs)
                     rpc_req_count += len(unpacked_reqs)
                     rpc_frame_paths = {
@@ -797,13 +883,20 @@ class SchedulerScoringStateMixin:
 
             _drain_ingress_once()
             initial_batch_size = tokenizer_req_count + rpc_req_count
-            coalesce_window_s = max(
-                0.0,
-                float(getattr(self, "score_scheduler_global_microbatch_window_s", 0.0) or 0.0),
+            coalesce_window_s = min(
+                max(
+                    0.0,
+                    SchedulerScoringStateMixin._snapshot_float(
+                        self, "score_scheduler_global_microbatch_window_s", 0.0
+                    ),
+                ),
+                _SCORE_SCHEDULER_MAX_MICROBATCH_WINDOW_S,
             )
             coalesce_poll_s = max(
                 0.0001,
-                float(getattr(self, "score_scheduler_global_microbatch_poll_s", 0.0005) or 0.0005),
+                SchedulerScoringStateMixin._snapshot_float(
+                    self, "score_scheduler_global_microbatch_poll_s", 0.0005
+                ),
             )
             if initial_batch_size > 0 and coalesce_window_s > 0:
                 self.score_scheduler_microbatch_windows = (
