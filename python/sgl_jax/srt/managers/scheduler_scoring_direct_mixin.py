@@ -1,6 +1,83 @@
 """Scheduler label-only scoring kernels."""
 
-from sgl_jax.srt.managers.scheduler_scoring_common import *
+import logging
+import os
+import time
+
+import jax
+import numpy as np
+from jax import numpy as jnp
+from jax.scipy import special as jsp
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
+
+from sgl_jax.srt.managers.schedule_batch import (
+    ModelWorkerBatch,
+    ScheduleBatch,
+    acc_global_bid,
+)
+from sgl_jax.srt.mem_cache.common import (
+    alloc_paged_token_slots_extend,
+    alloc_token_slots,
+)
+from sgl_jax.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
+from sgl_jax.srt.sampling.sampling_batch_info import SamplingBatchInfo
+from sgl_jax.srt.utils.common_utils import get_bool_env_var
+
+logger = logging.getLogger(__name__)
+
+SCORE_V2_LABEL_ONLY_KERNEL_MODE = (
+    os.environ.get("SGLANG_SCORE_LABEL_ONLY_KERNEL_MODE", "baseline").strip().lower()
+)
+SCORE_V2_LABEL_ONLY_PARITY_CHECK = get_bool_env_var("SGLANG_SCORE_LABEL_ONLY_PARITY_CHECK")
+SCORE_V2_LABEL_ONLY_PARITY_MAX_ABS_DIFF = float(
+    os.environ.get("SGLANG_SCORE_LABEL_ONLY_PARITY_MAX_ABS_DIFF", "1e-3")
+)
+SCORE_V2_LABEL_ONLY_PARITY_MEAN_ABS_DIFF = float(
+    os.environ.get("SGLANG_SCORE_LABEL_ONLY_PARITY_MEAN_ABS_DIFF", "5e-4")
+)
+
+
+@jax.jit(static_argnums=(2,))
+def _compute_label_only_logprobs(next_token_logits, label_token_ids_arr, out_sharding):
+    """Compute target-only logprobs for [batch, vocab] logits."""
+    logits_f32 = next_token_logits.astype(jnp.float32)
+    label_logits = logits_f32.at[:, label_token_ids_arr].get(out_sharding=out_sharding)
+    normalizer = jsp.logsumexp(logits_f32, axis=-1, keepdims=True)
+    return label_logits - normalizer
+
+
+@jax.jit(static_argnums=(2,))
+def _compute_label_only_logprobs_log_softmax(next_token_logits, label_token_ids_arr, out_sharding):
+    """Alternative label-only kernel: full log-softmax then gather labels."""
+    logits_f32 = next_token_logits.astype(jnp.float32)
+    log_probs = jax.nn.log_softmax(logits_f32, axis=-1)
+    return log_probs.at[:, label_token_ids_arr].get(out_sharding=out_sharding)
+
+
+@jax.jit(static_argnums=(2, 3))
+def _compute_label_only_scores_fused(
+    next_token_logits,
+    label_token_ids_arr,
+    apply_softmax: bool,
+    out_sharding,
+):
+    """Compute label-only probabilities directly on device for score fastpath."""
+    logits_f32 = next_token_logits.astype(jnp.float32)
+    label_logits = logits_f32.at[:, label_token_ids_arr].get(out_sharding=out_sharding)
+    normalizer = jsp.logsumexp(logits_f32, axis=-1, keepdims=True)
+    label_probs = jnp.exp(label_logits - normalizer)
+    if apply_softmax:
+        return jax.nn.softmax(label_probs, axis=-1)
+    return label_probs
+
+
+@jax.jit(static_argnums=(1,))
+def _compute_label_only_scores_from_logprobs(label_logprobs, apply_softmax: bool):
+    label_probs = jnp.exp(label_logprobs.astype(jnp.float32))
+    if apply_softmax:
+        return jax.nn.softmax(label_probs, axis=-1)
+    return label_probs
 
 
 class SchedulerScoringDirectMixin:
