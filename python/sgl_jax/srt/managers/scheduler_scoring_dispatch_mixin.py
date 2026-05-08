@@ -21,6 +21,7 @@ from sgl_jax.srt.managers.utils import validate_input_length
 from sgl_jax.srt.mem_cache.common import alloc_token_slots
 from sgl_jax.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
 from sgl_jax.srt.sampling.sampling_batch_info import SamplingBatchInfo
+from sgl_jax.srt.sampling.sampling_params import SamplingParams
 from sgl_jax.srt.utils.jax_utils import get_device_name
 
 logger = logging.getLogger(__name__)
