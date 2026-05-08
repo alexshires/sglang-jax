@@ -3,6 +3,7 @@
 import logging
 import os
 import time
+from types import SimpleNamespace
 
 import jax
 import numpy as np
@@ -36,6 +37,11 @@ SCORE_V2_LABEL_ONLY_PARITY_MAX_ABS_DIFF = float(
 SCORE_V2_LABEL_ONLY_PARITY_MEAN_ABS_DIFF = float(
     os.environ.get("SGLANG_SCORE_LABEL_ONLY_PARITY_MEAN_ABS_DIFF", "5e-4")
 )
+
+
+def _server_arg_int(source, name: str, default: int) -> int:
+    value = getattr(source, name, default)
+    return int(default if value is None else value)
 
 
 @jax.jit(static_argnums=(2,))
@@ -81,6 +87,221 @@ def _compute_label_only_scores_from_logprobs(label_logprobs, apply_softmax: bool
 
 
 class SchedulerScoringDirectMixin:
+    def _score_direct_warmup_spec(self) -> SimpleNamespace | None:
+        if not self._score_from_cache_v2_use_direct_label_only(
+            label_only_logprob=bool(
+                getattr(self.server_args, "multi_item_score_label_only_logprob", False)
+            )
+        ):
+            return None
+        if not bool(getattr(self.server_args, "multi_item_score_direct_warmup_enable", False)):
+            return None
+
+        batch_size = max(
+            0,
+            _server_arg_int(self.server_args, "multi_item_score_direct_warmup_batch_size", 0),
+        )
+        if batch_size <= 0:
+            batch_size = max(
+                0,
+                _server_arg_int(self.server_args, "multi_item_score_direct_hot_shape_bs", 0),
+            )
+        if batch_size <= 0:
+            batch_size = max(
+                0,
+                _server_arg_int(self.server_args, "multi_item_score_from_cache_v2_items_per_step", 0),
+            )
+
+        return SimpleNamespace(
+            prefix_len=max(
+                0,
+                _server_arg_int(self.server_args, "multi_item_score_direct_warmup_prefix_len", 0),
+            ),
+            item_len=max(
+                0,
+                _server_arg_int(self.server_args, "multi_item_score_direct_warmup_item_len", 0),
+            ),
+            batch_size=batch_size,
+            label_count=max(
+                1,
+                _server_arg_int(self.server_args, "multi_item_score_direct_warmup_label_count", 1),
+            ),
+            apply_softmax=bool(
+                getattr(self.server_args, "multi_item_score_direct_warmup_apply_softmax", False)
+            ),
+        )
+
+    def _score_direct_warmup_token_ids(self, length: int, *, offset: int) -> list[int]:
+        if length <= 0:
+            return []
+        vocab_size = max(2, int(self.model_config.vocab_size))
+        eos_token_ids = set(getattr(self.model_config, "hf_eos_token_id", set()) or set())
+        token_ids: list[int] = []
+        # Keep synthetic warmup tokens deterministic while avoiding common special-token ranges.
+        candidate = max(1, 1024 + offset * 131)
+        while len(token_ids) < length:
+            token_id = int(candidate % vocab_size)
+            candidate += 1
+            if token_id in eos_token_ids:
+                continue
+            token_ids.append(token_id)
+        return token_ids
+
+    def _score_direct_warmup_label_token_ids(self, label_count: int) -> list[int]:
+        vocab_size = max(2, int(self.model_config.vocab_size))
+        eos_token_ids = set(getattr(self.model_config, "hf_eos_token_id", set()) or set())
+        label_ids: list[int] = []
+        seen: set[int] = set()
+        candidate = 17
+        while len(label_ids) < label_count:
+            token_id = int(candidate % vocab_size)
+            candidate += 1
+            if token_id in eos_token_ids or token_id in seen:
+                continue
+            seen.add(token_id)
+            label_ids.append(token_id)
+        return label_ids
+
+    def _materialize_score_direct_warmup_prefix(
+        self,
+        prefix_ids: list[int],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        prefix_len = len(prefix_ids)
+        if prefix_len <= 0:
+            empty = np.empty((0,), dtype=np.int32)
+            return empty, empty
+
+        aligned_prefix_tokens = int(prefix_len)
+        if self.page_size > 1:
+            aligned_prefix_tokens = (
+                (aligned_prefix_tokens + self.page_size - 1) // self.page_size
+            ) * self.page_size
+
+        prefix_alloc = np.asarray(
+            alloc_token_slots(self.tree_cache, aligned_prefix_tokens),
+            dtype=np.int32,
+        )
+        prefix_cache_loc = prefix_alloc[:prefix_len].astype(np.int32, copy=True)
+
+        input_ids_cpu = np.asarray(prefix_ids, dtype=np.int32)
+        positions_cpu = np.arange(prefix_len, dtype=np.int32)
+        seq_lens_cpu = np.asarray([prefix_len], dtype=np.int32)
+        extend_seq_lens_cpu = np.asarray([prefix_len], dtype=np.int32)
+        extend_prefix_lens_cpu = np.zeros(1, dtype=np.int32)
+        extend_start_loc = np.zeros(1, dtype=np.int32)
+        extend_logprob_start_lens = np.zeros(1, dtype=np.int32)
+        cache_loc_cpu = np.zeros(aligned_prefix_tokens, dtype=np.int32)
+        cache_loc_cpu[:prefix_len] = prefix_cache_loc
+
+        batch = ModelWorkerBatch(
+            bid=acc_global_bid(),
+            forward_mode=ForwardMode.EXTEND,
+            input_ids=input_ids_cpu,
+            real_input_ids_len=prefix_len,
+            seq_lens=seq_lens_cpu,
+            out_cache_loc=prefix_cache_loc,
+            req_pool_indices=np.asarray([0], dtype=np.int32),
+            sampling_info=SamplingBatchInfo.generate_for_precompile_all_greedy(
+                1,
+                vocab_size=self.model_config.vocab_size,
+            ),
+            positions=positions_cpu,
+            extend_start_loc=extend_start_loc,
+            cache_loc=cache_loc_cpu,
+            return_logprob=False,
+            return_output_logprob_only=False,
+            top_logprobs_nums=None,
+            token_ids_logprobs=None,
+            is_prefill_only=True,
+            extend_seq_lens=extend_seq_lens_cpu,
+            extend_prefix_lens=extend_prefix_lens_cpu,
+            extend_logprob_start_lens=extend_logprob_start_lens,
+            extend_input_logprob_token_ids=np.empty((0,), dtype=np.int32),
+            logits_indices=np.empty((0,), dtype=np.int32),
+            real_bs=1,
+            real_bs_per_dp=[1] + [0] * max(0, self.dp_size - 1),
+            dp_size=self.dp_size,
+            per_dp_bs_size=1,
+            lora_ids=["0"],
+            capture_hidden_mode=CaptureHiddenMode.NULL,
+        )
+        logits_output, _, _ = self.tp_worker.forward_batch_generation(
+            model_worker_batch=batch,
+            launch_done=None,
+            skip_sample=True,
+            sampling_metadata=None,
+        )
+        if logits_output is not None and logits_output.next_token_logits is not None:
+            logits_output.next_token_logits.block_until_ready()
+        return prefix_cache_loc, prefix_alloc
+
+    def _run_score_direct_label_only_warmup(self) -> None:
+        prefix_alloc = np.empty((0,), dtype=np.int32)
+        try:
+            warmup = self._score_direct_warmup_spec()
+            if warmup is None:
+                return
+
+            prefix_ids = self._score_direct_warmup_token_ids(warmup.prefix_len, offset=0)
+            chunk_items = [
+                self._score_direct_warmup_token_ids(warmup.item_len, offset=idx + 1)
+                for idx in range(warmup.batch_size)
+            ]
+            label_token_ids = self._score_direct_warmup_label_token_ids(warmup.label_count)
+            label_token_ids_arr = jnp.asarray(label_token_ids, dtype=jnp.int32)
+
+            warmup_start = time.perf_counter()
+            prefix_indices, prefix_alloc = self._materialize_score_direct_warmup_prefix(
+                prefix_ids
+            )
+            scores, device_compute_s, host_overhead_s = (
+                self._run_score_from_cache_v2_direct_chunk_label_only(
+                    cache_handle="__score-direct-warmup__",
+                    chunk_items=chunk_items,
+                    label_token_ids=label_token_ids,
+                    label_token_ids_arr=label_token_ids_arr,
+                    apply_softmax=warmup.apply_softmax,
+                    cached_last_node=None,
+                    cached_prefix_indices=prefix_indices,
+                    prefix_ids=prefix_ids,
+                    cached_extra_key=None,
+                )
+            )
+            logger.info(
+                "[Scheduler] Direct bulk score warmup complete. prefix_len=%d batch=%d item_len=%d labels=%d apply_softmax=%s total_s=%.3f device_s=%.3f host_s=%.3f score_rows=%d",
+                warmup.prefix_len,
+                warmup.batch_size,
+                warmup.item_len,
+                warmup.label_count,
+                warmup.apply_softmax,
+                max(0.0, time.perf_counter() - warmup_start),
+                max(0.0, device_compute_s),
+                max(0.0, host_overhead_s),
+                len(scores),
+            )
+        except Exception:
+            logger.exception("Direct bulk score warmup failed; continuing scheduler startup.")
+        finally:
+            if prefix_alloc.size > 0:
+                try:
+                    self.token_to_kv_pool_allocator.free(prefix_alloc)
+                except Exception:
+                    logger.exception(
+                        "Direct bulk score warmup cleanup failed while freeing prefix slots."
+                    )
+
+    @staticmethod
+    def _label_only_parity_metrics(
+        baseline_logprobs: np.ndarray,
+        candidate_logprobs: np.ndarray,
+    ) -> tuple[float, float]:
+        if baseline_logprobs.shape != candidate_logprobs.shape:
+            return float("inf"), float("inf")
+        diffs = np.abs(baseline_logprobs.astype(np.float64) - candidate_logprobs.astype(np.float64))
+        if diffs.size == 0:
+            return 0.0, 0.0
+        return float(np.max(diffs)), float(np.mean(diffs))
+
     def _run_score_from_cache_v2_direct_chunk_label_only(
         self,
         cache_handle: str,
