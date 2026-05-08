@@ -1,6 +1,13 @@
 """Scheduler scoring state, ingress, and admission helpers."""
 
-from sgl_jax.srt.managers.scheduler_scoring_common import *
+import concurrent.futures as futures
+import queue
+
+import zmq
+
+from sgl_jax.srt.managers.schedule_batch import Req, ScheduleBatch
+from sgl_jax.srt.managers.scheduler_scoring_common import _LocalSchedulerRpcEnvelope
+from sgl_jax.srt.server_args import ServerArgs
 
 
 class SchedulerScoringStateMixin:
@@ -9,6 +16,32 @@ class SchedulerScoringStateMixin:
         self.scoring_cache_nodes = {}
         self.scoring_cache_timeout = float(server_args.multi_item_prefill_extend_cache_timeout)
         self._last_scoring_cache_gc = 0.0
+        self.scoring_cache_prefix_handles_by_key = {}
+        self.scoring_cache_handle_to_prefix_key = {}
+        self.scoring_cache_handles_created = 0
+        self.scoring_cache_handles_released = 0
+        self.scoring_cache_handles_released_manual = 0
+        self.scoring_cache_handles_released_expired = 0
+        self.scoring_cache_handles_released_other = 0
+        self.scoring_cache_handles_missing_node = 0
+        self.scoring_cache_release_failures = 0
+        self.scoring_cache_lookup_queries = 0
+        self.scoring_cache_lookup_hits = 0
+        self.scoring_cache_lookup_misses = 0
+        self.scoring_cache_lookup_by_path = {
+            "extend": {"queries": 0, "hits": 0, "misses": 0},
+            "score_from_cache_v2": {"queries": 0, "hits": 0, "misses": 0},
+            "cache_for_scoring": {"queries": 0, "hits": 0, "misses": 0},
+        }
+        self.scoring_cache_lookup_by_lane = {
+            path: {
+                "default": {"queries": 0, "hits": 0, "misses": 0},
+                "short": {"queries": 0, "hits": 0, "misses": 0},
+                "long": {"queries": 0, "hits": 0, "misses": 0},
+            }
+            for path in self.scoring_cache_lookup_by_path
+        }
+        self._warned_scoring_cache_lanes = set()
         self.ingress_recv_calls = 0
         self.ingress_nonempty_calls = 0
         self.ingress_max_batch_size = 0
@@ -74,6 +107,9 @@ class SchedulerScoringStateMixin:
     @staticmethod
     def _normalize_scoring_cache_prefix_key(input_ids, extra_key):
         return None
+
+    def _score_scheduler_lane_from_prefix_len(self, prefix_len: int) -> str:
+        return "default"
 
     def recv_requests(self) -> list[Req]:
         recv_reqs = []

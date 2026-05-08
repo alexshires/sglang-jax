@@ -1,17 +1,24 @@
 """Scheduler scoring cache lifecycle helpers."""
 
-from sgl_jax.srt.managers.scheduler_scoring_common import *
+import logging
+import time
+
+import numpy as np
+
+from sgl_jax.srt.managers.io_struct import (
+    ReleaseScoringCacheReqInput,
+    ReleaseScoringCacheReqOutput,
+    TokenizedGenerateReqInput,
+)
+from sgl_jax.srt.mem_cache.swa_radix_cache import SWARadixCache
+
+logger = logging.getLogger(__name__)
 
 
 class SchedulerScoringCacheMixin:
     def _unpack_scoring_cache_entry(self, entry):
-        # Backward-compatible unpack for entries created before `last_access_ts`
-        # was added.
         if len(entry) == 6:
             return entry
-        if len(entry) == 5:
-            node, swa_uuid, input_ids, prefix_indices, extra_key = entry
-            return node, swa_uuid, input_ids, prefix_indices, extra_key, 0.0
         raise RuntimeError(f"Invalid scoring cache entry format (len={len(entry)}).")
 
     def _register_scoring_cache_handle(
@@ -61,7 +68,18 @@ class SchedulerScoringCacheMixin:
         else:
             bucket["misses"] += 1
 
-        normalized_lane = lane_name if lane_name in {"default", "short", "long"} else "default"
+        if lane_name in {"default", "short", "long"}:
+            normalized_lane = lane_name
+        else:
+            normalized_lane = "default"
+            warned_lanes = getattr(self, "_warned_scoring_cache_lanes", set())
+            if lane_name not in warned_lanes:
+                logger.warning(
+                    "Unknown scoring-cache lane %r; recording metrics in default lane.",
+                    lane_name,
+                )
+                warned_lanes.add(lane_name)
+                self._warned_scoring_cache_lanes = warned_lanes
         by_lane = self.scoring_cache_lookup_by_lane.setdefault(path, {})
         lane_bucket = by_lane.setdefault(
             normalized_lane,
@@ -99,6 +117,7 @@ class SchedulerScoringCacheMixin:
             "handles_released_expired": self.scoring_cache_handles_released_expired,
             "handles_released_other": self.scoring_cache_handles_released_other,
             "handles_missing_node": self.scoring_cache_handles_missing_node,
+            "release_failures": self.scoring_cache_release_failures,
             "lookup_queries": query_total,
             "lookup_hits": hit_total,
             "lookup_misses": miss_total,
@@ -126,6 +145,7 @@ class SchedulerScoringCacheMixin:
             else:
                 self.tree_cache.dec_lock_ref(node)
         except Exception:
+            self.scoring_cache_release_failures += 1
             logger.exception(
                 "Failed to decrement scoring-cache lock ref for rid=%s (%s).",
                 rid,
@@ -157,7 +177,8 @@ class SchedulerScoringCacheMixin:
         # Throttle GC to avoid walking the dict too often.
         if now is None and now_ts - self._last_scoring_cache_gc < 0.5:
             return 0
-        self._last_scoring_cache_gc = now_ts
+        if now is None:
+            self._last_scoring_cache_gc = now_ts
 
         expired_rids: list[str] = []
         for rid, entry in self.scoring_cache_nodes.items():
@@ -185,7 +206,7 @@ class SchedulerScoringCacheMixin:
         entry = self.scoring_cache_nodes.get(recv_req.extend_from_cache)
         if entry is None:
             miss_lane = self._score_scheduler_lane_from_prefix_len(
-                self, len(getattr(recv_req, "input_ids", []) or [])
+                len(getattr(recv_req, "input_ids", []) or [])
             )
             self._record_scoring_cache_lookup(path="extend", hit=False, lane_name=miss_lane)
             err = (
@@ -198,15 +219,14 @@ class SchedulerScoringCacheMixin:
         cached_last_node, _, prefix_ids, prefix_indices, cached_extra_key, _ = (
             self._unpack_scoring_cache_entry(entry)
         )
-        hit_lane = self._score_scheduler_lane_from_prefix_len(self, len(prefix_indices))
+        hit_lane = self._score_scheduler_lane_from_prefix_len(len(prefix_indices))
         self._record_scoring_cache_lookup(path="extend", hit=True, lane_name=hit_lane)
 
         item_ids = recv_req.input_ids or []
-        recv_req.input_ids = prefix_ids + item_ids
+        merged_input_ids = prefix_ids + item_ids
         cached_prefix_len = len(prefix_indices)
         suffix_len = max(0, len(item_ids))
-        if recv_req.extra_key is None:
-            recv_req.extra_key = cached_extra_key
+        merged_extra_key = cached_extra_key if recv_req.extra_key is None else recv_req.extra_key
         self._touch_scoring_cache_entry(recv_req.extend_from_cache)
         logger.debug(
             "Prefill+extend scheduler: extend request rid=%s handle=%s prefix_tokens=%d cached_prefix=%d item_tokens=%d merged_input_tokens=%d max_new_tokens=%s",
@@ -215,10 +235,10 @@ class SchedulerScoringCacheMixin:
             len(prefix_ids),
             cached_prefix_len,
             suffix_len,
-            len(recv_req.input_ids),
+            len(merged_input_ids),
             recv_req.sampling_params.max_new_tokens,
         )
-        return (cached_last_node, prefix_indices), None
+        return (cached_last_node, prefix_indices, merged_input_ids, merged_extra_key), None
 
     def _release_scoring_cache_nodes(self, rid_prefix: str | None, abort_all: bool) -> int:
         released = 0

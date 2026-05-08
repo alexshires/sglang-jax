@@ -1,6 +1,6 @@
 """Scheduler score dispatch and chunk planning helpers."""
 
-from sgl_jax.srt.managers.scheduler_scoring_common import *
+from types import SimpleNamespace
 
 
 class SchedulerScoringDispatchMixin:

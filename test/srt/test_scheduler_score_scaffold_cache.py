@@ -1,40 +1,37 @@
+from types import SimpleNamespace
+
 from sgl_jax.srt.managers.io_struct import ScoreFromCacheReqInput
 from sgl_jax.srt.managers.scheduler_scoring_cache_mixin import SchedulerScoringCacheMixin
 from sgl_jax.srt.managers.scheduler_scoring_execute_mixin import (
     SchedulerScoringExecuteMixin,
 )
+from sgl_jax.srt.managers.scheduler_scoring_state_mixin import SchedulerScoringStateMixin
 
 
-class _DummyScheduler(SchedulerScoringCacheMixin, SchedulerScoringExecuteMixin):
+class _DummyScheduler(
+    SchedulerScoringCacheMixin,
+    SchedulerScoringExecuteMixin,
+    SchedulerScoringStateMixin,
+):
     pass
 
 
-def test_unpack_scoring_cache_entry_accepts_current_and_legacy_formats():
+def test_unpack_scoring_cache_entry_accepts_current_format():
     scheduler = _DummyScheduler()
 
     current = scheduler._unpack_scoring_cache_entry(("node", "swa", [1], [2], "k", 3.5))
     assert current == ("node", "swa", [1], [2], "k", 3.5)
 
-    legacy = scheduler._unpack_scoring_cache_entry(("node", "swa", [1], [2], "k"))
-    assert legacy == ("node", "swa", [1], [2], "k", 0.0)
-
 
 def test_scoring_cache_metrics_snapshot_tracks_hits_and_misses():
     scheduler = _DummyScheduler()
+    scheduler.init_scoring_state(
+        SimpleNamespace(multi_item_prefill_extend_cache_timeout=1.0)
+    )
     scheduler.scoring_cache_nodes = {"rid-1": ("node", "swa", [1], [2], "k", 0.0)}
     scheduler.scoring_cache_prefix_handles_by_key = {("k", (1,)): {"rid-1"}}
     scheduler.scoring_cache_handle_to_prefix_key = {"rid-1": ("k", (1,))}
     scheduler.scoring_cache_handles_created = 1
-    scheduler.scoring_cache_handles_released = 0
-    scheduler.scoring_cache_handles_released_manual = 0
-    scheduler.scoring_cache_handles_released_expired = 0
-    scheduler.scoring_cache_handles_released_other = 0
-    scheduler.scoring_cache_handles_missing_node = 0
-    scheduler.scoring_cache_lookup_queries = 0
-    scheduler.scoring_cache_lookup_hits = 0
-    scheduler.scoring_cache_lookup_misses = 0
-    scheduler.scoring_cache_lookup_by_path = {}
-    scheduler.scoring_cache_lookup_by_lane = {}
 
     scheduler._record_scoring_cache_lookup(path="extend", hit=True, lane_name="short")
     scheduler._record_scoring_cache_lookup(path="extend", hit=False, lane_name="long")
@@ -48,9 +45,9 @@ def test_scoring_cache_metrics_snapshot_tracks_hits_and_misses():
 
 def test_score_from_cache_v2_scaffold_returns_not_enabled():
     scheduler = _DummyScheduler()
-    scheduler.score_from_cache_v2_attempted = 0
-    scheduler.score_from_cache_v2_fallback = 0
-    scheduler.score_from_cache_v2_fallback_reasons = {}
+    scheduler.init_scoring_state(
+        SimpleNamespace(multi_item_prefill_extend_cache_timeout=1.0)
+    )
 
     result = scheduler.score_from_cache_v2(ScoreFromCacheReqInput(rid="rid-1"))
 

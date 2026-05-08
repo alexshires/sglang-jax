@@ -937,12 +937,16 @@ class Scheduler(
             )
 
         cached_prefix_ctx, cache_lookup_error = self._resolve_extend_from_cache(recv_req)
+        input_ids = recv_req.input_ids
+        extra_key = recv_req.extra_key
+        if cached_prefix_ctx is not None:
+            cached_last_node, cached_prefix_indices, input_ids, extra_key = cached_prefix_ctx
 
         # Create a new request
         req = Req(
             recv_req.rid,
             recv_req.text,
-            recv_req.input_ids,
+            input_ids,
             recv_req.sampling_params,
             return_logprob=recv_req.return_logprob,
             return_output_logprob_only=recv_req.return_output_logprob_only,
@@ -950,7 +954,7 @@ class Scheduler(
             token_ids_logprob=recv_req.token_ids_logprob,
             stream=recv_req.stream,
             lora_id=recv_req.lora_id,
-            extra_key=recv_req.extra_key,
+            extra_key=extra_key,
             dp_rank=recv_req.dp_rank,
             eos_token_ids=self.model_config.hf_eos_token_id,
             vocab_size=self.model_config.vocab_size,
@@ -966,7 +970,6 @@ class Scheduler(
             return
 
         if cached_prefix_ctx is not None:
-            cached_last_node, cached_prefix_indices = cached_prefix_ctx
             req.cached_last_node = cached_last_node
             req.cached_last_host_node = cached_last_node
             req.cached_prefix_indices = cached_prefix_indices

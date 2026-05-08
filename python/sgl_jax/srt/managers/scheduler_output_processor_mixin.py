@@ -54,9 +54,7 @@ class SchedulerOutputProcessorMixin:
 
         lane_name = "default"
         if hasattr(self, "_score_scheduler_lane_from_prefix_len"):
-            lane_name = self._score_scheduler_lane_from_prefix_len(
-                self, len(req.origin_input_ids)
-            )
+            lane_name = self._score_scheduler_lane_from_prefix_len(len(req.origin_input_ids))
 
         reused_existing_handle = False
         prefix_key = self._normalize_scoring_cache_prefix_key(

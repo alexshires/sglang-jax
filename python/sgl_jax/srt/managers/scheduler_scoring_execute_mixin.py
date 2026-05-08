@@ -1,6 +1,6 @@
 """Scheduler score-from-cache request execution."""
 
-from sgl_jax.srt.managers.scheduler_scoring_common import *
+from sgl_jax.srt.managers.io_struct import ScoreFromCacheReqInput, ScoreFromCacheReqOutput
 
 
 class SchedulerScoringExecuteMixin:
