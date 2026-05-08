@@ -488,6 +488,12 @@ class SchedulerScoringDirectMixin:
             # real rows to the score path.
             logits_indices = np.cumsum(extend_seq_lens_cpu, dtype=np.int32) - 1
 
+            sampling_info = SamplingBatchInfo.generate_for_precompile_all_greedy(
+                padded_bs,
+                vocab_size=self.model_config.vocab_size,
+            )
+            sampling_info.vocab_mask = None
+
             batch = ModelWorkerBatch(
                 bid=acc_global_bid(),
                 forward_mode=ForwardMode.EXTEND,
@@ -496,10 +502,7 @@ class SchedulerScoringDirectMixin:
                 seq_lens=seq_lens_cpu,
                 out_cache_loc=out_cache_loc,
                 req_pool_indices=req_pool_indices,
-                sampling_info=SamplingBatchInfo.generate_for_precompile_all_greedy(
-                    padded_bs,
-                    vocab_size=self.model_config.vocab_size,
-                ),
+                sampling_info=sampling_info,
                 positions=positions_cpu,
                 extend_start_loc=extend_start_loc,
                 cache_loc=cache_loc_cpu,
