@@ -1,7 +1,16 @@
 """Scheduler scoring state, ingress, and admission helpers."""
 
+import time
+from collections import deque
+
+import numpy as np
 import zmq
 
+from sgl_jax.srt.managers.io_struct import (
+    ReleaseScoringCacheReqInput,
+    ScoreFromCacheReqInput,
+    TokenizedGenerateReqInput,
+)
 from sgl_jax.srt.managers.schedule_batch import Req, ScheduleBatch
 from sgl_jax.srt.server_args import ServerArgs
 
