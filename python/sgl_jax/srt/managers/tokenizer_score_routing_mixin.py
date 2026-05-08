@@ -62,3 +62,63 @@ class TokenizerScoreRoutingMixin:
         rid_key = obj.rid[0] if isinstance(obj.rid, list) else obj.rid
         self.rid_to_state[rid_key] = state
         return state
+
+    def _send_batch_requests(
+        self,
+        objs: list[GenerateReqInput | EmbeddingReqInput],
+        tokenized_objs: list[TokenizedGenerateReqInput | TokenizedEmbeddingReqInput],
+        created_time: float | None = None,
+    ) -> list[ReqState]:
+        if len(objs) != len(tokenized_objs):
+            raise ValueError("objs and tokenized_objs must have the same length")
+        if not tokenized_objs:
+            return []
+
+        if any(bool(getattr(obj, "cache_for_scoring", False)) for obj in tokenized_objs):
+            return [
+                self._send_one_request(obj, tokenized_obj, created_time)
+                for obj, tokenized_obj in zip(objs, tokenized_objs, strict=True)
+            ]
+
+        try:
+            caller_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            caller_loop = None
+
+        scheduler_idx = None
+        extend_handles = [
+            getattr(tokenized_obj, "extend_from_cache", None)
+            for tokenized_obj in tokenized_objs
+        ]
+        non_empty_extend_handles = {handle for handle in extend_handles if handle}
+        if len(non_empty_extend_handles) > 1 or (
+            non_empty_extend_handles and any(not handle for handle in extend_handles)
+        ):
+            return [
+                self._send_one_request(obj, tokenized_obj, created_time)
+                for obj, tokenized_obj in zip(objs, tokenized_objs, strict=True)
+            ]
+        if len(non_empty_extend_handles) == 1:
+            extend_handle = next(iter(non_empty_extend_handles))
+            scheduler_idx = self._score_lane_scheduler_index(extend_handle)
+
+        payload = tokenized_objs[0] if len(tokenized_objs) == 1 else tokenized_objs
+        if scheduler_idx is not None:
+            self.send_to_scheduler.send_pyobj_to(scheduler_idx, payload)
+        else:
+            self.send_to_scheduler.send_pyobj(payload)
+
+        states = []
+        for obj in objs:
+            state = ReqState(
+                [],
+                False,
+                asyncio.Event(),
+                obj,
+                created_time=created_time,
+                event_loop=caller_loop,
+            )
+            rid_key = obj.rid[0] if isinstance(obj.rid, list) else obj.rid
+            self.rid_to_state[rid_key] = state
+            states.append(state)
+        return states

@@ -3,7 +3,6 @@
 import asyncio
 import contextlib
 import copy
-import dataclasses
 import json
 import logging
 import os
@@ -521,6 +520,23 @@ class TokenizerManager(
 
         generators = []
         rids = []
+
+        def append_response_generators(batched_objs, tokenized_objs) -> None:
+            if self.server_args.enable_tokenizer_batch_send:
+                states = self._send_batch_requests(
+                    batched_objs, tokenized_objs, created_time
+                )
+            else:
+                states = [
+                    self._send_one_request(tmp_obj, tokenized_obj, created_time)
+                    for tmp_obj, tokenized_obj in zip(
+                        batched_objs, tokenized_objs, strict=True
+                    )
+                ]
+            for tmp_obj, state in zip(batched_objs, states, strict=True):
+                generators.append(self._wait_one_response(tmp_obj, state, request))
+                rids.append(tmp_obj.rid)
+
         if getattr(obj, "parallel_sample_num", 1) == 1:
             if self.server_args.enable_tokenizer_batch_encode:
                 # Validate batch tokenization constraints
@@ -528,10 +544,7 @@ class TokenizerManager(
 
                 tokenized_objs = await self._batch_tokenize_and_process(batch_size, obj)
                 batched_objs = [obj[i] for i in range(batch_size)]
-                for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
-                    state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
-                    generators.append(self._wait_one_response(tmp_obj, state, request))
-                    rids.append(tmp_obj.rid)
+                append_response_generators(batched_objs, tokenized_objs)
             else:
                 # Sequential tokenization and processing
                 batched_objs = [obj[i] for i in range(batch_size)]
@@ -539,10 +552,7 @@ class TokenizerManager(
                 for tmp_obj in batched_objs:
                     tokenized_objs.append(await self._tokenize_one_request(tmp_obj))
 
-                for tmp_obj, tokenized_obj in zip(batched_objs, tokenized_objs, strict=True):
-                    state = self._send_one_request(tmp_obj, tokenized_obj, created_time)
-                    generators.append(self._wait_one_response(tmp_obj, state, request))
-                    rids.append(tmp_obj.rid)
+                append_response_generators(batched_objs, tokenized_objs)
         else:
             # FIXME: When using batch and parallel_sample_num together, the perf is not optimal.
             if batch_size > 128:
