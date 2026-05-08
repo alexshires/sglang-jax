@@ -375,12 +375,32 @@ class TokenizerScoreCacheMixin:
             self._score_reusable_prefill_cache_handle_to_key = handle_to_key
         return lock, cache, handle_to_key
 
+    def _record_reusable_prefill_cache_event(self, event: str) -> None:
+        counters = getattr(self, "score_reusable_prefill_cache_events", None)
+        if counters is None:
+            counters = {}
+            self.score_reusable_prefill_cache_events = counters
+        counters[event] = counters.get(event, 0) + 1
+
+    def score_reusable_prefill_cache_metrics(self) -> dict:
+        _, cache, handle_to_key = self._score_reusable_prefill_cache_state()
+        events = dict(getattr(self, "score_reusable_prefill_cache_events", {}) or {})
+        return {
+            "enabled": self._score_reusable_prefill_cache_enabled(),
+            "entries": len(cache),
+            "ready_entries": sum(1 for entry in cache.values() if entry.handle is not None),
+            "inflight_entries": sum(1 for entry in cache.values() if entry.future is not None),
+            "handle_mappings": len(handle_to_key),
+            "events": events,
+        }
+
     @staticmethod
     def _score_reusable_prefill_cache_key(query_tokens: list[int]) -> tuple[int, ...]:
         return tuple(int(token_id) for token_id in query_tokens)
 
     async def _acquire_prefill_cache_handle(self, query_tokens: list[int]) -> str:
         if not self._score_reusable_prefill_cache_enabled():
+            self._record_reusable_prefill_cache_event("disabled")
             return await self._prefill_and_cache(query_tokens)
 
         key = self._score_reusable_prefill_cache_key(query_tokens)
@@ -400,18 +420,24 @@ class TokenizerScoreCacheMixin:
         async with lock:
             entry = cache.get(key)
             if entry is not None and entry.handle is not None:
+                was_idle = entry.ref_count == 0
                 entry.ref_count += 1
-                entry.generation += 1
+                if was_idle:
+                    # Invalidate any pending idle-TTL release for this handle.
+                    entry.generation += 1
                 entry.last_used = time.monotonic()
+                self._record_reusable_prefill_cache_event("hit_ready")
                 return entry.handle
 
             if entry is not None and entry.future is not None:
                 entry.ref_count += 1
                 entry.generation += 1
                 future = entry.future
+                self._record_reusable_prefill_cache_event("hit_inflight")
             elif len(cache) >= max_entries:
                 bypass_reuse = True
                 future = None
+                self._record_reusable_prefill_cache_event("bypass_full")
             else:
                 future = asyncio.create_task(self._prefill_and_cache(list(key)))
                 entry = _ReusablePrefillCacheEntry(
@@ -421,6 +447,7 @@ class TokenizerScoreCacheMixin:
                     future=future,
                 )
                 cache[key] = entry
+                self._record_reusable_prefill_cache_event("new")
 
         if bypass_reuse:
             return await self._prefill_and_cache(query_tokens)
@@ -437,6 +464,7 @@ class TokenizerScoreCacheMixin:
                     current.ref_count = max(0, current.ref_count - 1)
                     if current.ref_count == 0:
                         cache.pop(key, None)
+            self._record_reusable_prefill_cache_event("prefill_failed")
             raise
 
         async with lock:
@@ -509,6 +537,7 @@ class TokenizerScoreCacheMixin:
                     "Unused prefill+extend cache handle=%s was not cleanly released.",
                     handle,
                 )
+            self._record_reusable_prefill_cache_event("released_unused")
 
     def _release_cache_background(self, cache_handle: str) -> None:
         async def _release_and_log() -> None:
@@ -586,7 +615,9 @@ class TokenizerScoreCacheMixin:
                     release_now = True
 
         if release_now:
-            return await self._release_cache(cache_handle)
+            released = await self._release_cache(cache_handle)
+            self._record_reusable_prefill_cache_event("released_now")
+            return released
 
         task = asyncio.create_task(
             self._release_prefill_cache_after_idle(
@@ -631,6 +662,7 @@ class TokenizerScoreCacheMixin:
                     "Prefill+extend cache handle=%s was not cleanly released after idle TTL.",
                     cache_handle,
                 )
+            self._record_reusable_prefill_cache_event("released_idle")
 
     async def _release_cache(self, cache_handle: str):
         """Release the cached query."""
@@ -944,7 +976,9 @@ class TokenizerScoreCacheMixin:
             "queue_wait_s=%.6f device_compute_s=%.6f host_orchestration_s=%.6f "
             "fastpath_attempted=%s fastpath_succeeded=%s fastpath_fallback_reason=%s "
             "fastpath_items_per_step=%d fastpath_token_budget=%d fastpath_max_total_tokens=%d "
-            "fastpath_replica_lanes=%d fastpath_topology=%s",
+            "fastpath_replica_lanes=%d fastpath_topology=%s "
+            "prefill_reuse_entries=%d prefill_reuse_ready=%d "
+            "prefill_reuse_inflight=%d prefill_reuse_events=%s",
             metrics.get("path", "unknown"),
             int(metrics.get("items", 0)),
             int(metrics.get("dispatch_count", 0)),
@@ -961,6 +995,10 @@ class TokenizerScoreCacheMixin:
             int(metrics.get("fastpath_max_total_tokens", 0)),
             int(metrics.get("fastpath_replica_lanes", 1)),
             metrics.get("fastpath_topology", ""),
+            int(metrics.get("prefill_reuse_entries", 0)),
+            int(metrics.get("prefill_reuse_ready_entries", 0)),
+            int(metrics.get("prefill_reuse_inflight_entries", 0)),
+            metrics.get("prefill_reuse_events", {}),
         )
 
     async def score_prefill_extend(
@@ -1001,6 +1039,13 @@ class TokenizerScoreCacheMixin:
         }
         # Step 1: Prefill query and get cache handle
         cache_handle = await self._acquire_prefill_cache_handle(query_tokens)
+        prefill_reuse_metrics = self.score_reusable_prefill_cache_metrics()
+        metrics["prefill_reuse_entries"] = int(prefill_reuse_metrics["entries"])
+        metrics["prefill_reuse_ready_entries"] = int(prefill_reuse_metrics["ready_entries"])
+        metrics["prefill_reuse_inflight_entries"] = int(
+            prefill_reuse_metrics["inflight_entries"]
+        )
+        metrics["prefill_reuse_events"] = prefill_reuse_metrics["events"]
         metrics["lifecycle_requests_sent"] += 1
         metrics["lifecycle_results_received"] += 1
 

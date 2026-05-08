@@ -52,6 +52,7 @@ class ReqState:
     output_token_ids_logprobs_val: list = dataclasses.field(default_factory=list)
     output_token_ids_logprobs_idx: list = dataclasses.field(default_factory=list)
 
+
 @dataclasses.dataclass
 class _ReusablePrefillCacheEntry:
     key: tuple[int, ...]
