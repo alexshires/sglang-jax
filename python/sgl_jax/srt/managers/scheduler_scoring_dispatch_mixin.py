@@ -3,24 +3,18 @@
 import logging
 import math
 import os
-import time
-from types import SimpleNamespace
+import uuid
 
 import jax
 import numpy as np
-from jax import numpy as jnp
 
 from sgl_jax.srt.managers.io_struct import ScoreFromCacheReqInput, ScoreFromCacheReqOutput
 from sgl_jax.srt.managers.schedule_batch import (
-    ModelWorkerBatch,
     Req,
     ScheduleBatch,
     acc_global_bid,
 )
 from sgl_jax.srt.managers.utils import validate_input_length
-from sgl_jax.srt.mem_cache.common import alloc_token_slots
-from sgl_jax.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
-from sgl_jax.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sgl_jax.srt.sampling.sampling_params import SamplingParams
 from sgl_jax.srt.utils.jax_utils import get_device_name
 
@@ -29,6 +23,16 @@ logger = logging.getLogger(__name__)
 SCORE_V2_DIRECT_TOKEN_IDS_LOGPROB_ONLY_LARGE_CHUNK_SIZE = 16384
 SCORE_V2_DIRECT_TOKEN_IDS_LOGPROB_ONLY_LARGE_CHUNK_MIN_BS = 256
 SCORE_V2_DIRECT_TOKEN_IDS_LOGPROB_ONLY_LARGE_CHUNK_MAX_SEQ_LEN = 4096
+
+
+def _server_int(source, name: str, default: int) -> int:
+    value = getattr(source, name, default)
+    return int(default if value is None else value)
+
+
+def _server_float(source, name: str, default: float) -> float:
+    value = getattr(source, name, default)
+    return float(default if value is None else value)
 
 
 class SchedulerScoringDispatchMixin:
@@ -66,10 +70,10 @@ class SchedulerScoringDispatchMixin:
     ) -> tuple[int, int, int, str]:
         topology_name = str(getattr(self, "score_scheduler_topology_name", "") or "")
         replica_lane_count = self._score_from_cache_v2_replica_lane_count()
-        dispatch_token_budget = max(0, int(requested_token_budget or 0))
+        dispatch_token_budget = max(0, int(requested_token_budget))
 
         if (
-            topology_name != "TPU v6e-8"
+            "TPU" not in topology_name
             or replica_lane_count <= 1
             or effective_capacity <= 1
             or total_items <= 1
@@ -77,17 +81,19 @@ class SchedulerScoringDispatchMixin:
             policy = (effective_items_per_step, dispatch_token_budget, replica_lane_count, topology_name)
             return policy
 
+        # Long-lane scoring uses every replica; shorter score batches reserve one
+        # lane for default traffic so general request latency is less exposed.
         lane_scale = replica_lane_count if lane_name == "long" else max(1, replica_lane_count - 1)
         boosted_items_per_step = max(
             effective_items_per_step,
             min(
                 max(1, total_items),
                 max(1, effective_capacity),
-                max(1, int(effective_items_per_step or 1)) * lane_scale,
+                max(1, int(effective_items_per_step)) * lane_scale,
             ),
         )
-        max_total_tokens = max(0, int(max_total_tokens or 0))
-        prefix_len = max(0, int(prefix_len or 0))
+        max_total_tokens = max(0, int(max_total_tokens))
+        prefix_len = max(0, int(prefix_len))
         if max_total_tokens > 0:
             boosted_token_budget = (prefix_len + max_total_tokens) * boosted_items_per_step
             dispatch_token_budget = max(dispatch_token_budget, boosted_token_budget)
@@ -118,28 +124,22 @@ class SchedulerScoringDispatchMixin:
 
         max_page_size = max(
             0,
-            int(
-                getattr(
-                    self.server_args,
-                    "multi_item_score_direct_token_ids_logprob_only_auto_max_page_size",
-                    0,
-                )
-                or 0
+            _server_int(
+                self.server_args,
+                "multi_item_score_direct_token_ids_logprob_only_auto_max_page_size",
+                0,
             ),
         )
         max_running_requests = max(
             0,
-            int(getattr(self.server_args, "max_running_requests", 0) or 0),
+            _server_int(self.server_args, "max_running_requests", 0),
         )
         max_running_requests_threshold = max(
             0,
-            int(
-                getattr(
-                    self.server_args,
-                    "multi_item_score_direct_token_ids_logprob_only_auto_max_running_requests",
-                    0,
-                )
-                or 0
+            _server_int(
+                self.server_args,
+                "multi_item_score_direct_token_ids_logprob_only_auto_max_running_requests",
+                0,
             ),
         )
 
@@ -162,13 +162,10 @@ class SchedulerScoringDispatchMixin:
     ) -> int:
         chunk_size = max(
             1,
-            int(
-                getattr(
-                    self.server_args,
-                    "multi_item_score_direct_token_ids_logprob_only_chunk_size",
-                    4096,
-                )
-                or 4096
+            _server_int(
+                self.server_args,
+                "multi_item_score_direct_token_ids_logprob_only_chunk_size",
+                4096,
             ),
         )
         if not direct_token_ids_logprob_only:
@@ -176,13 +173,10 @@ class SchedulerScoringDispatchMixin:
 
         short_prompt_tokens_threshold = max(
             0,
-            int(
-                getattr(
-                    self.server_args,
-                    "score_scheduler_short_prompt_tokens_threshold",
-                    2048,
-                )
-                or 2048
+            _server_int(
+                self.server_args,
+                "score_scheduler_short_prompt_tokens_threshold",
+                2048,
             ),
         )
         if (
@@ -202,31 +196,25 @@ class SchedulerScoringDispatchMixin:
         real_cache_loc_tokens: int,
         max_seq_len: int,
     ) -> tuple[int, int, int]:
-        hot_bs_arg = getattr(self.server_args, "multi_item_score_direct_hot_shape_bs", 0) or 0
+        hot_bs_arg = _server_int(self.server_args, "multi_item_score_direct_hot_shape_bs", 0)
         hot_tokens_name = "multi_item_score_direct_hot_shape_tokens"
-        hot_tokens_arg = getattr(self.server_args, hot_tokens_name, 0) or 0
+        hot_tokens_arg = _server_int(self.server_args, hot_tokens_name, 0)
         hot_bs = max(0, int(hot_bs_arg))
         hot_tokens = max(0, int(hot_tokens_arg))
         hot_token_rounding = max(
             0,
-            int(
-                getattr(
-                    self.server_args,
-                    "multi_item_score_direct_hot_shape_token_rounding",
-                    0,
-                )
-                or 0
+            _server_int(
+                self.server_args,
+                "multi_item_score_direct_hot_shape_token_rounding",
+                0,
             ),
         )
         hot_token_rounding_min_hot_tokens = max(
             0,
-            int(
-                getattr(
-                    self.server_args,
-                    "multi_item_score_direct_hot_shape_token_rounding_min_hot_tokens",
-                    0,
-                )
-                or 0
+            _server_int(
+                self.server_args,
+                "multi_item_score_direct_hot_shape_token_rounding_min_hot_tokens",
+                0,
             ),
         )
 
@@ -260,204 +248,11 @@ class SchedulerScoringDispatchMixin:
 
         return padded_bs, padded_input_tokens, padded_cache_loc_tokens
 
-    def _score_direct_warmup_spec(self) -> SimpleNamespace | None:
-        if not self._score_from_cache_v2_use_direct_label_only(
-            label_only_logprob=bool(
-                getattr(self.server_args, "multi_item_score_label_only_logprob", False)
-            )
-        ):
-            return None
-        if not bool(getattr(self.server_args, "multi_item_score_direct_warmup_enable", False)):
-            return None
-
-        batch_size = max(
-            0,
-            int(getattr(self.server_args, "multi_item_score_direct_warmup_batch_size", 0) or 0),
-        )
-        if batch_size <= 0:
-            batch_size = max(
-                0,
-                int(getattr(self.server_args, "multi_item_score_direct_hot_shape_bs", 0) or 0),
-            )
-        if batch_size <= 0:
-            batch_size = max(
-                0,
-                int(
-                    getattr(self.server_args, "multi_item_score_from_cache_v2_items_per_step", 0)
-                    or 0
-                ),
-            )
-
-        return SimpleNamespace(
-            prefix_len=max(
-                0,
-                int(getattr(self.server_args, "multi_item_score_direct_warmup_prefix_len", 0) or 0),
-            ),
-            item_len=max(
-                0,
-                int(getattr(self.server_args, "multi_item_score_direct_warmup_item_len", 0) or 0),
-            ),
-            batch_size=batch_size,
-            label_count=max(
-                1,
-                int(
-                    getattr(self.server_args, "multi_item_score_direct_warmup_label_count", 1) or 1
-                ),
-            ),
-            apply_softmax=bool(
-                getattr(self.server_args, "multi_item_score_direct_warmup_apply_softmax", False)
-            ),
-        )
-
-    def _score_direct_warmup_token_ids(self, length: int, *, offset: int) -> list[int]:
-        if length <= 0:
-            return []
-        vocab_size = max(2, int(self.model_config.vocab_size))
-        eos_token_ids = set(getattr(self.model_config, "hf_eos_token_id", set()) or set())
-        token_ids: list[int] = []
-        candidate = max(1, 1024 + offset * 131)
-        while len(token_ids) < length:
-            token_id = int(candidate % vocab_size)
-            candidate += 1
-            if token_id in eos_token_ids:
-                continue
-            token_ids.append(token_id)
-        return token_ids
-
-    def _score_direct_warmup_label_token_ids(self, label_count: int) -> list[int]:
-        vocab_size = max(2, int(self.model_config.vocab_size))
-        eos_token_ids = set(getattr(self.model_config, "hf_eos_token_id", set()) or set())
-        label_ids: list[int] = []
-        seen: set[int] = set()
-        candidate = 17
-        while len(label_ids) < label_count:
-            token_id = int(candidate % vocab_size)
-            candidate += 1
-            if token_id in eos_token_ids or token_id in seen:
-                continue
-            seen.add(token_id)
-            label_ids.append(token_id)
-        return label_ids
-
-    def _materialize_score_direct_warmup_prefix(
-        self,
-        prefix_ids: list[int],
-    ) -> tuple[np.ndarray, np.ndarray]:
-        prefix_len = len(prefix_ids)
-        if prefix_len <= 0:
-            empty = np.empty((0,), dtype=np.int32)
-            return empty, empty
-
-        aligned_prefix_tokens = int(prefix_len)
-        if self.page_size > 1:
-            aligned_prefix_tokens = (
-                (aligned_prefix_tokens + self.page_size - 1) // self.page_size
-            ) * self.page_size
-
-        prefix_alloc = np.asarray(
-            alloc_token_slots(self.tree_cache, aligned_prefix_tokens),
-            dtype=np.int32,
-        )
-        prefix_cache_loc = prefix_alloc[:prefix_len].astype(np.int32, copy=True)
-
-        input_ids_cpu = np.asarray(prefix_ids, dtype=np.int32)
-        positions_cpu = np.arange(prefix_len, dtype=np.int32)
-        seq_lens_cpu = np.asarray([prefix_len], dtype=np.int32)
-        extend_seq_lens_cpu = np.asarray([prefix_len], dtype=np.int32)
-        extend_prefix_lens_cpu = np.zeros(1, dtype=np.int32)
-        extend_start_loc = np.zeros(1, dtype=np.int32)
-        extend_logprob_start_lens = np.zeros(1, dtype=np.int32)
-        cache_loc_cpu = np.zeros(aligned_prefix_tokens, dtype=np.int32)
-        cache_loc_cpu[:prefix_len] = prefix_cache_loc
-
-        batch = ModelWorkerBatch(
-            bid=acc_global_bid(),
-            forward_mode=ForwardMode.EXTEND,
-            input_ids=input_ids_cpu,
-            real_input_ids_len=prefix_len,
-            seq_lens=seq_lens_cpu,
-            out_cache_loc=prefix_cache_loc,
-            req_pool_indices=np.asarray([0], dtype=np.int32),
-            sampling_info=SamplingBatchInfo.generate_for_precompile_all_greedy(
-                1,
-                vocab_size=self.model_config.vocab_size,
-            ),
-            positions=positions_cpu,
-            extend_start_loc=extend_start_loc,
-            cache_loc=cache_loc_cpu,
-            return_logprob=False,
-            return_output_logprob_only=False,
-            top_logprobs_nums=None,
-            token_ids_logprobs=None,
-            is_prefill_only=True,
-            extend_seq_lens=extend_seq_lens_cpu,
-            extend_prefix_lens=extend_prefix_lens_cpu,
-            extend_logprob_start_lens=extend_logprob_start_lens,
-            extend_input_logprob_token_ids=np.empty((0,), dtype=np.int32),
-            logits_indices=np.empty((0,), dtype=np.int32),
-            real_bs=1,
-            real_bs_per_dp=[1] + [0] * max(0, self.dp_size - 1),
-            dp_size=self.dp_size,
-            per_dp_bs_size=1,
-            lora_ids=["0"],
-            capture_hidden_mode=CaptureHiddenMode.NULL,
-        )
-        logits_output, _, _ = self.tp_worker.forward_batch_generation(
-            model_worker_batch=batch,
-            launch_done=None,
-            skip_sample=True,
-            sampling_metadata=None,
-        )
-        if logits_output is not None and logits_output.next_token_logits is not None:
-            logits_output.next_token_logits.block_until_ready()
-        return prefix_cache_loc, prefix_alloc
+    def _score_direct_warmup_spec(self):
+        return None
 
     def _run_score_direct_label_only_warmup(self) -> None:
-        warmup = self._score_direct_warmup_spec()
-        if warmup is None:
-            return
-
-        prefix_ids = self._score_direct_warmup_token_ids(warmup.prefix_len, offset=0)
-        chunk_items = [
-            self._score_direct_warmup_token_ids(warmup.item_len, offset=idx + 1)
-            for idx in range(warmup.batch_size)
-        ]
-        label_token_ids = self._score_direct_warmup_label_token_ids(warmup.label_count)
-        label_token_ids_arr = jnp.asarray(label_token_ids, dtype=jnp.int32)
-
-        prefix_alloc = np.empty((0,), dtype=np.int32)
-        prefix_indices = np.empty((0,), dtype=np.int32)
-        warmup_start = time.perf_counter()
-        try:
-            prefix_indices, prefix_alloc = self._materialize_score_direct_warmup_prefix(prefix_ids)
-            scores, device_compute_s, host_overhead_s = (
-                self._run_score_from_cache_v2_direct_chunk_label_only(
-                    cache_handle="__score-direct-warmup__",
-                    chunk_items=chunk_items,
-                    label_token_ids=label_token_ids,
-                    label_token_ids_arr=label_token_ids_arr,
-                    apply_softmax=warmup.apply_softmax,
-                    cached_last_node=None,
-                    cached_prefix_indices=prefix_indices,
-                    prefix_ids=prefix_ids,
-                    cached_extra_key=None,
-                )
-            )
-            logger.info(
-                "[Scheduler] Direct bulk score warmup complete. prefix_len=%d batch=%d item_len=%d labels=%d apply_softmax=%s total_s=%.3f device_s=%.3f host_s=%.3f score_rows=%d",
-                warmup.prefix_len,
-                warmup.batch_size,
-                warmup.item_len,
-                warmup.label_count,
-                warmup.apply_softmax,
-                max(0.0, time.perf_counter() - warmup_start),
-                max(0.0, device_compute_s),
-                max(0.0, host_overhead_s),
-                len(scores),
-            )
-        finally:
-            if prefix_alloc.size > 0:
-                self.token_to_kv_pool_allocator.free(prefix_alloc)
+        return None
 
     def _resolve_score_from_cache_v2_items_per_step(
         self,
@@ -483,60 +278,45 @@ class SchedulerScoringDispatchMixin:
         queue_pressure = self._score_scheduler_queue_pressure(self)
         pressure_threshold = max(
             1,
-            int(
-                getattr(
-                    self,
-                    "score_scheduler_dynamic_items_per_step_pressure_threshold",
-                    64,
-                )
-                or 64
+            _server_int(
+                self,
+                "score_scheduler_dynamic_items_per_step_pressure_threshold",
+                64,
             ),
         )
         pressure_scale = min(1.0, float(pressure_threshold) / float(max(queue_pressure, 1)))
         if lane_name == "long":
             lane_bias = max(
                 0.1,
-                float(
-                    getattr(
-                        self,
-                        "score_scheduler_dynamic_items_per_step_long_lane_bias",
-                        0.75,
-                    )
-                    or 0.75
+                _server_float(
+                    self,
+                    "score_scheduler_dynamic_items_per_step_long_lane_bias",
+                    0.75,
                 ),
             )
             lane_floor = max(
                 1,
-                int(
-                    getattr(
-                        self,
-                        "score_scheduler_dynamic_items_per_step_long_lane_min",
-                        16,
-                    )
-                    or 16
+                _server_int(
+                    self,
+                    "score_scheduler_dynamic_items_per_step_long_lane_min",
+                    16,
                 ),
             )
         else:
             lane_bias = max(
                 0.1,
-                float(
-                    getattr(
-                        self,
-                        "score_scheduler_dynamic_items_per_step_short_lane_bias",
-                        1.0,
-                    )
-                    or 1.0
+                _server_float(
+                    self,
+                    "score_scheduler_dynamic_items_per_step_short_lane_bias",
+                    1.0,
                 ),
             )
             lane_floor = max(
                 1,
-                int(
-                    getattr(
-                        self,
-                        "score_scheduler_dynamic_items_per_step_short_lane_min",
-                        32,
-                    )
-                    or 32
+                _server_int(
+                    self,
+                    "score_scheduler_dynamic_items_per_step_short_lane_min",
+                    32,
                 ),
             )
         lane_floor = min(lane_floor, base_items_per_step)
@@ -615,6 +395,11 @@ class SchedulerScoringDispatchMixin:
             host_orchestration_s,
         )
 
+    def _record_score_from_cache_v2_cleanup_failure(self) -> None:
+        self.score_from_cache_v2_cleanup_failures = (
+            int(getattr(self, "score_from_cache_v2_cleanup_failures", 0)) + 1
+        )
+
     def _score_from_cache_v2_fallback_output(
         self,
         recv_req: ScoreFromCacheReqInput,
@@ -682,6 +467,13 @@ class SchedulerScoringDispatchMixin:
                     "unsupported_shape",
                     f"items_2d[{idx}] must contain ints.",
                 )
+            for token_id in item:
+                if token_id < 0 or token_id >= self.model_config.vocab_size:
+                    return (
+                        False,
+                        "unsupported_shape",
+                        f"items_2d[{idx}] token ids must be in [0, {self.model_config.vocab_size - 1}].",
+                    )
         return True, "", ""
 
     @staticmethod
@@ -699,18 +491,6 @@ class SchedulerScoringDispatchMixin:
                 return [0.0 for _ in row_logprobs]
             return [x / denom for x in exps]
         return [math.exp(x) if x != float("-inf") else 0.0 for x in row_logprobs]
-
-    @staticmethod
-    def _label_only_parity_metrics(
-        baseline_logprobs: np.ndarray,
-        candidate_logprobs: np.ndarray,
-    ) -> tuple[float, float]:
-        if baseline_logprobs.shape != candidate_logprobs.shape:
-            return float("inf"), float("inf")
-        diffs = np.abs(baseline_logprobs.astype(np.float64) - candidate_logprobs.astype(np.float64))
-        if diffs.size == 0:
-            return 0.0, 0.0
-        return float(np.max(diffs)), float(np.mean(diffs))
 
     @staticmethod
     def _estimate_score_from_cache_v2_words(prefix_len: int, items: list[list[int]]) -> int:
@@ -740,7 +520,7 @@ class SchedulerScoringDispatchMixin:
         indexed_items = list(enumerate(items_2d))
         indexed_items.sort(key=lambda pair: (-len(pair[1]), pair[0]))
 
-        dispatch_token_budget = max(0, int(token_budget or 0))
+        dispatch_token_budget = max(0, int(0 if token_budget is None else token_budget))
         if dispatch_token_budget > 0:
             chunk_plan: list[tuple[list[int], list[list[int]]]] = []
             chunk_token_totals: list[int] = []
@@ -784,6 +564,7 @@ class SchedulerScoringDispatchMixin:
                     if out_cache_loc_arr.size > 0:
                         self.token_to_kv_pool_allocator.free(out_cache_loc_arr)
             except Exception:
+                self._record_score_from_cache_v2_cleanup_failure()
                 logger.exception("Fastpath v2 cleanup failed while freeing chunk KV slots.")
 
             try:
@@ -793,6 +574,7 @@ class SchedulerScoringDispatchMixin:
                     if req_pool_indices_list:
                         self.req_to_token_pool.free(req_pool_indices_list)
             except Exception:
+                self._record_score_from_cache_v2_cleanup_failure()
                 logger.exception("Fastpath v2 cleanup failed while freeing chunk req slots.")
 
             for req in reqs:
@@ -808,10 +590,12 @@ class SchedulerScoringDispatchMixin:
                 if seq_len > 0:
                     token_locs = self.req_to_token_pool.read(req.req_pool_idx, seq_len)
                     token_locs = token_locs[pre_len:seq_len]
+                    # ReqToTokenPool is zero-initialized; KV allocator slots start at 1.
                     token_locs = token_locs[token_locs != 0]
                     if len(token_locs) > 0:
                         self.token_to_kv_pool_allocator.free(token_locs)
             except Exception:
+                self._record_score_from_cache_v2_cleanup_failure()
                 logger.exception(
                     "Fastpath v2 cleanup failed while freeing KV tokens for rid=%s.",
                     req.rid,
@@ -819,6 +603,7 @@ class SchedulerScoringDispatchMixin:
             try:
                 self.req_to_token_pool.free(req.req_pool_idx)
             except Exception:
+                self._record_score_from_cache_v2_cleanup_failure()
                 logger.exception(
                     "Fastpath v2 cleanup failed while freeing req slot for rid=%s.",
                     req.rid,
@@ -919,7 +704,7 @@ class SchedulerScoringDispatchMixin:
         return_label_logprobs: bool,
     ) -> list[Req]:
         reqs: list[Req] = []
-        chunk_uid = time.time_ns()
+        chunk_uid = uuid.uuid4().hex
         for local_idx, item_ids in enumerate(chunk_items):
             sampling_params = SamplingParams(max_new_tokens=0)
             sampling_params.stop_strs = []
