@@ -13,7 +13,11 @@ from sgl_jax.srt.utils.jax_utils import get_device_name
 
 logger = logging.getLogger(__name__)
 _LOGICAL_DEVICE_COUNT_OVERRIDE = threading.local()
+_LOGICAL_DEVICE_COUNT_CACHE: int | None = None
+_LOGGED_RPA_POLICY_KEYS: set[tuple[object, ...]] = set()
 _KERNEL_V11_ENV = "SGLANG_RPA_KERNEL_V11"
+# Schema: (q_dtype, kv_dtype, q_heads, kv_heads, head_dim, page_size).
+# Defaults came from Qwen3-0.6B score-from-cache sweeps on TPU v6e page_size=64.
 _KERNEL_V11_PAGE64_HOT_SHAPE = ("bfloat16", "bfloat16", 16, 8, 128, 64)
 _KERNEL_V11_BKV_DECODE_ENV = "SGLANG_RPA_KERNEL_V11_BKV_DECODE"
 _KERNEL_V11_BQ_DECODE_ENV = "SGLANG_RPA_KERNEL_V11_BQ_DECODE"
@@ -23,7 +27,9 @@ _KERNEL_V11_BKV_LARGE_ENV = "SGLANG_RPA_KERNEL_V11_BKV_LARGE"
 _KERNEL_V11_BQ_LARGE_ENV = "SGLANG_RPA_KERNEL_V11_BQ_LARGE"
 _V6E8_PAGE64_REPLICA_ENV = "SGLANG_RPA_V6E8_PAGE64_REPLICA_OVERRIDE"
 
+
 def set_logical_device_count_override(logical_device_count: int | None) -> None:
+    """Set a thread-local device-count override for unit tests."""
     if logical_device_count is None:
         if hasattr(_LOGICAL_DEVICE_COUNT_OVERRIDE, "value"):
             delattr(_LOGICAL_DEVICE_COUNT_OVERRIDE, "value")
@@ -32,13 +38,80 @@ def set_logical_device_count_override(logical_device_count: int | None) -> None:
 
 
 def get_logical_device_count() -> int:
+    global _LOGICAL_DEVICE_COUNT_CACHE
+
     override = getattr(_LOGICAL_DEVICE_COUNT_OVERRIDE, "value", None)
     if override is not None:
         return int(override)
     env_value = os.getenv("SGLANG_LOGICAL_DEVICE_COUNT")
     if env_value:
         return int(env_value)
-    return len(jax.devices())
+    if _LOGICAL_DEVICE_COUNT_CACHE is None:
+        _LOGICAL_DEVICE_COUNT_CACHE = len(jax.devices())
+    return _LOGICAL_DEVICE_COUNT_CACHE
+
+
+def _log_rpa_policy_once(
+    key: tuple[object, ...],
+    level: int,
+    message: str,
+    *args: object,
+) -> None:
+    if key in _LOGGED_RPA_POLICY_KEYS:
+        return
+    _LOGGED_RPA_POLICY_KEYS.add(key)
+    logger.log(level, message, *args)
+
+
+def _get_page_size_fallback_tuned_block_size(
+    *,
+    tuned_table: dict[tuple[object, ...], tuple[int, int]],
+    keys_without_device: tuple[object, ...],
+    page_size: int,
+    max_num_tokens: int,
+) -> tuple[int, int, int, int] | None:
+    # Reuse a nearby page-size entry and scale kv pages so the block spans a
+    # comparable number of KV tokens. This is intentionally a fallback, not a
+    # replacement for adding a directly tuned table row.
+    fallback_page_sizes = [next_power_of_2(page_size), 128, 256]
+    seen_page_sizes: set[int] = set()
+    for fb_page_size in fallback_page_sizes:
+        if fb_page_size <= 0 or fb_page_size in seen_page_sizes:
+            continue
+        seen_page_sizes.add(fb_page_size)
+        token_candidates = sorted(
+            {
+                int(key[6])
+                for key in tuned_table
+                if key[:5] == keys_without_device[:5] and key[5] == fb_page_size
+            }
+        )
+        if not token_candidates:
+            continue
+        fb_tokens = next_power_of_2(max_num_tokens)
+        if fb_tokens not in token_candidates:
+            if fb_tokens > token_candidates[-1]:
+                fb_tokens = token_candidates[-1]
+            else:
+                fb_tokens = next((x for x in token_candidates if x >= fb_tokens), None)
+                if fb_tokens is None:
+                    continue
+        fb_key = (
+            keys_without_device[0],
+            keys_without_device[1],
+            keys_without_device[2],
+            keys_without_device[3],
+            keys_without_device[4],
+            fb_page_size,
+            fb_tokens,
+        )
+        if fb_key not in tuned_table:
+            continue
+        bkv_p, bq = tuned_table[fb_key]
+        if fb_page_size != page_size and page_size > 0:
+            bkv_p = max(1, (bkv_p * fb_page_size) // page_size)
+        return bkv_p, bq, fb_page_size, fb_tokens
+    return None
 
 
 # key
@@ -1493,6 +1566,7 @@ def get_tuned_block_sizes(
         logical_device_count = get_logical_device_count()
         topology_name = get_device_name(num_devices=logical_device_count)
     except Exception:
+        logger.debug("Failed to derive RPA topology name.", exc_info=True)
         topology_name = ""
 
     kernel_v11_enabled = os.getenv(_KERNEL_V11_ENV, "0") == "1"
@@ -1519,8 +1593,8 @@ def get_tuned_block_sizes(
 
         decode_bkv = max(1, get_env_int(_KERNEL_V11_BKV_DECODE_ENV, 32))
         decode_bq = max(1, get_env_int(_KERNEL_V11_BQ_DECODE_ENV, 1))
-        # Tuned hot-shape defaults for TPU v6e page_size=64:
-        # decode=(32,1), small=(32,40), large=(32,64).
+        # 4096 is the largest short score-chunk bucket from the scorer sweep.
+        # bq=40 won the small bucket despite not being a power-of-two tile.
         small_bkv = max(1, get_env_int(_KERNEL_V11_BKV_SMALL_ENV, 32))
         small_bq = max(1, get_env_int(_KERNEL_V11_BQ_SMALL_ENV, 40))
         large_bkv = max(1, get_env_int(_KERNEL_V11_BKV_LARGE_ENV, 32))
@@ -1533,7 +1607,9 @@ def get_tuned_block_sizes(
             bkv_p, bq = (small_bkv, small_bq)
         else:
             bkv_p, bq = (large_bkv, large_bq)
-        logger.info(
+        _log_rpa_policy_once(
+            ("kernel-v11-hot-shape", device_name, page_size, token_bucket),
+            logging.INFO,
             "Using kernel-v11 hot-shape override for %s: page_size=%s, max_num_tokens=%s, "
             "token_bucket=%s, decode=(%s,%s), small=(%s,%s), large=(%s,%s), selected=(%s,%s).",
             device_name,
@@ -1552,12 +1628,14 @@ def get_tuned_block_sizes(
         return (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
 
     if (
-        os.getenv(_V6E8_PAGE64_REPLICA_ENV, "1") == "1"
+        os.getenv(_V6E8_PAGE64_REPLICA_ENV, "0") == "1"
         and topology_name == "TPU v6e-8"
         and device_name == "TPU v6e"
         and page_size == 64
         and head_dim == 128
     ):
+        # Opt-in because this branch affects every matching RPA caller on v6e-8,
+        # not only score-from-cache requests.
         token_bucket = next_power_of_2(max_num_tokens)
         if token_bucket <= 32:
             bkv_p, bq = (32, 1)
@@ -1565,7 +1643,9 @@ def get_tuned_block_sizes(
             bkv_p, bq = (32, 96)
         else:
             bkv_p, bq = (32, 128)
-        logger.info(
+        _log_rpa_policy_once(
+            ("v6e8-page64-replica", device_name, token_bucket),
+            logging.INFO,
             "Using TPU v6e-8 replica-lane page64 override: token_bucket=%s, selected=(%s,%s).",
             token_bucket,
             bkv_p,
@@ -1583,47 +1663,17 @@ def get_tuned_block_sizes(
             bkv_p, bq = TUNED_BLOCK_SIZES[device_name][keys[1:]]
         else:
             tuned_table = TUNED_BLOCK_SIZES.get(device_name, {})
-            # Page-size-aware fallback for shapes that are not directly tuned
-            # (e.g., page_size=64 on TPU v6e): reuse the nearest page-size key and
-            # scale kv-pages-per-block by page-size ratio to keep similar token span.
-            fallback_page_sizes = [next_power_of_2(page_size), 128, 256]
-            used_fallback = False
-            for fb_page_size in fallback_page_sizes:
-                if fb_page_size <= 0:
-                    continue
-                token_candidates = sorted(
-                    {
-                        key[6]
-                        for key in tuned_table
-                        if key[:5] == keys[1:6] and key[5] == fb_page_size
-                    }
-                )
-                if not token_candidates:
-                    continue
-                fb_tokens = next_power_of_2(max_num_tokens)
-                # Clamp to largest available tuned max-token bucket when needed.
-                if fb_tokens not in token_candidates:
-                    if fb_tokens > token_candidates[-1]:
-                        fb_tokens = token_candidates[-1]
-                    else:
-                        fb_tokens = next((x for x in token_candidates if x >= fb_tokens), None)
-                        if fb_tokens is None:
-                            continue
-                fb_key = (
-                    keys[1],
-                    keys[2],
-                    keys[3],
-                    keys[4],
-                    keys[5],
-                    fb_page_size,
-                    fb_tokens,
-                )
-                if fb_key not in tuned_table:
-                    continue
-                bkv_p, bq = tuned_table[fb_key]
-                if fb_page_size != page_size and page_size > 0:
-                    bkv_p = max(1, (bkv_p * fb_page_size) // page_size)
-                logger.info(
+            fallback = _get_page_size_fallback_tuned_block_size(
+                tuned_table=tuned_table,
+                keys_without_device=keys[1:],
+                page_size=page_size,
+                max_num_tokens=max_num_tokens,
+            )
+            if fallback is not None:
+                bkv_p, bq, fb_page_size, fb_tokens = fallback
+                _log_rpa_policy_once(
+                    ("page-size-fallback", device_name, page_size, max_num_tokens),
+                    logging.WARNING,
                     "Using fallback tuned block size for %s: requested(page_size=%s, max_num_tokens=%s) "
                     "-> tuned(page_size=%s, max_num_tokens=%s), bkv_p=%s, bq=%s.",
                     device_name,
@@ -1634,10 +1684,7 @@ def get_tuned_block_sizes(
                     bkv_p,
                     bq,
                 )
-                used_fallback = True
-                break
-
-            if not used_fallback:
+            else:
                 logger.info(
                     "Tuned RPA block sizes not found for %s: page_size=%s, actual_num_q_heads=%s, "
                     "actual_num_kv_heads=%s, head_dim=%s, max_num_tokens=%s, pages_per_seq=%s.",
