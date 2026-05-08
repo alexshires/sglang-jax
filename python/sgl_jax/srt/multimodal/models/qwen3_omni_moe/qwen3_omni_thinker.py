@@ -325,6 +325,8 @@ class Qwen3OmniMoeThinkerTextDecoderLayer(nnx.Module):
 
 
 class Qwen3OmniMoeThinkerTextModel(nnx.Module):
+    body_returns_topk_ids = True
+
     def __init__(
         self,
         config: PretrainedConfig,

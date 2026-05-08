@@ -5,6 +5,7 @@ import pytest
 
 from sgl_jax.srt.managers.scheduler_scoring_state_mixin import SchedulerScoringStateMixin
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardMode
+from sgl_jax.srt.model_executor.model_runner import _unpack_prefill_body_only_outputs
 from sgl_jax.srt.server_args import ServerArgs
 
 
@@ -158,3 +159,53 @@ def test_prefill_cache_body_only_skip_logits_gate():
 
     batch.return_logprob = True
     assert not SchedulerScoringStateMixin._can_skip_logits_for_prefill_batch(owner, batch)
+
+
+def test_prefill_cache_body_only_skip_plan_gates_sampler_skip_to_flag():
+    batch = SimpleNamespace(
+        is_prefill_only=True,
+        forward_mode=ForwardMode.EXTEND,
+        return_logprob=False,
+        return_output_logprob_only=False,
+        reqs=[SimpleNamespace(cache_for_scoring=True)],
+    )
+
+    owner = SimpleNamespace(
+        server_args=SimpleNamespace(multi_item_score_prefill_cache_body_only=False)
+    )
+    assert SchedulerScoringStateMixin._can_skip_sample_for_prefill_batch(batch)
+    assert SchedulerScoringStateMixin._score_prefill_cache_skip_plan(owner, batch) == (
+        False,
+        False,
+    )
+
+    owner.server_args.multi_item_score_prefill_cache_body_only = True
+    assert SchedulerScoringStateMixin._score_prefill_cache_skip_plan(owner, batch) == (
+        True,
+        True,
+    )
+
+
+def test_prefill_body_only_unpack_handles_common_model_shapes():
+    hidden = object()
+    kv = object()
+    callbacks = object()
+    topk = object()
+
+    assert _unpack_prefill_body_only_outputs(
+        (hidden, kv), body_returns_topk_ids=False
+    ) == (kv, None)
+    assert _unpack_prefill_body_only_outputs(
+        (hidden, kv, callbacks), body_returns_topk_ids=False
+    ) == (kv, None)
+    assert _unpack_prefill_body_only_outputs(
+        (hidden, kv, topk), body_returns_topk_ids=True
+    ) == (kv, topk)
+    assert _unpack_prefill_body_only_outputs(
+        (hidden, object(), kv, callbacks), body_returns_topk_ids=False
+    ) == (kv, None)
+
+
+def test_prefill_body_only_unpack_rejects_unknown_shape():
+    with pytest.raises(ValueError, match="expected model body to return 2, 3, or 4"):
+        _unpack_prefill_body_only_outputs((object(),), body_returns_topk_ids=False)

@@ -618,6 +618,8 @@ class DeepseekV3DecoderLayer(nnx.Module):
 
 
 class DeepseekV3Model(nnx.Module):
+    body_returns_topk_ids = True
+
     def __init__(
         self,
         config: PretrainedConfig,

@@ -1825,8 +1825,7 @@ class Scheduler(
                 self.page_size,
                 self.server_args.enable_static_lora,
             )
-            skip_sample = self._can_skip_sample_for_prefill_batch(batch)
-            skip_logits = self._can_skip_logits_for_prefill_batch(batch)
+            skip_sample, skip_logits = self._score_prefill_cache_skip_plan(batch)
 
             if self.enable_overlap:
                 with jax.profiler.TraceAnnotation(
