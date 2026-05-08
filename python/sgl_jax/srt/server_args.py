@@ -1209,7 +1209,7 @@ class ServerArgs:
             "--multi-item-score-direct-token-ids-logprob-only-chunk-size",
             type=int,
             default=ServerArgs.multi_item_score_direct_token_ids_logprob_only_chunk_size,
-            help="Chunk size for direct token-id-only scorer vocab reduction.",
+            help="Positive chunk size for direct token-id-only scorer vocab reduction.",
         )
         parser.add_argument(
             "--multi-item-score-direct-warmup-enable",
@@ -1462,6 +1462,9 @@ class ServerArgs:
         assert self.multi_item_score_direct_warmup_label_count > 0, (
             "--multi-item-score-direct-warmup-label-count must be positive"
         )
+        assert self.multi_item_score_direct_token_ids_logprob_only_chunk_size > 0, (
+            "--multi-item-score-direct-token-ids-logprob-only-chunk-size must be positive"
+        )
         if self.multi_item_score_direct_label_only:
             assert self.multi_item_score_label_only_logprob, (
                 "Direct bulk label-only scoring requires label-only logprob mode. "
@@ -1479,6 +1482,17 @@ class ServerArgs:
             assert self.multi_item_score_direct_warmup_item_len > 0, (
                 "Direct bulk scorer warmup requires a positive "
                 "--multi-item-score-direct-warmup-item-len."
+            )
+            warmup_batch_size = max(0, self.multi_item_score_direct_warmup_batch_size)
+            if warmup_batch_size <= 0:
+                warmup_batch_size = max(0, self.multi_item_score_direct_hot_shape_bs)
+            if warmup_batch_size <= 0:
+                warmup_batch_size = max(0, self.multi_item_score_from_cache_v2_items_per_step)
+            assert warmup_batch_size > 0, (
+                "Direct bulk scorer warmup requires a positive batch size via "
+                "--multi-item-score-direct-warmup-batch-size, "
+                "--multi-item-score-direct-hot-shape-bs, or "
+                "--multi-item-score-from-cache-v2-items-per-step."
             )
 
     def check_lora_server_args(self):

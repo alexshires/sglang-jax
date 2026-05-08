@@ -87,6 +87,22 @@ def _compute_label_only_scores_from_logprobs(label_logprobs, apply_softmax: bool
 
 
 class SchedulerScoringDirectMixin:
+    """Direct score helpers.
+
+    Host classes must provide scheduler state used by the direct path:
+    `server_args`, `model_config`, `mesh`, `dp_size`, `page_size`, `tree_cache`,
+    `tp_worker`, `token_to_kv_pool_allocator`, `req_to_token_pool`,
+    `enable_overlap`, `spec_algorithm`, `_score_from_cache_v2_*` helpers, and
+    score-label-only counters initialized by the scheduler scoring state mixin.
+    """
+
+    @staticmethod
+    def _score_direct_freeable_cache_locs(out_cache_loc: np.ndarray) -> np.ndarray:
+        locs = np.asarray(out_cache_loc, dtype=np.int32)
+        # KV slot/page 0 is reserved by the allocators and used as a padding
+        # sentinel. Padded rows use -1. Only positive locations were allocated.
+        return locs[locs > 0]
+
     def _score_direct_warmup_spec(self) -> SimpleNamespace | None:
         if not self._score_from_cache_v2_use_direct_label_only(
             label_only_logprob=bool(
@@ -326,7 +342,7 @@ class SchedulerScoringDirectMixin:
             real_bs = len(chunk_items)
             extend_lens = np.asarray([len(item) for item in chunk_items], dtype=np.int32)
             if real_bs == 0:
-                return [], 0.0, 0.0
+                return jnp.empty((0, len(label_token_ids)), dtype=jnp.float32), 0.0, 0.0
 
             extend_num_tokens = int(np.sum(extend_lens, dtype=np.int64))
             if extend_num_tokens <= 0:
@@ -384,6 +400,8 @@ class SchedulerScoringDirectMixin:
                 )
             )
 
+            # Zero is the reserved KV slot/page sentinel. Padded cache rows have
+            # zero sequence lengths and are ignored by the real-batch selectors.
             cache_loc_cpu = np.zeros(padded_cache_loc_tokens, dtype=np.int32)
             token_pt = 0
             cache_pt = 0
@@ -450,6 +468,11 @@ class SchedulerScoringDirectMixin:
                     axis=0,
                 )
 
+            # Padded rows have extend length 0, so their logits indices duplicate
+            # the previous row. `logits_indices_selector` below exposes only the
+            # real rows to the score path.
+            logits_indices = np.cumsum(extend_seq_lens_cpu, dtype=np.int32) - 1
+
             batch = ModelWorkerBatch(
                 bid=acc_global_bid(),
                 forward_mode=ForwardMode.EXTEND,
@@ -476,7 +499,7 @@ class SchedulerScoringDirectMixin:
                 extend_prefix_lens=extend_prefix_lens_cpu,
                 extend_logprob_start_lens=extend_logprob_start_lens,
                 extend_input_logprob_token_ids=np.empty((0,), dtype=np.int32),
-                logits_indices=np.cumsum(extend_seq_lens_cpu, dtype=np.int32) - 1,
+                logits_indices=logits_indices,
                 real_bs=real_bs,
                 real_bs_per_dp=[real_bs] + [0] * max(0, self.dp_size - 1),
                 logits_indices_selector=np.arange(real_bs, dtype=np.int32),
@@ -584,6 +607,8 @@ class SchedulerScoringDirectMixin:
                     f"Chunk output labels ({scores_dev.shape[1]}) != requested label count ({len(label_token_ids)})."
                 )
 
+            # This includes time waited by block_until_ready(), so it represents
+            # dispatch-to-ready latency for the chunk rather than pure kernel time.
             chunk_device_compute_s = max(0.0, forward_end - forward_start)
             chunk_total_s = max(0.0, time.perf_counter() - chunk_wall_start)
             chunk_host_overhead_s = max(0.0, chunk_total_s - chunk_device_compute_s)
@@ -591,8 +616,9 @@ class SchedulerScoringDirectMixin:
         finally:
             if out_cache_loc is not None:
                 try:
-                    valid_out_cache_loc = np.asarray(out_cache_loc, dtype=np.int32)
-                    valid_out_cache_loc = valid_out_cache_loc[valid_out_cache_loc > 0]
+                    valid_out_cache_loc = self._score_direct_freeable_cache_locs(
+                        out_cache_loc
+                    )
                     if valid_out_cache_loc.size > 0:
                         self.token_to_kv_pool_allocator.free(valid_out_cache_loc)
                 except Exception:
