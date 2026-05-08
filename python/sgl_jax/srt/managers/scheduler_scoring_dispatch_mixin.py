@@ -641,9 +641,10 @@ class SchedulerScoringDispatchMixin:
                 tree_cache=self.tree_cache,
                 model_config=self.model_config,
                 enable_overlap=self.enable_overlap,
+                dp_size=self.dp_size,
                 spec_algorithm=self.spec_algorithm,
                 enable_custom_logit_processor=False,
-                chunked_req=None,
+                chunked_reqs=[None] * self.dp_size,
                 mesh=self.mesh,
             )
             batch.prepare_for_extend()
