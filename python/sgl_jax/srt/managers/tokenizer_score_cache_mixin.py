@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 import uuid
 
 from sgl_jax.srt.managers.io_struct import (
@@ -13,7 +14,10 @@ from sgl_jax.srt.managers.io_struct import (
     ScoreFromCacheReqInput,
     ScoreFromCacheReqOutput,
 )
-from sgl_jax.srt.managers.tokenizer_score_common import _stable_softmax
+from sgl_jax.srt.managers.tokenizer_score_common import (
+    _ReusablePrefillCacheEntry,
+    _stable_softmax,
+)
 from sgl_jax.srt.server_args import ServerArgs
 from sgl_jax.srt.validation import ValidationError
 
@@ -341,6 +345,200 @@ class TokenizerScoreCacheMixin:
             },
         )
 
+    def _score_reusable_prefill_cache_enabled(self) -> bool:
+        return bool(
+            getattr(
+                self.server_args,
+                "multi_item_score_reuse_prefill_cache_by_prefix",
+                False,
+            )
+        )
+
+    def _score_reusable_prefill_cache_state(
+        self,
+    ) -> tuple[
+        asyncio.Lock,
+        dict[tuple[int, ...], _ReusablePrefillCacheEntry],
+        dict[str, tuple[int, ...]],
+    ]:
+        lock = getattr(self, "_score_reusable_prefill_cache_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._score_reusable_prefill_cache_lock = lock
+        cache = getattr(self, "_score_reusable_prefill_cache_by_key", None)
+        if cache is None:
+            cache = {}
+            self._score_reusable_prefill_cache_by_key = cache
+        handle_to_key = getattr(self, "_score_reusable_prefill_cache_handle_to_key", None)
+        if handle_to_key is None:
+            handle_to_key = {}
+            self._score_reusable_prefill_cache_handle_to_key = handle_to_key
+        return lock, cache, handle_to_key
+
+    def _record_reusable_prefill_cache_event(self, event: str) -> None:
+        counters = getattr(self, "score_reusable_prefill_cache_events", None)
+        if counters is None:
+            counters = {}
+            self.score_reusable_prefill_cache_events = counters
+        counters[event] = counters.get(event, 0) + 1
+
+    def score_reusable_prefill_cache_metrics(self) -> dict:
+        _, cache, handle_to_key = self._score_reusable_prefill_cache_state()
+        events = dict(getattr(self, "score_reusable_prefill_cache_events", {}) or {})
+        return {
+            "enabled": self._score_reusable_prefill_cache_enabled(),
+            "entries": len(cache),
+            "ready_entries": sum(1 for entry in cache.values() if entry.handle is not None),
+            "inflight_entries": sum(1 for entry in cache.values() if entry.future is not None),
+            "handle_mappings": len(handle_to_key),
+            "events": events,
+        }
+
+    @staticmethod
+    def _score_reusable_prefill_cache_key(query_tokens: list[int]) -> tuple[int, ...]:
+        return tuple(int(token_id) for token_id in query_tokens)
+
+    async def _acquire_prefill_cache_handle(self, query_tokens: list[int]) -> str:
+        if not self._score_reusable_prefill_cache_enabled():
+            self._record_reusable_prefill_cache_event("disabled")
+            return await self._prefill_and_cache(query_tokens)
+
+        key = self._score_reusable_prefill_cache_key(query_tokens)
+        max_entries = max(
+            1,
+            int(
+                getattr(
+                    self.server_args,
+                    "multi_item_score_reuse_prefill_cache_max_entries",
+                    128,
+                )
+                or 128
+            ),
+        )
+        lock, cache, handle_to_key = self._score_reusable_prefill_cache_state()
+        bypass_reuse = False
+        async with lock:
+            entry = cache.get(key)
+            if entry is not None and entry.handle is not None:
+                was_idle = entry.ref_count == 0
+                entry.ref_count += 1
+                if was_idle:
+                    # Invalidate any pending idle-TTL release for this handle.
+                    entry.generation += 1
+                entry.last_used = time.monotonic()
+                self._record_reusable_prefill_cache_event("hit_ready")
+                return entry.handle
+
+            if entry is not None and entry.future is not None:
+                entry.ref_count += 1
+                entry.generation += 1
+                future = entry.future
+                self._record_reusable_prefill_cache_event("hit_inflight")
+            elif len(cache) >= max_entries:
+                bypass_reuse = True
+                future = None
+                self._record_reusable_prefill_cache_event("bypass_full")
+            else:
+                future = asyncio.create_task(self._prefill_and_cache(list(key)))
+                entry = _ReusablePrefillCacheEntry(
+                    key=key,
+                    ref_count=1,
+                    generation=1,
+                    future=future,
+                )
+                cache[key] = entry
+                self._record_reusable_prefill_cache_event("new")
+
+        if bypass_reuse:
+            return await self._prefill_and_cache(query_tokens)
+
+        try:
+            handle = await asyncio.shield(future)
+        except asyncio.CancelledError:
+            self._drop_prefill_cache_future_ref_background(key, entry, future)
+            raise
+        except Exception:
+            async with lock:
+                current = cache.get(key)
+                if current is entry and current.future is future:
+                    current.ref_count = max(0, current.ref_count - 1)
+                    if current.ref_count == 0:
+                        cache.pop(key, None)
+            self._record_reusable_prefill_cache_event("prefill_failed")
+            raise
+
+        async with lock:
+            current = cache.get(key)
+            if current is None:
+                handle_to_key[handle] = key
+                cache[key] = _ReusablePrefillCacheEntry(
+                    key=key,
+                    ref_count=1,
+                    generation=1,
+                    handle=handle,
+                )
+            else:
+                current.handle = handle
+                current.future = None
+                current.last_used = time.monotonic()
+                handle_to_key[handle] = key
+        return handle
+
+    def _drop_prefill_cache_future_ref_background(
+        self,
+        key: tuple[int, ...],
+        entry: _ReusablePrefillCacheEntry,
+        future: asyncio.Task[str],
+    ) -> None:
+        async def _drop_and_cleanup() -> None:
+            lock, cache, _ = self._score_reusable_prefill_cache_state()
+            needs_cleanup = False
+            async with lock:
+                current = cache.get(key)
+                if current is entry and current.future is future:
+                    current.ref_count = max(0, current.ref_count - 1)
+                    needs_cleanup = current.ref_count == 0
+            if needs_cleanup:
+                await self._cleanup_unused_prefill_cache_future(key, entry, future)
+
+        task = asyncio.create_task(_drop_and_cleanup())
+        task_set = getattr(self, "asyncio_tasks", None)
+        if isinstance(task_set, set):
+            task_set.add(task)
+            task.add_done_callback(task_set.discard)
+
+    async def _cleanup_unused_prefill_cache_future(
+        self,
+        key: tuple[int, ...],
+        entry: _ReusablePrefillCacheEntry,
+        future: asyncio.Task[str],
+    ) -> None:
+        try:
+            handle = await future
+        except Exception:
+            lock, cache, _ = self._score_reusable_prefill_cache_state()
+            async with lock:
+                current = cache.get(key)
+                if current is entry and current.future is future and current.ref_count == 0:
+                    cache.pop(key, None)
+            return
+
+        lock, cache, _ = self._score_reusable_prefill_cache_state()
+        should_release = False
+        async with lock:
+            current = cache.get(key)
+            if current is entry and current.future is future and current.ref_count == 0:
+                cache.pop(key, None)
+                should_release = True
+        if should_release:
+            released = await self._release_cache(handle)
+            if not released:
+                logger.warning(
+                    "Unused prefill+extend cache handle=%s was not cleanly released.",
+                    handle,
+                )
+            self._record_reusable_prefill_cache_event("released_unused")
+
     def _release_cache_background(self, cache_handle: str) -> None:
         async def _release_and_log() -> None:
             try:
@@ -360,6 +558,111 @@ class TokenizerScoreCacheMixin:
         task = asyncio.create_task(_release_and_log())
         self.asyncio_tasks.add(task)
         task.add_done_callback(self.asyncio_tasks.discard)
+
+    def _release_prefill_cache_handle_background(self, cache_handle: str) -> None:
+        if not self._score_reusable_prefill_cache_enabled():
+            self._release_cache_background(cache_handle)
+            return
+
+        async def _release_and_log() -> None:
+            released = await self._release_prefill_cache_handle(cache_handle)
+            if not released:
+                logger.warning(
+                    "Prefill+extend cache handle=%s was not cleanly released.", cache_handle
+                )
+
+        task = asyncio.create_task(_release_and_log())
+        task_set = getattr(self, "asyncio_tasks", None)
+        if isinstance(task_set, set):
+            task_set.add(task)
+            task.add_done_callback(task_set.discard)
+
+    async def _release_prefill_cache_handle(self, cache_handle: str) -> bool:
+        if not self._score_reusable_prefill_cache_enabled():
+            return await self._release_cache(cache_handle)
+
+        lock, cache, handle_to_key = self._score_reusable_prefill_cache_state()
+        release_now = False
+        key: tuple[int, ...] | None = None
+        generation = 0
+        ttl_s = max(
+            0.0,
+            float(
+                getattr(
+                    self.server_args,
+                    "multi_item_score_reuse_prefill_cache_ttl",
+                    60.0,
+                )
+                or 0.0
+            ),
+        )
+
+        async with lock:
+            key = handle_to_key.get(cache_handle)
+            entry = cache.get(key) if key is not None else None
+            if key is None or entry is None or entry.handle != cache_handle:
+                release_now = True
+            else:
+                entry.ref_count = max(0, entry.ref_count - 1)
+                entry.last_used = time.monotonic()
+                if entry.ref_count > 0:
+                    return True
+                entry.generation += 1
+                generation = entry.generation
+                if ttl_s <= 0.0:
+                    cache.pop(key, None)
+                    handle_to_key.pop(cache_handle, None)
+                    release_now = True
+
+        if release_now:
+            released = await self._release_cache(cache_handle)
+            self._record_reusable_prefill_cache_event("released_now")
+            return released
+
+        task = asyncio.create_task(
+            self._release_prefill_cache_after_idle(
+                key=key,
+                cache_handle=cache_handle,
+                generation=generation,
+                ttl_s=ttl_s,
+            )
+        )
+        task_set = getattr(self, "asyncio_tasks", None)
+        if isinstance(task_set, set):
+            task_set.add(task)
+            task.add_done_callback(task_set.discard)
+        return True
+
+    async def _release_prefill_cache_after_idle(
+        self,
+        *,
+        key: tuple[int, ...],
+        cache_handle: str,
+        generation: int,
+        ttl_s: float,
+    ) -> None:
+        await asyncio.sleep(ttl_s)
+        lock, cache, handle_to_key = self._score_reusable_prefill_cache_state()
+        should_release = False
+        async with lock:
+            entry = cache.get(key)
+            if (
+                entry is not None
+                and entry.handle == cache_handle
+                and entry.ref_count == 0
+                and entry.generation == generation
+            ):
+                cache.pop(key, None)
+                handle_to_key.pop(cache_handle, None)
+                should_release = True
+        if should_release:
+            released = await self._release_cache(cache_handle)
+            if not released:
+                logger.warning(
+                    "Prefill+extend cache handle=%s was not cleanly released after idle TTL.",
+                    cache_handle,
+                )
+            self._record_reusable_prefill_cache_event("released_idle")
 
     async def _release_cache(self, cache_handle: str):
         """Release the cached query."""
@@ -673,7 +976,9 @@ class TokenizerScoreCacheMixin:
             "queue_wait_s=%.6f device_compute_s=%.6f host_orchestration_s=%.6f "
             "fastpath_attempted=%s fastpath_succeeded=%s fastpath_fallback_reason=%s "
             "fastpath_items_per_step=%d fastpath_token_budget=%d fastpath_max_total_tokens=%d "
-            "fastpath_replica_lanes=%d fastpath_topology=%s",
+            "fastpath_replica_lanes=%d fastpath_topology=%s "
+            "prefill_reuse_entries=%d prefill_reuse_ready=%d "
+            "prefill_reuse_inflight=%d prefill_reuse_events=%s",
             metrics.get("path", "unknown"),
             int(metrics.get("items", 0)),
             int(metrics.get("dispatch_count", 0)),
@@ -690,6 +995,10 @@ class TokenizerScoreCacheMixin:
             int(metrics.get("fastpath_max_total_tokens", 0)),
             int(metrics.get("fastpath_replica_lanes", 1)),
             metrics.get("fastpath_topology", ""),
+            int(metrics.get("prefill_reuse_entries", 0)),
+            int(metrics.get("prefill_reuse_ready_entries", 0)),
+            int(metrics.get("prefill_reuse_inflight_entries", 0)),
+            metrics.get("prefill_reuse_events", {}),
         )
 
     async def score_prefill_extend(
@@ -729,7 +1038,14 @@ class TokenizerScoreCacheMixin:
             "fastpath_topology": "",
         }
         # Step 1: Prefill query and get cache handle
-        cache_handle = await self._prefill_and_cache(query_tokens)
+        cache_handle = await self._acquire_prefill_cache_handle(query_tokens)
+        prefill_reuse_metrics = self.score_reusable_prefill_cache_metrics()
+        metrics["prefill_reuse_entries"] = int(prefill_reuse_metrics["entries"])
+        metrics["prefill_reuse_ready_entries"] = int(prefill_reuse_metrics["ready_entries"])
+        metrics["prefill_reuse_inflight_entries"] = int(
+            prefill_reuse_metrics["inflight_entries"]
+        )
+        metrics["prefill_reuse_events"] = prefill_reuse_metrics["events"]
         metrics["lifecycle_requests_sent"] += 1
         metrics["lifecycle_results_received"] += 1
 
@@ -868,4 +1184,4 @@ class TokenizerScoreCacheMixin:
             return all_scores
         finally:
             # Step 3: Release cache
-            self._release_cache_background(cache_handle)
+            self._release_prefill_cache_handle_background(cache_handle)

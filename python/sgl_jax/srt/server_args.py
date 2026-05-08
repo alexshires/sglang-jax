@@ -174,6 +174,13 @@ class ServerArgs:
     # Experimental opt-in: for cache_for_scoring prefill-only requests, run the
     # transformer body and update KV cache without materializing LM-head logits.
     multi_item_score_prefill_cache_body_only: bool = False
+    # Experimental opt-in: reuse tokenizer-side prefill cache handles for
+    # identical multi-item scoring prefixes.
+    multi_item_score_reuse_prefill_cache_by_prefix: bool = False
+    # Idle TTL for tokenizer-side reusable prefill handles.
+    multi_item_score_reuse_prefill_cache_ttl: float = 60.0
+    # Maximum distinct prefix keys retained by the tokenizer-side reuse cache.
+    multi_item_score_reuse_prefill_cache_max_entries: int = 128
     # Experimental score-from-cache fastpath v2.
     # Default OFF to preserve production behavior.
     multi_item_enable_score_from_cache_v2: bool = False
@@ -1204,6 +1211,35 @@ class ServerArgs:
             ),
         )
         parser.add_argument(
+            "--multi-item-score-reuse-prefill-cache-by-prefix",
+            action="store_true",
+            default=ServerArgs.multi_item_score_reuse_prefill_cache_by_prefix,
+            help=(
+                "Experimental: reuse tokenizer-side prefill cache handles for "
+                "identical multi-item scoring query prefixes. Requires "
+                "prefill+extend scoring and scoring cache."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-reuse-prefill-cache-ttl",
+            type=float,
+            default=ServerArgs.multi_item_score_reuse_prefill_cache_ttl,
+            help=(
+                "Idle TTL in seconds for tokenizer-side reusable prefill cache "
+                "handles. Set 0 to release as soon as the final in-flight "
+                "score request finishes."
+            ),
+        )
+        parser.add_argument(
+            "--multi-item-score-reuse-prefill-cache-max-entries",
+            type=int,
+            default=ServerArgs.multi_item_score_reuse_prefill_cache_max_entries,
+            help=(
+                "Maximum number of distinct query prefixes retained by the "
+                "tokenizer-side reusable prefill cache."
+            ),
+        )
+        parser.add_argument(
             "--multi-item-score-direct-hot-shape-bs",
             type=int,
             default=ServerArgs.multi_item_score_direct_hot_shape_bs,
@@ -1551,6 +1587,12 @@ class ServerArgs:
         assert self.multi_item_prefill_extend_cache_timeout >= 0, (
             "--multi-item-prefill-extend-cache-timeout must be non-negative"
         )
+        assert self.multi_item_score_reuse_prefill_cache_ttl >= 0, (
+            "--multi-item-score-reuse-prefill-cache-ttl must be non-negative"
+        )
+        assert self.multi_item_score_reuse_prefill_cache_max_entries > 0, (
+            "--multi-item-score-reuse-prefill-cache-max-entries must be positive"
+        )
         assert self.multi_item_score_from_cache_v2_items_per_step > 0, (
             "--multi-item-score-from-cache-v2-items-per-step must be positive"
         )
@@ -1582,6 +1624,24 @@ class ServerArgs:
                 "Prefill-cache body-only scoring currently requires non-overlap scheduling. "
                 "Please pass --disable-overlap-schedule."
             )
+        if self.multi_item_score_reuse_prefill_cache_by_prefix:
+            assert self.multi_item_enable_prefill_extend, (
+                "Reusable prefill-cache scoring requires prefill+extend scoring. "
+                "Please pass --multi-item-enable-prefill-extend."
+            )
+            assert self.enable_scoring_cache, (
+                "Reusable prefill-cache scoring requires scoring cache. "
+                "Please pass --enable-scoring-cache."
+            )
+            if self.multi_item_prefill_extend_cache_timeout > 0:
+                assert (
+                    self.multi_item_score_reuse_prefill_cache_ttl
+                    <= self.multi_item_prefill_extend_cache_timeout
+                ), (
+                    "Reusable prefill-cache TTL must not exceed "
+                    "--multi-item-prefill-extend-cache-timeout, otherwise the "
+                    "scheduler may expire a handle still retained by the tokenizer."
+                )
         if self.multi_item_enable_score_from_cache_v2:
             assert self.multi_item_enable_prefill_extend, (
                 "score-from-cache v2 requires prefill+extend to be enabled. "
