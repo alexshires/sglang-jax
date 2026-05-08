@@ -1,3 +1,4 @@
+import math
 import os
 import unittest
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ class TestInputLogprobAlignment(CustomTestCase):
         scheduler = _DummyScheduler()
         scheduler.model_config = SimpleNamespace(vocab_size=32000)
 
+        token_ids_logprob = [1, 2]
         req = SimpleNamespace(
             input_token_logprobs=None,
             temp_input_top_logprobs_val=None,
@@ -39,22 +41,30 @@ class TestInputLogprobAlignment(CustomTestCase):
             input_top_logprobs_idx=None,
             input_token_ids_logprobs_val=None,
             input_token_ids_logprobs_idx=None,
-            top_logprobs_num=0,
-            token_ids_logprob=[1, 2],
-            origin_input_ids=[101, 9, 32005, 9, 301, 9],
+            top_logprobs_num=2,
+            token_ids_logprob=token_ids_logprob,
+            origin_input_ids=[101, 31998, 31999, 32005, 301, 9],
             logprob_start_len=0,
             return_logprob=True,
         )
         # Shape is [batch][token_position][requested_token_id].
         input_token_ids_logprobs_val = [
-            [[f"v{token_pos}:{token_id}" for token_id in req.token_ids_logprob] for token_pos in range(6)]
+            [[f"v{token_pos}:{token_id}" for token_id in token_ids_logprob] for token_pos in range(6)]
         ]
         input_token_ids_logprobs_idx = [
-            [[f"i{token_pos}:{token_id}" for token_id in req.token_ids_logprob] for token_pos in range(6)]
+            [[f"i{token_pos}:{token_id}" for token_id in token_ids_logprob] for token_pos in range(6)]
+        ]
+        input_top_logprobs_val = [
+            [[f"top-v{token_pos}:{rank}" for rank in range(2)] for token_pos in range(6)]
+        ]
+        input_top_logprobs_idx = [
+            [[f"top-i{token_pos}:{rank}" for rank in range(2)] for token_pos in range(6)]
         ]
         output = LogitsProcessorOutput(
             next_token_logits=None,
             input_token_logprobs=[0, 1, 2, 3, 4, 5],
+            input_top_logprobs_val=input_top_logprobs_val,
+            input_top_logprobs_idx=input_top_logprobs_idx,
             input_token_ids_logprobs_val=input_token_ids_logprobs_val,
             input_token_ids_logprobs_idx=input_token_ids_logprobs_idx,
         )
@@ -70,7 +80,9 @@ class TestInputLogprobAlignment(CustomTestCase):
 
         self.assertIsNone(req.input_token_logprobs)
         self.assertEqual(req.input_token_logprobs_val, [None, 0, 1, 2, 3, 4])
-        self.assertEqual(req.input_token_logprobs_idx, [101, 9, 0, 9, 301, 9])
+        self.assertEqual(req.input_token_logprobs_idx, [101, 31998, 0, 0, 301, 9])
+        self.assertEqual(req.input_top_logprobs_val, [None, *input_top_logprobs_val[0][:-1]])
+        self.assertEqual(req.input_top_logprobs_idx, [None, *input_top_logprobs_idx[0][:-1]])
         self.assertEqual(
             req.input_token_ids_logprobs_val,
             [None, *input_token_ids_logprobs_val[0][:-1]],
@@ -79,6 +91,8 @@ class TestInputLogprobAlignment(CustomTestCase):
             req.input_token_ids_logprobs_idx,
             [None, *input_token_ids_logprobs_idx[0][:-1]],
         )
+        self.assertIsNone(req.temp_input_top_logprobs_val)
+        self.assertIsNone(req.temp_input_top_logprobs_idx)
         self.assertIsNone(req.temp_input_token_ids_logprobs_val)
         self.assertIsNone(req.temp_input_token_ids_logprobs_idx)
 
@@ -129,4 +143,6 @@ class TestScoreEndpointSmoke(CustomTestCase):
         self.assertEqual(len(scores), 4)
         for score_list in scores:
             self.assertEqual(len(score_list), 3)
+            self.assertTrue(all(math.isfinite(score) for score in score_list))
+            self.assertTrue(all(0.0 <= score <= 1.0 for score in score_list))
             self.assertAlmostEqual(sum(score_list), 1.0, places=5)
