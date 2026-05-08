@@ -402,6 +402,8 @@ class Glm4MoeDecoderLayer(nnx.Module):
 
 
 class Glm4MoeModel(nnx.Module):
+    body_returns_topk_ids = True
+
     def __init__(
         self,
         config: PretrainedConfig,

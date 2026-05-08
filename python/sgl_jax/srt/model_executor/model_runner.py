@@ -51,6 +51,29 @@ from sgl_jax.srt.utils.jax_utils import get_available_device_memory
 logger = logging.getLogger(__name__)
 
 
+def _unpack_prefill_body_only_outputs(
+    body_outputs, *, body_returns_topk_ids: bool
+):
+    if not isinstance(body_outputs, (tuple, list)):
+        raise TypeError(
+            "Prefill cache body-only forward expected model body to return "
+            f"a tuple/list, got {type(body_outputs).__name__}."
+        )
+    if len(body_outputs) == 2:
+        _, layers_kv_fused = body_outputs
+        return layers_kv_fused, None
+    if len(body_outputs) == 3:
+        _, layers_kv_fused, aux = body_outputs
+        return layers_kv_fused, aux if body_returns_topk_ids else None
+    if len(body_outputs) == 4:
+        _, _, layers_kv_fused, _ = body_outputs
+        return layers_kv_fused, None
+    raise ValueError(
+        "Prefill cache body-only forward expected model body to return 2, 3, "
+        f"or 4 values, got {len(body_outputs)}."
+    )
+
+
 class ModelRunner(BaseModelRunner):
     """ModelRunner runs the forward passes of the models."""
 
@@ -227,6 +250,34 @@ class ModelRunner(BaseModelRunner):
             with LoraBatchContext.set_batch(forward_batch):
                 return model(forward_batch, token_to_kv_pool, logits_metadata)
 
+        has_transformer_body = hasattr(self.model, "model")
+        body_returns_topk_ids = bool(
+            has_transformer_body
+            and getattr(self.model.model, "body_returns_topk_ids", False)
+        )
+
+        @partial(
+            jax.jit,
+            donate_argnames=["token_to_kv_pool"],  # just donate KV cache
+            static_argnames=["model_state_def"],
+            compiler_options=jit_compiler_options,
+        )
+        def jitted_run_prefill_body_only(
+            model_def,
+            model_state_def,
+            model_state_leaves,
+            forward_batch,
+            token_to_kv_pool,
+        ):
+            model_state = jax.tree_util.tree_unflatten(model_state_def, model_state_leaves)
+            model = nnx.merge(model_def, model_state)
+            with LoraBatchContext.set_batch(forward_batch):
+                body_outputs = model.model(forward_batch, token_to_kv_pool)
+            return _unpack_prefill_body_only_outputs(
+                body_outputs,
+                body_returns_topk_ids=body_returns_topk_ids,
+            )
+
         # Capture base RNG key as a constant in the JIT closure.
         # fold_in(constant, dynamic_step) is computed inside JIT, avoiding
         # the eager jax.random.split that would serialize the host-device pipeline.
@@ -264,7 +315,22 @@ class ModelRunner(BaseModelRunner):
                 logits_metadata,
             )
 
+        def run_prefill_body_only_wrapper(forward_batch):
+            if not has_transformer_body:
+                raise NotImplementedError(
+                    "Prefill cache body-only forward requires a causal LM with a .model body"
+                )
+            token_to_kv_pool = self.token_to_kv_pool
+            return jitted_run_prefill_body_only(
+                model_def,
+                model_state_def,
+                self.model_state_leaves,
+                forward_batch,
+                token_to_kv_pool,
+            )
+
         self.jitted_run_model = run_model_wrapper
+        self.jitted_run_prefill_body_only = run_prefill_body_only_wrapper
 
         self.jitted_sampler = partial(
             jitted_sampler,
@@ -836,6 +902,38 @@ class ModelRunner(BaseModelRunner):
                 raise ValueError(f"Invalid forward mode: {forward_batch.forward_mode}")
 
         return ret
+
+    def forward_prefill_body_only(
+        self,
+        forward_batch: ForwardBatch,
+    ) -> tuple[None, int, list[jax.Array] | None]:
+        self.forward_pass_id += 1
+        precision_tracer.start_batch_trace(forward_batch.bid)
+        precision_tracer.set_current_forward_pass_id(self.forward_pass_id)
+        with jax.profiler.TraceAnnotation("_forward_prefill_body_only_raw"):
+            return self._forward_prefill_body_only_raw(forward_batch)
+
+    def _forward_prefill_body_only_raw(
+        self,
+        forward_batch: ForwardBatch,
+    ) -> tuple[None, int, list[jax.Array] | None]:
+        try:
+            ctx = jax.sharding.use_mesh(self.mesh)
+        except AttributeError:
+            try:
+                ctx = jax.set_mesh(self.mesh)
+            except AttributeError:
+                ctx = self.mesh
+        with ctx:
+            import jax._src.test_util as jtu
+
+            with jtu.count_pjit_cpp_cache_miss() as count:
+                layers_kv_fused, layers_topk_ids = self.jitted_run_prefill_body_only(
+                    forward_batch
+                )
+                cache_miss_count = count()
+            self._set_kv_cache_after_forward(layers_kv_fused)
+        return None, cache_miss_count, layers_topk_ids
 
     def sample(
         self,

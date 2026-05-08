@@ -719,6 +719,8 @@ class Grok1DecoderLayer(nnx.Module):
 class Grok1Model(nnx.Module):
     """The main Grok-1 transformer model."""
 
+    body_returns_topk_ids = True
+
     def __init__(
         self,
         config: PretrainedConfig,

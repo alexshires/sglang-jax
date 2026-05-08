@@ -435,6 +435,7 @@ class MiMoV2DecoderLayer(nnx.Module):
 
 
 class MiMoV2Model(nnx.Module):
+    body_returns_topk_ids = True
 
     def __init__(
         self,

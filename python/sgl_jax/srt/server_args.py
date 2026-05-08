@@ -171,6 +171,9 @@ class ServerArgs:
     multi_item_enable_prefill_extend: bool = False
     multi_item_extend_batch_size: int = 32
     multi_item_prefill_extend_cache_timeout: float = 60.0
+    # Experimental opt-in: for cache_for_scoring prefill-only requests, run the
+    # transformer body and update KV cache without materializing LM-head logits.
+    multi_item_score_prefill_cache_body_only: bool = False
     # Experimental score-from-cache fastpath v2.
     # Default OFF to preserve production behavior.
     multi_item_enable_score_from_cache_v2: bool = False
@@ -1190,6 +1193,17 @@ class ServerArgs:
             help="Use the dedicated direct bulk label-only score path.",
         )
         parser.add_argument(
+            "--multi-item-score-prefill-cache-body-only",
+            action="store_true",
+            default=ServerArgs.multi_item_score_prefill_cache_body_only,
+            help=(
+                "Experimental: for cache_for_scoring prefill-only requests, "
+                "run only the transformer body and KV-cache update, skipping "
+                "LM-head logits. Requires prefill+extend scoring, scoring "
+                "cache, and non-overlap scheduling."
+            ),
+        )
+        parser.add_argument(
             "--multi-item-score-direct-hot-shape-bs",
             type=int,
             default=ServerArgs.multi_item_score_direct_hot_shape_bs,
@@ -1554,6 +1568,19 @@ class ServerArgs:
         if self.multi_item_enable_prefill_extend:
             assert self.enable_scoring_cache, (
                 "prefill+extend scoring requires scoring cache. Please pass --enable-scoring-cache."
+            )
+        if self.multi_item_score_prefill_cache_body_only:
+            assert self.multi_item_enable_prefill_extend, (
+                "Prefill-cache body-only scoring requires prefill+extend scoring. "
+                "Please pass --multi-item-enable-prefill-extend."
+            )
+            assert self.enable_scoring_cache, (
+                "Prefill-cache body-only scoring requires scoring cache. "
+                "Please pass --enable-scoring-cache."
+            )
+            assert self.disable_overlap_schedule, (
+                "Prefill-cache body-only scoring currently requires non-overlap scheduling. "
+                "Please pass --disable-overlap-schedule."
             )
         if self.multi_item_enable_score_from_cache_v2:
             assert self.multi_item_enable_prefill_extend, (

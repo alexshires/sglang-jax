@@ -1825,6 +1825,7 @@ class Scheduler(
                 self.page_size,
                 self.server_args.enable_static_lora,
             )
+            skip_sample, skip_logits = self._score_prefill_cache_skip_plan(batch)
 
             if self.enable_overlap:
                 with jax.profiler.TraceAnnotation(
@@ -1833,6 +1834,7 @@ class Scheduler(
                     logits_output, next_token_ids, cache_miss_count = (
                         self.tp_worker.forward_batch_generation(
                             model_worker_batch,
+                            skip_sample=skip_sample,
                             sampling_metadata=None,
                         )
                     )
@@ -1841,7 +1843,9 @@ class Scheduler(
                 logits_output, next_token_ids_device, cache_miss_count = (
                     self.tp_worker.forward_batch_generation(
                         model_worker_batch,
+                        skip_sample=skip_sample,
                         sampling_metadata=None,
+                        skip_logits=skip_logits,
                     )
                 )
                 # In multi-host DP, next_token_ids may span non-addressable

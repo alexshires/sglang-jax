@@ -384,6 +384,8 @@ class Qwen2MoeDecoderLayer(nnx.Module):
 class Qwen2MoeModel(nnx.Module):
     """Qwen2 MoE model with embedding, layers, and normalization."""
 
+    body_returns_topk_ids = True
+
     def __init__(
         self,
         config: PretrainedConfig,

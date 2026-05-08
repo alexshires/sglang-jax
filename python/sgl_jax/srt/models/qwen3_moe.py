@@ -323,6 +323,8 @@ class QWen3MoeDecoderLayer(nnx.Module):
 
 
 class QWen3MoeModel(nnx.Module):
+    body_returns_topk_ids = True
+
     def __init__(
         self,
         config: PretrainedConfig,

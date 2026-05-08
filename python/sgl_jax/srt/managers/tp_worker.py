@@ -358,7 +358,11 @@ class ModelWorker:
         skip_sample: bool = False,
         sampling_metadata: SamplingMetadata = None,
         forward_metadata=None,
+        skip_logits: bool = False,
     ) -> tuple[LogitsProcessorOutput | jax.Array | int, jax.Array | None]:
+        if skip_logits and not skip_sample:
+            raise ValueError("skip_logits requires skip_sample=True")
+
         # Prepare LoRA batch if LoRA is enabled
         if self.worker.server_args.enable_lora and self.need_prepare_lora_batch:
             self.prepare_lora_batch(model_worker_batch)
@@ -374,7 +378,7 @@ class ModelWorker:
                 model_worker_batch
             )
 
-        if sampling_metadata is None:
+        if sampling_metadata is None and not skip_sample:
             sampling_metadata = SamplingMetadata.from_model_worker_batch(
                 model_worker_batch,
                 0,
@@ -383,11 +387,17 @@ class ModelWorker:
             )
 
         self.model_runner.attn_backend.forward_metadata = forward_metadata
-        logits_metadata = LogitsMetadata.from_model_worker_batch(model_worker_batch, self.mesh)
-        logits_output, cache_miss_count, layers_topk_ids = self.model_runner.forward(
-            forward_batch,
-            logits_metadata=logits_metadata,
-        )
+        if skip_logits:
+            logits_output, cache_miss_count, layers_topk_ids = (
+                self.model_runner.forward_prefill_body_only(forward_batch)
+            )
+        else:
+            logits_output, cache_miss_count, layers_topk_ids = self.model_runner.forward(
+                forward_batch,
+                logits_metadata=LogitsMetadata.from_model_worker_batch(
+                    model_worker_batch, self.mesh
+                ),
+            )
 
         self.dump_topk_ids(layers_topk_ids, model_worker_batch)
 
@@ -403,7 +413,7 @@ class ModelWorker:
 
         # SAVE last layer logits
         save_logits_file_info = os.getenv("DUMP_LAST_LAYER_LOGITS_FILENAMES", None)
-        if save_logits_file_info:
+        if save_logits_file_info and logits_output is not None:
             save_logits_with_txt(
                 logits_output.next_token_logits[: model_worker_batch.real_bs, :],
                 save_logits_file_info,
@@ -652,9 +662,11 @@ class MockModelWorker:
     def forward_batch_generation(
         self,
         _model_worker_batch: ModelWorkerBatch,
-        _launch_done: threading.Event | None = None,
-        _skip_sample: bool = False,
-        _sampling_metadata: SamplingMetadata | None = None,
+        launch_done: threading.Event | None = None,
+        skip_sample: bool = False,
+        sampling_metadata: SamplingMetadata | None = None,
+        forward_metadata=None,
+        skip_logits: bool = False,
     ) -> tuple[LogitsProcessorOutput | jax.Array, jax.Array | None]:
         return (
             LogitsProcessorOutput(

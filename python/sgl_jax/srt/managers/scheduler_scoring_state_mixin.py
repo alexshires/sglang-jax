@@ -574,6 +574,22 @@ class SchedulerScoringStateMixin:
         reqs = getattr(batch, "reqs", None) or []
         return len(reqs) > 0 and all(bool(getattr(req, "cache_for_scoring", False)) for req in reqs)
 
+    def _can_skip_logits_for_prefill_batch(self, batch: ScheduleBatch | None) -> bool:
+        return bool(
+            getattr(self.server_args, "multi_item_score_prefill_cache_body_only", False)
+            and SchedulerScoringStateMixin._can_skip_sample_for_prefill_batch(batch)
+        )
+
+    def _score_prefill_cache_skip_plan(
+        self, batch: ScheduleBatch | None
+    ) -> tuple[bool, bool]:
+        skip_logits = SchedulerScoringStateMixin._can_skip_logits_for_prefill_batch(
+            self, batch
+        )
+        # Skipping the sampler is part of the body-only logits-skip path. Do
+        # not change cache-for-scoring prefill behavior when the flag is off.
+        return skip_logits, skip_logits
+
     @staticmethod
     def _admission_lane(req_owner, req: Req) -> str:
         if not SchedulerScoringStateMixin._is_score_path_req(req):
