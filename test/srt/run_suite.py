@@ -438,6 +438,30 @@ suites = {
             test_methods=["TestModelPerfTrace.test_qwen_7b_performance_trace_tp_1_daily"],
         ),
     ],
+    "score-api-test-tpu-v6e-1": [
+        TestFile("test/srt/test_score_api_core.py", 2),
+        TestFile("test/srt/test_score_api_integration.py", 2),
+        TestFile("test/srt/test_score_api_smoke.py", 2),
+        TestFile("test/srt/test_score_openai_client.py", 2),
+        TestFile("test/srt/test_score_validation.py", 2),
+    ],
+    "score-api-core-test-tpu-v6e-1": [
+        TestFile("test/srt/test_score_api_core.py", 5),
+        TestFile("test/srt/test_score_api_integration.py", 5),
+        TestFile("test/srt/test_score_api_smoke.py", 2),
+        TestFile("test/srt/test_score_validation.py", 2),
+    ],
+    "score-api-client-test-tpu-v6e-1": [
+        TestFile("test/srt/test_score_openai_client.py", 15),
+    ],
+    "multi-item-scoring-test-tpu-v6e-1": [
+        TestFile("test/srt/test_multi_item_prefill_extend_smoke.py", 2),
+        TestFile("test/srt/test_multi_item_prefill_extend.py", 4),
+        TestFile("test/srt/test_multi_item_regression.py", 4),
+    ],
+    "minimal-smoke-test": [
+        TestFile("test/srt/test_server_args_gc_freeze.py", 0.2),
+    ],
     "sglang_dependency_test": [],
     "unit-test-tpu-v6e-1": [
         TestFile("python/sgl_jax/test/kernels/quantized_linear_test.py", 0.1, runner="pytest"),
@@ -498,7 +522,9 @@ suites = {
             ["TestMoEEvalAccuracyLarge.test_mmlu"],
         ),
     ],
-    "performance-test-tpu-v6e-1": [TestFile("test/srt/test_bench_serving_dense.py", 7)],
+    "performance-test-tpu-v6e-1": [
+        TestFile("test/srt/test_bench_serving_dense.py", 7),
+    ],
     "performance-test-tpu-v6e-4": [
         TestFile(
             "test/srt/test_bench_serving_dense_tp_4.py",
