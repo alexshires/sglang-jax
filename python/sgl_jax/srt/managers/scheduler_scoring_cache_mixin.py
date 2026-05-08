@@ -206,6 +206,7 @@ class SchedulerScoringCacheMixin:
         entry = self.scoring_cache_nodes.get(recv_req.extend_from_cache)
         if entry is None:
             miss_lane = self._score_scheduler_lane_from_prefix_len(
+                self,
                 len(getattr(recv_req, "input_ids", []) or [])
             )
             self._record_scoring_cache_lookup(path="extend", hit=False, lane_name=miss_lane)
@@ -219,7 +220,7 @@ class SchedulerScoringCacheMixin:
         cached_last_node, _, prefix_ids, prefix_indices, cached_extra_key, _ = (
             self._unpack_scoring_cache_entry(entry)
         )
-        hit_lane = self._score_scheduler_lane_from_prefix_len(len(prefix_indices))
+        hit_lane = self._score_scheduler_lane_from_prefix_len(self, len(prefix_indices))
         self._record_scoring_cache_lookup(path="extend", hit=True, lane_name=hit_lane)
 
         item_ids = recv_req.input_ids or []
