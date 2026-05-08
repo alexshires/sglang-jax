@@ -1,6 +1,20 @@
 """Scheduler score-from-cache request execution."""
 
+import logging
+import time
+
+import jax
+import numpy as np
+from jax import numpy as jnp
+
 from sgl_jax.srt.managers.io_struct import ScoreFromCacheReqInput, ScoreFromCacheReqOutput
+from sgl_jax.srt.utils.common_utils import get_bool_env_var
+
+logger = logging.getLogger(__name__)
+
+SCORE_V2_ALLOW_REQPOOL_OVERSUBSCRIBE = get_bool_env_var(
+    "SGLANG_SCORE_FROM_CACHE_V2_ALLOW_REQPOOL_OVERSUBSCRIBE"
+)
 
 
 class SchedulerScoringExecuteMixin:
