@@ -1,15 +1,14 @@
-from types import SimpleNamespace
-
 import pytest
 
 from sgl_jax.srt.managers.scheduler_scoring_cache_mixin import SchedulerScoringCacheMixin
 from sgl_jax.srt.managers.scheduler_scoring_dispatch_mixin import SchedulerScoringDispatchMixin
 from sgl_jax.srt.managers.scheduler_scoring_state_mixin import SchedulerScoringStateMixin
+from sgl_jax.srt.server_args import ServerArgs
 
 
 class _FakeInstrumentationScheduler(
-    SchedulerScoringCacheMixin,
     SchedulerScoringDispatchMixin,
+    SchedulerScoringCacheMixin,
     SchedulerScoringStateMixin,
 ):
     pass
@@ -17,11 +16,11 @@ class _FakeInstrumentationScheduler(
 
 def _make_scheduler() -> _FakeInstrumentationScheduler:
     scheduler = _FakeInstrumentationScheduler()
-    scheduler.init_scoring_state(
-        SimpleNamespace(
-            multi_item_prefill_extend_cache_timeout=60.0,
-        )
+    server_args = ServerArgs(
+        model_path="dummy-model",
+        multi_item_prefill_extend_cache_timeout=60.0,
     )
+    scheduler.init_scoring_state(server_args)
     return scheduler
 
 
@@ -84,3 +83,56 @@ def test_score_from_cache_v2_timing_counters_accumulate_totals_and_maxima():
     assert scheduler.score_from_cache_v2_queue_wait_s_max == pytest.approx(0.04)
     assert scheduler.score_from_cache_v2_device_compute_s_max == pytest.approx(0.02)
     assert scheduler.score_from_cache_v2_host_orchestration_s_max == pytest.approx(0.03)
+
+
+def test_scoring_cache_handle_release_counters_track_reasons():
+    scheduler = _make_scheduler()
+
+    scheduler._record_scoring_cache_handle_created()
+    scheduler._record_scoring_cache_handle_released("manual")
+    scheduler._record_scoring_cache_handle_released("expired")
+    scheduler._record_scoring_cache_handle_released("runtime_error")
+
+    metrics = scheduler._scoring_cache_metrics_snapshot()
+    assert metrics["handles_created"] == 1
+    assert metrics["handles_released_total"] == 3
+    assert metrics["handles_released_manual"] == 1
+    assert metrics["handles_released_expired"] == 1
+    assert metrics["handles_released_other"] == 1
+
+
+def test_unknown_scoring_cache_lane_normalizes_to_default_and_warns_once(caplog):
+    scheduler = _make_scheduler()
+
+    scheduler._record_scoring_cache_lookup(
+        path="score_from_cache_v2",
+        hit=True,
+        lane_name="weird",
+    )
+    scheduler._record_scoring_cache_lookup(
+        path="score_from_cache_v2",
+        hit=False,
+        lane_name="weird",
+    )
+
+    metrics = scheduler._scoring_cache_metrics_snapshot()
+    assert metrics["lookup_by_lane"]["score_from_cache_v2"]["default"] == {
+        "queries": 2,
+        "hits": 1,
+        "misses": 1,
+    }
+    assert sum("Unknown scoring-cache lane" in record.message for record in caplog.records) == 1
+
+
+def test_score_from_cache_v2_fallback_reasons_accumulate():
+    scheduler = _make_scheduler()
+
+    scheduler._record_score_from_cache_v2_fallback("timeout")
+    scheduler._record_score_from_cache_v2_fallback("timeout")
+    scheduler._record_score_from_cache_v2_fallback("runtime_exception")
+
+    assert scheduler.score_from_cache_v2_fallback == 3
+    assert scheduler.score_from_cache_v2_fallback_reasons == {
+        "timeout": 2,
+        "runtime_exception": 1,
+    }
