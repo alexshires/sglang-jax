@@ -182,6 +182,25 @@ class ServerArgs:
     multi_item_score_from_cache_v2_token_budget: int = 0
     # Floor for adaptive items_per_step.
     multi_item_score_from_cache_v2_min_items_per_step: int = 1
+    # Label-only and direct score fastpaths.
+    multi_item_score_label_only_logprob: bool = False
+    multi_item_score_label_only_fused_kernel: bool = True
+    multi_item_score_direct_label_only: bool = False
+    multi_item_score_direct_hot_shape_bs: int = 0
+    multi_item_score_direct_hot_shape_tokens: int = 0
+    multi_item_score_direct_hot_shape_token_rounding: int = 0
+    multi_item_score_direct_hot_shape_token_rounding_min_hot_tokens: int = 0
+    multi_item_score_direct_token_ids_logprob_only: bool = False
+    multi_item_score_direct_token_ids_logprob_only_auto: bool = False
+    multi_item_score_direct_token_ids_logprob_only_auto_max_page_size: int = 32
+    multi_item_score_direct_token_ids_logprob_only_auto_max_running_requests: int = 32
+    multi_item_score_direct_token_ids_logprob_only_chunk_size: int = 4096
+    multi_item_score_direct_warmup_enable: bool = False
+    multi_item_score_direct_warmup_prefix_len: int = 0
+    multi_item_score_direct_warmup_item_len: int = 0
+    multi_item_score_direct_warmup_batch_size: int = 0
+    multi_item_score_direct_warmup_label_count: int = 1
+    multi_item_score_direct_warmup_apply_softmax: bool = False
     # Emit per-request score-path metrics to logs.
     multi_item_score_fastpath_log_metrics: bool = False
     # Allow radix cache to keep score-prefill prefixes alive across requests.
@@ -1121,6 +1140,112 @@ class ServerArgs:
             help="Minimum items_per_step floor for adaptive score-from-cache v2 sizing.",
         )
         parser.add_argument(
+            "--multi-item-score-label-only-logprob",
+            action="store_true",
+            help="Use label-only logprob math in score-from-cache v2.",
+        )
+        parser.add_argument(
+            "--multi-item-score-label-only-fused-kernel",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.multi_item_score_label_only_fused_kernel,
+            help="Keep label-only score probability math on device.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-label-only",
+            action="store_true",
+            help="Use the dedicated direct bulk label-only score path.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-hot-shape-bs",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_hot_shape_bs,
+            help="Fixed batch-size padding for the direct score path; <=0 disables.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-hot-shape-tokens",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_hot_shape_tokens,
+            help="Fixed total-token padding for the direct score path; <=0 disables.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-hot-shape-token-rounding",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_hot_shape_token_rounding,
+            help="Token-rounding multiple for direct hot-shape padding; <=0 disables.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-hot-shape-token-rounding-min-hot-tokens",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_hot_shape_token_rounding_min_hot_tokens,
+            help="Minimum hot-token shape required before token rounding can shrink it.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-token-ids-logprob-only",
+            action="store_true",
+            default=ServerArgs.multi_item_score_direct_token_ids_logprob_only,
+            help="Compute direct label-only next-token logprobs without full-vocab materialization.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-token-ids-logprob-only-auto",
+            action="store_true",
+            default=ServerArgs.multi_item_score_direct_token_ids_logprob_only_auto,
+            help="Auto-enable direct token-id-only scoring for smaller-shape lanes.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-token-ids-logprob-only-auto-max-page-size",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_token_ids_logprob_only_auto_max_page_size,
+            help="Auto mode page-size threshold for direct token-id-only scoring.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-token-ids-logprob-only-auto-max-running-requests",
+            type=int,
+            default=(
+                ServerArgs.multi_item_score_direct_token_ids_logprob_only_auto_max_running_requests
+            ),
+            help="Auto mode max-running-requests threshold for direct token-id-only scoring.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-token-ids-logprob-only-chunk-size",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_token_ids_logprob_only_chunk_size,
+            help="Positive chunk size for direct token-id-only scorer vocab reduction.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-enable",
+            action="store_true",
+            help="Run direct bulk score warmup at startup.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-prefix-len",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_warmup_prefix_len,
+            help="Synthetic query length used for direct score warmup.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-item-len",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_warmup_item_len,
+            help="Synthetic item length used for direct score warmup.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-batch-size",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_warmup_batch_size,
+            help="Synthetic item count used for direct score warmup.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-label-count",
+            type=int,
+            default=ServerArgs.multi_item_score_direct_warmup_label_count,
+            help="Number of synthetic labels used for direct score warmup.",
+        )
+        parser.add_argument(
+            "--multi-item-score-direct-warmup-apply-softmax",
+            action="store_true",
+            help="Compile the apply_softmax=True direct scorer variant during warmup.",
+        )
+        parser.add_argument(
             "--multi-item-score-fastpath-log-metrics",
             action="store_true",
             help="Emit per-/v1/score path metrics including fastpath counters and timings.",
@@ -1310,6 +1435,64 @@ class ServerArgs:
             )
             assert self.enable_scoring_cache, (
                 "score-from-cache v2 requires scoring cache. Please pass --enable-scoring-cache."
+            )
+        if self.multi_item_score_label_only_logprob:
+            assert self.multi_item_enable_score_from_cache_v2, (
+                "label-only logprob mode requires score-from-cache v2. "
+                "Please pass --multi-item-enable-score-from-cache-v2."
+            )
+        assert self.multi_item_score_direct_hot_shape_bs >= 0, (
+            "--multi-item-score-direct-hot-shape-bs must be non-negative"
+        )
+        assert self.multi_item_score_direct_hot_shape_tokens >= 0, (
+            "--multi-item-score-direct-hot-shape-tokens must be non-negative"
+        )
+        assert self.multi_item_score_direct_hot_shape_token_rounding >= 0, (
+            "--multi-item-score-direct-hot-shape-token-rounding must be non-negative"
+        )
+        assert self.multi_item_score_direct_warmup_prefix_len >= 0, (
+            "--multi-item-score-direct-warmup-prefix-len must be non-negative"
+        )
+        assert self.multi_item_score_direct_warmup_item_len >= 0, (
+            "--multi-item-score-direct-warmup-item-len must be non-negative"
+        )
+        assert self.multi_item_score_direct_warmup_batch_size >= 0, (
+            "--multi-item-score-direct-warmup-batch-size must be non-negative"
+        )
+        assert self.multi_item_score_direct_warmup_label_count > 0, (
+            "--multi-item-score-direct-warmup-label-count must be positive"
+        )
+        assert self.multi_item_score_direct_token_ids_logprob_only_chunk_size > 0, (
+            "--multi-item-score-direct-token-ids-logprob-only-chunk-size must be positive"
+        )
+        if self.multi_item_score_direct_label_only:
+            assert self.multi_item_score_label_only_logprob, (
+                "Direct bulk label-only scoring requires label-only logprob mode. "
+                "Please pass --multi-item-score-label-only-logprob."
+            )
+        if self.multi_item_score_direct_warmup_enable:
+            assert self.multi_item_score_direct_label_only, (
+                "Direct bulk scorer warmup requires the direct label-only path. "
+                "Please pass --multi-item-score-direct-label-only."
+            )
+            assert self.multi_item_score_direct_warmup_prefix_len > 0, (
+                "Direct bulk scorer warmup requires a positive "
+                "--multi-item-score-direct-warmup-prefix-len."
+            )
+            assert self.multi_item_score_direct_warmup_item_len > 0, (
+                "Direct bulk scorer warmup requires a positive "
+                "--multi-item-score-direct-warmup-item-len."
+            )
+            warmup_batch_size = max(0, self.multi_item_score_direct_warmup_batch_size)
+            if warmup_batch_size <= 0:
+                warmup_batch_size = max(0, self.multi_item_score_direct_hot_shape_bs)
+            if warmup_batch_size <= 0:
+                warmup_batch_size = max(0, self.multi_item_score_from_cache_v2_items_per_step)
+            assert warmup_batch_size > 0, (
+                "Direct bulk scorer warmup requires a positive batch size via "
+                "--multi-item-score-direct-warmup-batch-size, "
+                "--multi-item-score-direct-hot-shape-bs, or "
+                "--multi-item-score-from-cache-v2-items-per-step."
             )
 
     def check_lora_server_args(self):
