@@ -25,6 +25,7 @@ Usage:
 
 import math
 import os
+import tempfile
 import unittest
 from dataclasses import dataclass, field
 
@@ -33,6 +34,24 @@ from transformers import AutoTokenizer
 
 from sgl_jax.srt.entrypoints.engine import Engine
 from sgl_jax.test.test_utils import DEFAULT_SMALL_MODEL_NAME_FOR_TEST, CustomTestCase
+
+__all__ = [
+    "ScoreAPITestCase",
+    "ScoreTestConfig",
+    "assert_scores_match",
+    "assert_scores_shape",
+    "assert_scores_valid",
+    "build_engine",
+    "compute_hf_reference_scores",
+    "generate_test_items",
+    "get_label_token_ids",
+    "get_single_token_id",
+    "get_tokenizer",
+    "should_run_hf_reference",
+    "skip_if_cpu",
+    "skip_if_no_hf_reference",
+    "skip_if_no_multidevice",
+]
 
 # =============================================================================
 # Configuration
@@ -65,10 +84,12 @@ class ScoreTestConfig:
     model_name: str = field(
         default_factory=lambda: os.getenv("SGLANG_TEST_MODEL", DEFAULT_SMALL_MODEL_NAME_FOR_TEST)
     )
-    device: str = "tpu"
+    device: str = field(default_factory=lambda: os.getenv("SGLANG_TEST_DEVICE", "tpu"))
     tp_size: int = 1
     dtype: str = "bfloat16"
-    download_dir: str = "/dev/shm"
+    download_dir: str = field(
+        default_factory=lambda: os.getenv("SGLANG_TEST_DOWNLOAD_DIR", tempfile.gettempdir())
+    )
     random_seed: int = 3
     mem_fraction_static: float = 0.4
     max_running_requests: int = 16
@@ -77,6 +98,8 @@ class ScoreTestConfig:
     precompile_bs_paddings: list[int] = field(default_factory=lambda: [16])
     precompile_token_paddings: list[int] = field(default_factory=lambda: [1024])
     page_size: int = 64
+    enable_single_process: bool = True
+    log_level: str = "debug"
 
 
 # =============================================================================
@@ -122,15 +145,18 @@ def build_engine(config: ScoreTestConfig | None = None) -> Engine:
         precompile_token_paddings=config.precompile_token_paddings,
         page_size=config.page_size,
         log_requests=False,
+        log_level=config.log_level,
+        enable_single_process=config.enable_single_process,
         enable_deterministic_sampling=True,
     )
 
 
-def get_tokenizer(model_name: str | None = None):
+def get_tokenizer(model_name: str | ScoreTestConfig | None = None):
     """Load tokenizer for Score API testing.
 
     Args:
-        model_name: HuggingFace model path. Uses default if not provided.
+        model_name: HuggingFace model path or ScoreTestConfig. Uses the
+            SGLANG_TEST_MODEL override when not provided.
 
     Returns:
         AutoTokenizer instance.
@@ -139,8 +165,10 @@ def get_tokenizer(model_name: str | None = None):
         tokenizer = get_tokenizer()
         token_ids = tokenizer.encode(" yes", add_special_tokens=False)
     """
+    if isinstance(model_name, ScoreTestConfig):
+        model_name = model_name.model_name
     if model_name is None:
-        model_name = DEFAULT_SMALL_MODEL_NAME_FOR_TEST
+        model_name = os.getenv("SGLANG_TEST_MODEL", DEFAULT_SMALL_MODEL_NAME_FOR_TEST)
 
     return AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
@@ -175,7 +203,7 @@ def get_single_token_id(tokenizer, text: str) -> int:
     token_ids = tokenizer.encode(text, add_special_tokens=False)
     if len(token_ids) != 1:
         raise ValueError(
-            f"Text '{text}' tokenizes to {len(token_ids)} tokens " f"(expected 1): {token_ids}"
+            f"Text '{text}' tokenizes to {len(token_ids)} tokens (expected 1): {token_ids}"
         )
     return token_ids[0]
 
@@ -295,19 +323,22 @@ def assert_scores_valid(
                 else:
                     assert score >= 0.0, f"Score[{i}][{j}] = {score} is negative (expected >= 0)"
                     assert score <= 1.0, f"Score[{i}][{j}] = {score} exceeds 1 (expected <= 1)"
-            # For logprobs (apply_softmax=False), values are typically negative
-            # but we don't enforce this as -inf is valid for impossible tokens
+            # Raw logprob mode values are typically negative; this helper only
+            # requires them to be finite.
 
         if apply_softmax:
             # Check probabilities sum to 1.0
             total = sum(score_list)
             if test_case:
                 test_case.assertAlmostEqual(
-                    total, 1.0, places=6, msg=f"Item {i}: scores sum to {total}, expected 1.0"
+                    total,
+                    1.0,
+                    delta=tolerance,
+                    msg=f"Item {i}: scores sum to {total}, expected 1.0",
                 )
             else:
                 assert (
-                    abs(total - 1.0) < tolerance
+                    abs(total - 1.0) <= tolerance
                 ), f"Item {i}: scores sum to {total}, expected 1.0"
 
 
@@ -550,16 +581,17 @@ class ScoreAPITestCase(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         """Initialize shared engine and tokenizer."""
-        cls.config = ScoreTestConfig()
+        if cls.config is None:
+            cls.config = ScoreTestConfig()
         cls.engine = build_engine(cls.config)
         cls.tokenizer = get_tokenizer(cls.config.model_name)
 
     @classmethod
     def tearDownClass(cls):
         """Clean up resources."""
-        if cls.engine is not None:
-            cls.engine.shutdown()
-        jax.clear_caches()
+        engine = getattr(cls, "engine", None)
+        if engine is not None:
+            engine.shutdown()
 
     def get_token_id(self, text: str) -> int:
         """Get single token ID for text. Convenience wrapper."""

@@ -11,9 +11,11 @@ Usage:
 """
 
 import unittest
+import tempfile
 
 import pytest
 
+import sgl_jax.test.score_test_utils as score_utils
 from sgl_jax.test.score_test_utils import (
     ScoreTestConfig,
     assert_scores_match,
@@ -22,20 +24,37 @@ from sgl_jax.test.score_test_utils import (
     generate_test_items,
     get_label_token_ids,
     get_single_token_id,
+    get_tokenizer,
+    should_run_hf_reference,
 )
 
 
 class TestScoreTestConfig:
     """Tests for ScoreTestConfig dataclass."""
 
-    def test_default_values(self):
+    def test_default_values(self, monkeypatch):
         """Test that default values are sensible."""
+        monkeypatch.delenv("SGLANG_TEST_DEVICE", raising=False)
+        monkeypatch.delenv("SGLANG_TEST_DOWNLOAD_DIR", raising=False)
         config = ScoreTestConfig()
         assert config.device == "tpu"
         assert config.tp_size == 1
         assert config.dtype == "bfloat16"
+        assert config.download_dir == tempfile.gettempdir()
         assert config.tolerance == 0.01
         assert isinstance(config.precompile_bs_paddings, list)
+
+    def test_environment_defaults(self, monkeypatch):
+        """Test model, device, and download directory environment defaults."""
+        monkeypatch.setenv("SGLANG_TEST_MODEL", "env/model")
+        monkeypatch.setenv("SGLANG_TEST_DEVICE", "cpu")
+        monkeypatch.setenv("SGLANG_TEST_DOWNLOAD_DIR", "/tmp/score-tests")
+
+        config = ScoreTestConfig()
+
+        assert config.model_name == "env/model"
+        assert config.device == "cpu"
+        assert config.download_dir == "/tmp/score-tests"
 
     def test_custom_values(self):
         """Test that custom values can be set."""
@@ -51,21 +70,51 @@ class TestScoreTestConfig:
         assert config.tolerance == 0.05
 
 
+class _FixedTokenizer:
+    def __init__(self, token_ids_by_text):
+        self.token_ids_by_text = token_ids_by_text
+
+    def encode(self, text, add_special_tokens=False):
+        return list(self.token_ids_by_text[text])
+
+
+class TestGetTokenizer:
+    """Tests for get_tokenizer factory."""
+
+    def test_uses_env_model_when_model_omitted(self, monkeypatch):
+        calls = []
+
+        def fake_from_pretrained(model_name, trust_remote_code):
+            calls.append((model_name, trust_remote_code))
+            return object()
+
+        monkeypatch.setenv("SGLANG_TEST_MODEL", "env/model")
+        monkeypatch.setattr(score_utils.AutoTokenizer, "from_pretrained", fake_from_pretrained)
+
+        get_tokenizer()
+
+        assert calls == [("env/model", True)]
+
+    def test_accepts_config(self, monkeypatch):
+        calls = []
+
+        def fake_from_pretrained(model_name, trust_remote_code):
+            calls.append((model_name, trust_remote_code))
+            return object()
+
+        monkeypatch.setattr(score_utils.AutoTokenizer, "from_pretrained", fake_from_pretrained)
+
+        get_tokenizer(ScoreTestConfig(model_name="config/model"))
+
+        assert calls == [("config/model", True)]
+
+
 class TestGetSingleTokenId:
     """Tests for get_single_token_id function."""
 
     def test_raises_on_multi_token(self):
         """Test that multi-token text raises ValueError."""
-
-        # Create a mock tokenizer
-        class MockTokenizer:
-            def encode(self, text, add_special_tokens=False):
-                # "hello world" would tokenize to multiple tokens
-                if " " in text and len(text) > 5:
-                    return [1, 2, 3]  # Multiple tokens
-                return [1]  # Single token
-
-        tokenizer = MockTokenizer()
+        tokenizer = _FixedTokenizer({"hello world": [1, 2, 3]})
 
         with pytest.raises(ValueError) as exc_info:
             get_single_token_id(tokenizer, "hello world")
@@ -73,12 +122,7 @@ class TestGetSingleTokenId:
 
     def test_raises_on_empty(self):
         """Test that empty tokenization raises ValueError."""
-
-        class MockTokenizer:
-            def encode(self, text, add_special_tokens=False):
-                return []  # Empty
-
-        tokenizer = MockTokenizer()
+        tokenizer = _FixedTokenizer({"": []})
 
         with pytest.raises(ValueError) as exc_info:
             get_single_token_id(tokenizer, "")
@@ -86,12 +130,7 @@ class TestGetSingleTokenId:
 
     def test_returns_single_token(self):
         """Test that single-token text returns the token ID."""
-
-        class MockTokenizer:
-            def encode(self, text, add_special_tokens=False):
-                return [42]
-
-        tokenizer = MockTokenizer()
+        tokenizer = _FixedTokenizer({" yes": [42]})
         result = get_single_token_id(tokenizer, " yes")
         assert result == 42
 
@@ -101,25 +140,13 @@ class TestGetLabelTokenIds:
 
     def test_multiple_tokens(self):
         """Test getting IDs for multiple tokens."""
-
-        class MockTokenizer:
-            def encode(self, text, add_special_tokens=False):
-                return [ord(text.strip()[0])]  # Return ASCII of first char
-
-        tokenizer = MockTokenizer()
+        tokenizer = _FixedTokenizer({" a": [97], " b": [98], " c": [99]})
         result = get_label_token_ids(tokenizer, [" a", " b", " c"])
         assert result == [ord("a"), ord("b"), ord("c")]
 
     def test_raises_on_any_multi_token(self):
         """Test that any multi-token text raises ValueError."""
-
-        class MockTokenizer:
-            def encode(self, text, add_special_tokens=False):
-                if text == " multi":
-                    return [1, 2]  # Multi-token
-                return [1]
-
-        tokenizer = MockTokenizer()
+        tokenizer = _FixedTokenizer({" yes": [1], " multi": [1, 2], " no": [2]})
 
         with pytest.raises(ValueError):
             get_label_token_ids(tokenizer, [" yes", " multi", " no"])
@@ -220,6 +247,30 @@ class TestAssertScoresValid:
         with pytest.raises(AssertionError):
             assert_scores_valid(scores, apply_softmax=False)
 
+    def test_logprobs_reject_negative_inf(self):
+        """Test that -inf is rejected for logprobs."""
+        scores = [[-1.0, float("-inf"), -2.0]]
+        with pytest.raises(AssertionError):
+            assert_scores_valid(scores, apply_softmax=False)
+
+    def test_tolerance_applies_with_test_case(self):
+        """Test unittest assertions respect the tolerance argument."""
+        tc = unittest.TestCase()
+
+        assert_scores_valid(
+            [[0.5002, 0.4999]],
+            apply_softmax=True,
+            test_case=tc,
+            tolerance=1e-3,
+        )
+        with pytest.raises(AssertionError):
+            assert_scores_valid(
+                [[0.5002, 0.4999]],
+                apply_softmax=True,
+                test_case=tc,
+                tolerance=1e-6,
+            )
+
 
 class TestAssertScoresMatch:
     """Tests for assert_scores_match function."""
@@ -296,3 +347,19 @@ class TestGenerateTestItems:
         """Test generating zero items."""
         items = generate_test_items(0)
         assert items == []
+
+    def test_one_item(self):
+        """Test generating one item."""
+        items = generate_test_items(1)
+        assert items == [" item0"]
+
+
+class TestSkipHelpers:
+    """Tests for skip helper predicates."""
+
+    def test_should_run_hf_reference(self, monkeypatch):
+        monkeypatch.delenv("SGLANG_JAX_RUN_HF_REFERENCE", raising=False)
+        assert should_run_hf_reference() is False
+
+        monkeypatch.setenv("SGLANG_JAX_RUN_HF_REFERENCE", "1")
+        assert should_run_hf_reference() is True
