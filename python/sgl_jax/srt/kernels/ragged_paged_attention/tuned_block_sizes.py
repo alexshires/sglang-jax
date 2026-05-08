@@ -2,9 +2,7 @@
 
 import logging
 import os
-import threading
 
-import jax
 import jax.numpy as jnp
 
 from sgl_jax.srt.kernels.ragged_paged_attention.util import get_tpu_version
@@ -12,8 +10,6 @@ from sgl_jax.srt.utils.common_utils import next_power_of_2
 from sgl_jax.srt.utils.jax_utils import get_device_name
 
 logger = logging.getLogger(__name__)
-_LOGICAL_DEVICE_COUNT_OVERRIDE = threading.local()
-_LOGICAL_DEVICE_COUNT_CACHE: int | None = None
 _LOGGED_RPA_POLICY_KEYS: set[tuple[object, ...]] = set()
 _KERNEL_V11_ENV = "SGLANG_RPA_KERNEL_V11"
 # Schema: (q_dtype, kv_dtype, q_heads, kv_heads, head_dim, page_size).
@@ -25,30 +21,6 @@ _KERNEL_V11_BKV_SMALL_ENV = "SGLANG_RPA_KERNEL_V11_BKV_SMALL"
 _KERNEL_V11_BQ_SMALL_ENV = "SGLANG_RPA_KERNEL_V11_BQ_SMALL"
 _KERNEL_V11_BKV_LARGE_ENV = "SGLANG_RPA_KERNEL_V11_BKV_LARGE"
 _KERNEL_V11_BQ_LARGE_ENV = "SGLANG_RPA_KERNEL_V11_BQ_LARGE"
-_V6E8_PAGE64_REPLICA_ENV = "SGLANG_RPA_V6E8_PAGE64_REPLICA_OVERRIDE"
-
-
-def set_logical_device_count_override(logical_device_count: int | None) -> None:
-    """Set a thread-local device-count override for unit tests."""
-    if logical_device_count is None:
-        if hasattr(_LOGICAL_DEVICE_COUNT_OVERRIDE, "value"):
-            delattr(_LOGICAL_DEVICE_COUNT_OVERRIDE, "value")
-        return
-    _LOGICAL_DEVICE_COUNT_OVERRIDE.value = int(logical_device_count)
-
-
-def get_logical_device_count() -> int:
-    global _LOGICAL_DEVICE_COUNT_CACHE
-
-    override = getattr(_LOGICAL_DEVICE_COUNT_OVERRIDE, "value", None)
-    if override is not None:
-        return int(override)
-    env_value = os.getenv("SGLANG_LOGICAL_DEVICE_COUNT")
-    if env_value:
-        return int(env_value)
-    if _LOGICAL_DEVICE_COUNT_CACHE is None:
-        _LOGICAL_DEVICE_COUNT_CACHE = len(jax.devices())
-    return _LOGICAL_DEVICE_COUNT_CACHE
 
 
 def _log_rpa_policy_once(
@@ -1562,13 +1534,6 @@ def get_tuned_block_sizes(
     )
 
     device_name = keys[0]
-    try:
-        logical_device_count = get_logical_device_count()
-        topology_name = get_device_name(num_devices=logical_device_count)
-    except Exception:
-        logger.debug("Failed to derive RPA topology name.", exc_info=True)
-        topology_name = ""
-
     kernel_v11_enabled = os.getenv(_KERNEL_V11_ENV, "0") == "1"
     if (
         kernel_v11_enabled
@@ -1622,32 +1587,6 @@ def get_tuned_block_sizes(
             small_bq,
             large_bkv,
             large_bq,
-            bkv_p,
-            bq,
-        )
-        return (min(pages_per_seq, bkv_p), min(max_num_tokens, bq))
-
-    if (
-        os.getenv(_V6E8_PAGE64_REPLICA_ENV, "0") == "1"
-        and topology_name == "TPU v6e-8"
-        and device_name == "TPU v6e"
-        and page_size == 64
-        and head_dim == 128
-    ):
-        # Opt-in because this branch affects every matching RPA caller on v6e-8,
-        # not only score-from-cache requests.
-        token_bucket = next_power_of_2(max_num_tokens)
-        if token_bucket <= 32:
-            bkv_p, bq = (32, 1)
-        elif token_bucket <= 4096:
-            bkv_p, bq = (32, 96)
-        else:
-            bkv_p, bq = (32, 128)
-        _log_rpa_policy_once(
-            ("v6e8-page64-replica", device_name, token_bucket),
-            logging.INFO,
-            "Using TPU v6e-8 replica-lane page64 override: token_bucket=%s, selected=(%s,%s).",
-            token_bucket,
             bkv_p,
             bq,
         )

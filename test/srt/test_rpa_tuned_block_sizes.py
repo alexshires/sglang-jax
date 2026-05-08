@@ -6,26 +6,15 @@ from sgl_jax.srt.kernels.ragged_paged_attention import tuned_block_sizes as tbs
 
 @pytest.fixture(autouse=True)
 def reset_rpa_tuning_state(monkeypatch):
-    tbs.set_logical_device_count_override(None)
     tbs._LOGGED_RPA_POLICY_KEYS.clear()
-    monkeypatch.delenv("SGLANG_LOGICAL_DEVICE_COUNT", raising=False)
     monkeypatch.delenv("SGLANG_RPA_KERNEL_V11", raising=False)
-    monkeypatch.delenv("SGLANG_RPA_V6E8_PAGE64_REPLICA_OVERRIDE", raising=False)
     yield
-    tbs.set_logical_device_count_override(None)
     tbs._LOGGED_RPA_POLICY_KEYS.clear()
 
 
 def _install_fake_v6e(monkeypatch):
     monkeypatch.setattr(tbs, "get_tpu_version", lambda: 6)
-
-    def fake_get_device_name(num_devices=None):
-        if num_devices is not None:
-            return "TPU v6e-8" if int(num_devices) == 8 else "TPU v6e"
-        return "TPU v6e"
-
-    monkeypatch.setattr(tbs, "get_device_name", fake_get_device_name)
-    tbs.set_logical_device_count_override(8)
+    monkeypatch.setattr(tbs, "get_device_name", lambda: "TPU v6e")
 
 
 def _get_tuned(*, page_size=64, max_num_tokens=2048, pages_per_seq=99):
@@ -77,24 +66,3 @@ def test_missing_tuned_candidates_falls_back_to_default(monkeypatch):
     monkeypatch.setattr(tbs, "TUNED_BLOCK_SIZES", {"TPU v6e": {}})
 
     assert _get_tuned(page_size=64, max_num_tokens=128) == (16, 32)
-
-
-def test_v6e8_page64_replica_override_is_opt_in(monkeypatch):
-    _install_fake_v6e(monkeypatch)
-    monkeypatch.setattr(tbs, "TUNED_BLOCK_SIZES", {"TPU v6e": {}})
-
-    assert _get_tuned(page_size=64, max_num_tokens=128) == (16, 32)
-
-    monkeypatch.setenv("SGLANG_RPA_V6E8_PAGE64_REPLICA_OVERRIDE", "1")
-    assert _get_tuned(page_size=64, max_num_tokens=128) == (32, 96)
-
-
-def test_logical_device_count_override_takes_precedence_over_env(monkeypatch):
-    monkeypatch.setenv("SGLANG_LOGICAL_DEVICE_COUNT", "4")
-    assert tbs.get_logical_device_count() == 4
-
-    tbs.set_logical_device_count_override(8)
-    assert tbs.get_logical_device_count() == 8
-
-    tbs.set_logical_device_count_override(None)
-    assert tbs.get_logical_device_count() == 4
