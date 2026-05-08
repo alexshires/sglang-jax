@@ -127,6 +127,15 @@ class TestValidateScoreRequest:
             )
         assert exc_info.value.code == "invalid_query_type"
 
+    def test_query_dict_rejected(self):
+        with pytest.raises(ValidationError) as exc_info:
+            validate_score_request(
+                query={"text": "test"},
+                items=["test"],
+                label_token_ids=[1, 2],
+            )
+        assert exc_info.value.code == "invalid_query_type"
+
     def test_query_list_with_non_integers(self):
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
@@ -152,6 +161,15 @@ class TestValidateScoreRequest:
             validate_score_request(
                 query="test",
                 items="not a list",
+                label_token_ids=[1, 2],
+            )
+        assert exc_info.value.code == "invalid_items_type"
+
+    def test_items_tuple_rejected(self):
+        with pytest.raises(ValidationError) as exc_info:
+            validate_score_request(
+                query="test",
+                items=("item1", "item2"),
                 label_token_ids=[1, 2],
             )
         assert exc_info.value.code == "invalid_items_type"
@@ -229,6 +247,15 @@ class TestValidateScoreRequest:
             )
         assert exc_info.value.code == "invalid_label_token_ids_type"
 
+    def test_label_token_ids_tuple_rejected(self):
+        with pytest.raises(ValidationError) as exc_info:
+            validate_score_request(
+                query="test",
+                items=["item"],
+                label_token_ids=(1, 2),
+            )
+        assert exc_info.value.code == "invalid_label_token_ids_type"
+
     def test_label_token_ids_empty(self):
         with pytest.raises(ValidationError) as exc_info:
             validate_score_request(
@@ -263,6 +290,25 @@ class TestValidateScoreRequest:
                 query="test",
                 items=["item"],
                 label_token_ids=[1, 50000, 3],
+                vocab_size=32000,
+            )
+        assert exc_info.value.code == "token_id_exceeds_vocab"
+        assert exc_info.value.get_http_status() == 422
+
+    def test_label_token_ids_at_vocab_boundary_valid(self):
+        validate_score_request(
+            query="test",
+            items=["item"],
+            label_token_ids=[0, 31999],
+            vocab_size=32000,
+        )
+
+    def test_label_token_ids_equal_vocab_size_rejected(self):
+        with pytest.raises(ValidationError) as exc_info:
+            validate_score_request(
+                query="test",
+                items=["item"],
+                label_token_ids=[32000],
                 vocab_size=32000,
             )
         assert exc_info.value.code == "token_id_exceeds_vocab"
@@ -338,6 +384,22 @@ class TestValidateScoreRequest:
             query="test",
             items=["item"],
             label_token_ids=[100, 200, 300],
+            vocab_size=32000,
+        )
+
+    def test_valid_duplicate_label_token_ids(self):
+        validate_score_request(
+            query="test",
+            items=["item"],
+            label_token_ids=[1, 1, 2],
+            vocab_size=32000,
+        )
+
+    def test_valid_large_item_list(self):
+        validate_score_request(
+            query="test",
+            items=[f"item-{idx}" for idx in range(128)],
+            label_token_ids=[1, 2],
             vocab_size=32000,
         )
 
