@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +34,11 @@ class _DummyScoreCacheManager(TokenizerScoreCacheMixin):
         self.generated_requests = []
         self.fastpath_calls = []
         self.released_handles = []
+        self.release_started = None
+        self.release_continue = None
+        self.release_result = True
+        self.release_exception = None
+        self.asyncio_tasks = set()
         self.score_fastpath_attempted = 0
         self.score_fastpath_succeeded = 0
         self.score_fastpath_fallback = 0
@@ -80,8 +86,21 @@ class _DummyScoreCacheManager(TokenizerScoreCacheMixin):
         )
 
     async def _release_cache(self, cache_handle):
+        if self.release_exception is not None:
+            raise self.release_exception
+        if self.release_started is not None:
+            self.release_started.set()
+        if self.release_continue is not None:
+            await self.release_continue.wait()
         self.released_handles.append(cache_handle)
-        return True
+        return self.release_result
+
+
+async def _drain_asyncio_tasks(manager):
+    tasks = tuple(manager.asyncio_tasks)
+    if tasks:
+        await asyncio.gather(*tasks)
+        await asyncio.sleep(0)
 
 
 def test_prefill_scoring_cache_builds_prefill_only_request():
@@ -284,13 +303,16 @@ def test_resolve_score_from_cache_v2_items_per_step_uses_token_budget():
 def test_score_prefill_extend_updates_fastpath_success_counters():
     manager = _DummyScoreCacheManager()
 
-    scores = asyncio.run(
-        manager.score_prefill_extend(
+    async def run_test():
+        scores = await manager.score_prefill_extend(
             query_tokens=[1, 2],
             item_tokens_list=[[3], [4]],
             label_token_ids=[5, 6],
         )
-    )
+        await _drain_asyncio_tasks(manager)
+        return scores
+
+    scores = asyncio.run(run_test())
 
     assert scores == [[0.2, 0.8], [0.3, 0.7]]
     assert manager.score_fastpath_attempted == 1
@@ -308,13 +330,16 @@ def test_score_prefill_extend_records_fastpath_fallback_counter():
         error_msg="forced fallback",
     )
 
-    scores = asyncio.run(
-        manager.score_prefill_extend(
+    async def run_test():
+        scores = await manager.score_prefill_extend(
             query_tokens=[1, 2],
             item_tokens_list=[[3], [4], [5]],
             label_token_ids=[6, 7],
         )
-    )
+        await _drain_asyncio_tasks(manager)
+        return scores
+
+    scores = asyncio.run(run_test())
 
     assert scores == [[0.4, 0.6], [0.4, 0.6], [0.4, 0.6]]
     assert manager.score_fastpath_attempted == 1
@@ -323,3 +348,61 @@ def test_score_prefill_extend_records_fastpath_fallback_counter():
     assert manager.score_fastpath_fallback_reasons == {"test_fallback": 1}
     assert len(manager.batched_extend_calls) == 2
     assert len(manager.released_handles) == 1
+
+
+def test_score_prefill_extend_returns_before_background_release_completes():
+    async def run_test():
+        manager = _DummyScoreCacheManager()
+        manager.release_started = asyncio.Event()
+        manager.release_continue = asyncio.Event()
+
+        scores = await manager.score_prefill_extend(
+            query_tokens=[1, 2],
+            item_tokens_list=[[3], [4]],
+            label_token_ids=[5, 6],
+        )
+
+        assert scores == [[0.2, 0.8], [0.3, 0.7]]
+        assert len(manager.asyncio_tasks) == 1
+        await asyncio.wait_for(manager.release_started.wait(), timeout=1.0)
+        assert manager.released_handles == []
+
+        manager.release_continue.set()
+        await _drain_asyncio_tasks(manager)
+        assert manager.released_handles == [manager.generated_requests[0].rid]
+        assert manager.asyncio_tasks == set()
+
+    asyncio.run(run_test())
+
+
+def test_release_cache_background_logs_failed_release_and_cleans_task(caplog):
+    async def run_test():
+        manager = _DummyScoreCacheManager()
+        manager.release_result = False
+
+        with caplog.at_level(logging.WARNING):
+            manager._release_cache_background("cache-fail")
+            assert len(manager.asyncio_tasks) == 1
+            await _drain_asyncio_tasks(manager)
+
+        assert manager.released_handles == ["cache-fail"]
+        assert manager.asyncio_tasks == set()
+        assert "was not cleanly released" in caplog.text
+
+    asyncio.run(run_test())
+
+
+def test_release_cache_background_logs_unexpected_task_exception(caplog):
+    async def run_test():
+        manager = _DummyScoreCacheManager()
+        manager.release_exception = RuntimeError("boom")
+
+        with caplog.at_level(logging.ERROR):
+            manager._release_cache_background("cache-error")
+            await _drain_asyncio_tasks(manager)
+
+        assert manager.released_handles == []
+        assert manager.asyncio_tasks == set()
+        assert "Unexpected failure in background prefill+extend cache release task" in caplog.text
+
+    asyncio.run(run_test())

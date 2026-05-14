@@ -341,6 +341,26 @@ class TokenizerScoreCacheMixin:
             },
         )
 
+    def _release_cache_background(self, cache_handle: str) -> None:
+        async def _release_and_log() -> None:
+            try:
+                released = await self._release_cache(cache_handle)
+                if not released:
+                    logger.warning(
+                        "Prefill+extend cache handle=%s was not cleanly released.",
+                        cache_handle,
+                    )
+            except Exception:
+                logger.exception(
+                    "Unexpected failure in background prefill+extend cache release "
+                    "task for handle=%s.",
+                    cache_handle,
+                )
+
+        task = asyncio.create_task(_release_and_log())
+        self.asyncio_tasks.add(task)
+        task.add_done_callback(self.asyncio_tasks.discard)
+
     async def _release_cache(self, cache_handle: str):
         """Release the cached query."""
         self.auto_create_handle_loop()
@@ -848,8 +868,4 @@ class TokenizerScoreCacheMixin:
             return all_scores
         finally:
             # Step 3: Release cache
-            released = await self._release_cache(cache_handle)
-            if not released:
-                logger.warning(
-                    "Prefill+extend cache handle=%s was not cleanly released.", cache_handle
-                )
+            self._release_cache_background(cache_handle)
