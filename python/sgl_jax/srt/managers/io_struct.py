@@ -169,7 +169,7 @@ class TokenizedGenerateReqInput:
     dp_rank: int | None = None
     # Keep prefetched prefix KV cache for scoring.
     cache_for_scoring: bool = False
-    # Request ID handle whose cached prefix should be extended.
+    # Scoring cache handle whose cached prefix should be extended; None means no cached prefix.
     extend_from_cache: str | None = None
 
 
@@ -353,7 +353,7 @@ class GenerateReqInput:
     return_routed_experts: list[bool] | bool | None = None
     # Keep prefetched prefix KV cache for scoring.
     cache_for_scoring: list[bool] | bool | None = None
-    # Request ID handle whose cached prefix should be extended.
+    # Scoring cache handle whose cached prefix should be extended; None means no cached prefix.
     extend_from_cache: list[str | None] | str | None = None
 
     def contains_mm_input(self) -> bool:
