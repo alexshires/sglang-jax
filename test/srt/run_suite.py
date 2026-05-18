@@ -470,6 +470,7 @@ suites = {
             extra_deps=["torch"],
         ),
         TestFile("python/sgl_jax/test/layers/test_linear_attention.py", 1.5, runner="pytest"),
+        TestFile("test/srt/test_server_args_multi_item.py", 0.1, runner="pytest"),
         TestFile("test/srt/lora/test_bgmv_backend.py", 4),
         TestFile("test/srt/lora/test_align_lora_accuracy.py", 3.5),
     ],

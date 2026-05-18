@@ -161,6 +161,16 @@ class ServerArgs:
     # For sampling
     use_sort_for_toppk_minp: bool = False
 
+    # Scoring configuration
+    # Maximum number of items allowed in a single multi-item scoring request.
+    max_multi_item_count: int = 512
+    # Prefill+extend scoring path.
+    multi_item_enable_prefill_extend: bool = False
+    multi_item_extend_batch_size: int = 32
+    multi_item_prefill_extend_cache_timeout: float = 60.0
+    # Allow radix cache to keep score-prefill prefixes alive across requests.
+    enable_scoring_cache: bool = False
+
     # LoRA
     enable_lora: bool | None = None
     max_lora_rank: int | None = None
@@ -1018,6 +1028,38 @@ class ServerArgs:
         )
 
         parser.add_argument(
+            "--max-multi-item-count",
+            type=int,
+            default=ServerArgs.max_multi_item_count,
+            help="Maximum number of items allowed in a single multi-item scoring request.",
+        )
+        parser.add_argument(
+            "--multi-item-enable-prefill-extend",
+            action="store_true",
+            help="Enable prefill+extend scoring strategy for multi-item scoring.",
+        )
+        parser.add_argument(
+            "--multi-item-extend-batch-size",
+            type=int,
+            default=ServerArgs.multi_item_extend_batch_size,
+            help="Batch size for extend requests in prefill+extend scoring.",
+        )
+        parser.add_argument(
+            "--multi-item-prefill-extend-cache-timeout",
+            type=float,
+            default=ServerArgs.multi_item_prefill_extend_cache_timeout,
+            help=(
+                "TTL in seconds for prefill+extend cached query handles. "
+                "Set 0 to disable automatic expiration."
+            ),
+        )
+        parser.add_argument(
+            "--enable-scoring-cache",
+            action="store_true",
+            help="Enable radix cache for score-prefill prefixes.",
+        )
+
+        parser.add_argument(
             "--multimodal",
             action="store_true",
             help="Enable multimodal HTTP server.",
@@ -1161,6 +1203,19 @@ class ServerArgs:
             raise ValueError(
                 "Speculative decoding does not support overlap scheduler. "
                 "Please pass --disable-overlap-schedule when using --speculative-algorithm."
+            )
+
+        # Check multi-item scoring constraints
+        assert self.max_multi_item_count > 0, "--max-multi-item-count must be positive"
+        assert self.multi_item_extend_batch_size > 0, (
+            "--multi-item-extend-batch-size must be positive"
+        )
+        assert self.multi_item_prefill_extend_cache_timeout >= 0, (
+            "--multi-item-prefill-extend-cache-timeout must be non-negative"
+        )
+        if self.multi_item_enable_prefill_extend:
+            assert self.enable_scoring_cache, (
+                "prefill+extend scoring requires scoring cache. Please pass --enable-scoring-cache."
             )
 
     def check_lora_server_args(self):
