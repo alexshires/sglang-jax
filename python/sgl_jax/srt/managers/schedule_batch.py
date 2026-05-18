@@ -177,7 +177,9 @@ class Req:
         multimodal_embedding: list[list[float]] | None = None,
         deepstack_visual_embedding: list[list[float]] | None = None,
         deepstack_visual_pos_mask: list[int] | None = None,
+        # Keep this prefill-only request's prefix KV/radix-cache state as a scoring handle.
         cache_for_scoring: bool = False,
+        # Scoring cache handle whose cached prefix should be extended; None means no cached prefix.
         extend_from_cache: str | None = None,
     ):
         # Input and output info
