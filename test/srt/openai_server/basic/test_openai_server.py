@@ -371,5 +371,136 @@ class TestOpenAIServer(CustomTestCase):
             client.models.retrieve("non-existent-model")
 
 
+class TestOpenAIV1Score(CustomTestCase):
+    """Test the /v1/score HTTP endpoint."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = DEFAULT_MODEL_NAME_FOR_TEST
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.api_key = "sk-123456"
+        cls.process = popen_launch_server(
+            cls.model,
+            cls.base_url,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            api_key=cls.api_key,
+            other_args=[
+                "--trust-remote-code",
+                "--skip-server-warmup",
+                "--random-seed",
+                "3",
+                "--mem-fraction-static",
+                "0.8",
+                "--chunked-prefill-size",
+                "2048",
+                "--download-dir",
+                "/dev/shm",
+                "--dtype",
+                "bfloat16",
+                "--precompile-bs-paddings",
+                "16",
+                "--precompile-token-paddings",
+                "16384",
+                "--max-running-requests",
+                "16",
+                "--page-size",
+                "64",
+            ],
+            env={
+                "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
+            },
+        )
+        cls.score_url = cls.base_url + "/v1/score"
+        cls.tokenizer = get_tokenizer(DEFAULT_MODEL_NAME_FOR_TEST, trust_remote_code=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+    def run_score(self, query, items, label_token_ids, apply_softmax=False, item_first=False):
+        """Send a scoring request to the HTTP endpoint."""
+        response = requests.post(
+            self.score_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "query": query,
+                "items": items,
+                "label_token_ids": label_token_ids,
+                "apply_softmax": apply_softmax,
+                "item_first": item_first,
+            },
+        )
+        return response
+
+    def test_score_text_input(self):
+        """Test scoring with text input via HTTP endpoint."""
+        query = "The capital of France is"
+        items = ["Paris", "London", "Berlin"]
+
+        # Get valid token IDs from the tokenizer
+        label_token_ids = []
+        for item in items:
+            token_ids = self.tokenizer.encode(item, add_special_tokens=False)
+            if not token_ids:
+                self.fail(f"Failed to encode item: {item}")
+            label_token_ids.append(token_ids[0])
+
+        response = self.run_score(query, items, label_token_ids, apply_softmax=True)
+
+        # Verify HTTP status code
+        self.assertEqual(
+            response.status_code,
+            200,
+            f"Expected 200, got {response.status_code}. Response: {response.text}",
+        )
+
+        # Parse response
+        response_data = response.json()
+
+        # Handle error responses
+        if response_data.get("type") == "BadRequestError":
+            self.fail(f"Score request failed with error: {response_data['message']}")
+
+        # Verify response structure
+        self.assertIn("scores", response_data, "Response should have a 'scores' field")
+        self.assertIn("object", response_data, "Response should have an 'object' field")
+        self.assertEqual(
+            response_data["object"],
+            "scoring",
+            "Object field should be 'scoring'",
+        )
+
+        scores = response_data["scores"]
+        self.assertIsInstance(scores, list, "scores should be a list")
+        self.assertEqual(
+            len(scores),
+            len(items),
+            "Number of scores should match number of items",
+        )
+
+        # Each score should be a list of floats in the order of label_token_ids
+        for i, score_list in enumerate(scores):
+            self.assertIsInstance(score_list, list, f"Score {i} should be a list")
+            self.assertEqual(
+                len(score_list),
+                len(label_token_ids),
+                f"Score {i} length should match label_token_ids",
+            )
+            self.assertTrue(
+                all(isinstance(v, (int, float)) for v in score_list),
+                f"Score {i} values should be numeric",
+            )
+            self.assertAlmostEqual(
+                sum(score_list),
+                1.0,
+                places=6,
+                msg=f"Score {i} probabilities should sum to 1",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
